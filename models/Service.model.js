@@ -18,13 +18,13 @@ const serviceSchema = new mongoose.Schema({
   },
   minTime: {
     type: Number,
-    required: [true, 'Min time is required'],
-    min: [1, 'Min time must be at least 1 minute']
+    default: null,
+    min: [0, 'Min time must be non-negative']
   },
   maxTime: {
     type: Number,
-    required: [true, 'Max time is required'],
-    min: [1, 'Max time must be at least 1 minute']
+    default: null,
+    min: [0, 'Max time must be non-negative']
   },
   description: {
     type: String

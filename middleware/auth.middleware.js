@@ -30,8 +30,8 @@ export const authenticate = async (req, res, next) => {
       });
     }
 
-    // Check business status for car wash admins
-    if (user.role === 'CAR_WASH_ADMIN' && user.businessId) {
+    // Check business status for car wash admins and employees
+    if ((user.role === 'CAR_WASH_ADMIN' || user.role === 'EMPLOYEE') && user.businessId) {
       const business = await Business.findById(user.businessId);
       if (!business || business.status !== 'ACTIVE') {
         return res.status(403).json({

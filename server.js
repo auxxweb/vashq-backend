@@ -1,12 +1,11 @@
+// Load env first so CLOUDINARY_* etc. are available when routes load
+import 'dotenv/config';
+
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-// Load environment variables
-dotenv.config();
 
 // ES6 module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -21,7 +20,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || ['http://localhost:3000', 'http://localhost:5173', 'https://vashq.com'],
+  origin: process.env.FRONTEND_URL || ['http://localhost:3000', 'http://localhost:4173'],
   credentials: true
 }));
 app.use(express.json());

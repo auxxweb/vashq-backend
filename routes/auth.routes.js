@@ -99,16 +99,21 @@ router.post('/login', [
 
     const token = generateToken(user._id);
 
+    const userResponse = {
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      businessId: user.businessId?._id || user.businessId || null,
+      businessName: user.businessId?.businessName || null
+    };
+    if (user.role === 'EMPLOYEE') {
+      userResponse.name = user.name || '';
+      userResponse.employeeCode = user.employeeCode || '';
+    }
     res.json({
       success: true,
       token,
-      user: {
-        id: user._id,
-        email: user.email,
-        role: user.role,
-        businessId: user.businessId?._id || null,
-        businessName: user.businessId?.businessName || null
-      }
+      user: userResponse
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -239,22 +244,52 @@ router.get('/me', authenticate, async (req, res) => {
       .select('-password')
       .populate('businessId', 'businessName status');
 
-    res.json({
-      success: true,
-      user: {
-        id: user._id,
-        email: user.email,
-        role: user.role,
-        businessId: user.businessId?._id || null,
-        businessName: user.businessId?.businessName || null
-      }
-    });
+    const u = {
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      businessId: user.businessId?._id || null,
+      businessName: user.businessId?.businessName || null
+    };
+    if (user.role === 'EMPLOYEE') {
+      u.name = user.name || '';
+      u.employeeCode = user.employeeCode || '';
+      u.phone = user.phone || '';
+      u.address = user.address || '';
+    }
+    res.json({ success: true, user: u });
   } catch (error) {
     console.error('Get user error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/auth/me/password
+// @desc    Change own password (any authenticated user)
+// @access  Private
+router.put('/me/password', authenticate, [
+  body('currentPassword').notEmpty(),
+  body('newPassword').isLength({ min: 6 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    const valid = await user.comparePassword(req.body.currentPassword);
+    if (!valid) {
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    }
+    user.password = req.body.newPassword;
+    await user.save();
+    res.json({ success: true, message: 'Password updated successfully' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

@@ -17,7 +17,7 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['SUPER_ADMIN', 'CAR_WASH_ADMIN'],
+    enum: ['SUPER_ADMIN', 'CAR_WASH_ADMIN', 'EMPLOYEE'],
     required: true
   },
   status: {
@@ -30,12 +30,19 @@ const userSchema = new mongoose.Schema({
     ref: 'Business',
     default: null // null for SUPER_ADMIN
   },
+  // Employee profile fields (used when role is EMPLOYEE; optional for others)
+  name: { type: String, trim: true },
+  phone: { type: String, trim: true },
+  address: { type: String, trim: true },
+  employeeCode: { type: String, trim: true },
   lastLoginAt: {
     type: Date
   }
 }, {
   timestamps: true
 });
+
+userSchema.index({ businessId: 1, employeeCode: 1 }, { unique: true, sparse: true });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {

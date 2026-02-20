@@ -49,7 +49,8 @@ export const generateTokenNumber = async (businessId) => {
 };
 
 /**
- * Calculate estimated delivery time based on services
+ * Calculate estimated delivery time based on services (compound: sum of all service times).
+ * Uses maxTime when set, else minTime, else 60 min default per service.
  */
 export const calculateETA = (services) => {
   if (!services || services.length === 0) {
@@ -57,13 +58,14 @@ export const calculateETA = (services) => {
     eta.setMinutes(eta.getMinutes() + 60); // Default 1 hour
     return eta;
   }
-  
-  const totalMaxTime = services.reduce((sum, service) => {
-    return sum + (service.maxTime || 0);
+
+  const totalMinutes = services.reduce((sum, service) => {
+    const t = service.maxTime ?? service.minTime ?? 60;
+    return sum + (Number(t) || 0);
   }, 0);
-  
+
   const eta = new Date();
-  eta.setMinutes(eta.getMinutes() + totalMaxTime);
+  eta.setMinutes(eta.getMinutes() + totalMinutes);
   return eta;
 };
 
@@ -77,7 +79,7 @@ export const canAcceptNewJob = async (businessId) => {
     return { canAccept: false, reason: 'Business not found' };
   }
   
-  // Count active jobs (not completed, delivered, or cancelled)
+  // Count active jobs (not completed, ready to deliver, or cancelled)
   const activeJobsCount = await Job.countDocuments({
     businessId,
     status: { $nin: ['COMPLETED', 'DELIVERED', 'CANCELLED'] }
@@ -104,15 +106,13 @@ export const canAcceptNewJob = async (businessId) => {
  */
 export const getNextStatus = (currentStatus) => {
   const statusFlow = {
-    RECEIVED: 'IN_PROGRESS',
-    IN_PROGRESS: 'WASHING',
-    WASHING: 'DRYING',
-    DRYING: 'COMPLETED',
+    RECEIVED: 'WORK_STARTED',
+    WORK_STARTED: 'COMPLETED',
     COMPLETED: 'DELIVERED',
     DELIVERED: null,
     CANCELLED: null
   };
-  
+
   return statusFlow[currentStatus] || null;
 };
 
@@ -124,24 +124,22 @@ export const isValidStatusTransition = (currentStatus, newStatus) => {
   if (newStatus === 'CANCELLED') {
     return currentStatus !== 'DELIVERED' && currentStatus !== 'CANCELLED';
   }
-  
+
   // Can't go backwards (except to cancel)
   const statusOrder = [
     'RECEIVED',
-    'IN_PROGRESS',
-    'WASHING',
-    'DRYING',
+    'WORK_STARTED',
     'COMPLETED',
     'DELIVERED'
   ];
-  
+
   const currentIndex = statusOrder.indexOf(currentStatus);
   const newIndex = statusOrder.indexOf(newStatus);
-  
+
   if (currentIndex === -1 || newIndex === -1) {
     return false;
   }
-  
+
   // Allow moving forward or staying in same status
   return newIndex >= currentIndex;
 };

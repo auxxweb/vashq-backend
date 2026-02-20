@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 const jobStatusHistorySchema = new mongoose.Schema({
   status: {
     type: String,
-    enum: ['RECEIVED', 'IN_PROGRESS', 'WASHING', 'DRYING', 'COMPLETED', 'DELIVERED', 'CANCELLED'],
+    enum: ['RECEIVED', 'WORK_STARTED', 'COMPLETED', 'DELIVERED', 'CANCELLED'],
     required: true
   },
   notes: {
@@ -49,7 +49,7 @@ const jobSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['RECEIVED', 'IN_PROGRESS', 'WASHING', 'DRYING', 'COMPLETED', 'DELIVERED', 'CANCELLED'],
+    enum: ['RECEIVED', 'WORK_STARTED', 'COMPLETED', 'DELIVERED', 'CANCELLED'],
     default: 'RECEIVED'
   },
   totalPrice: {
@@ -72,6 +72,11 @@ const jobSchema = new mongoose.Schema({
   notes: {
     type: String
   },
+  assignedTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
   services: [jobServiceSchema],
   statusHistory: [jobStatusHistorySchema]
 }, {
@@ -80,6 +85,7 @@ const jobSchema = new mongoose.Schema({
 
 // Indexes
 jobSchema.index({ businessId: 1 });
+jobSchema.index({ assignedTo: 1 });
 jobSchema.index({ customerId: 1 });
 jobSchema.index({ carId: 1 });
 jobSchema.index({ status: 1 });
