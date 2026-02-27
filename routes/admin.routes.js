@@ -65,10 +65,11 @@ const requireBusiness = (req, res, next) => {
 
 router.use(requireBusiness);
 
-// Multer memory storage for image uploads (max 4 files, 5MB each)
+// Multer: max 4 files, 20MB each (client compresses large images; this is a safety limit)
+const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: MAX_FILE_SIZE },
   fileFilter: (req, file, cb) => {
     const allowed = /^image\//i.test(file.mimetype);
     if (allowed) cb(null, true);
@@ -78,8 +79,21 @@ const upload = multer({
 
 // @route   POST /api/admin/upload/images
 // @desc    Upload job images to Cloudinary (before or after). Send multipart form with field "images" (max 4).
-// @access  Private (Car Wash Admin)
-router.post('/upload/images', upload.array('images', 4), async (req, res) => {
+// @access  Private (Car Wash Admin, Employee)
+router.post('/upload/images', (req, res, next) => {
+  upload.array('images', 4)(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ success: false, message: 'Image too large. Maximum 20MB per file.' });
+      }
+      if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
+        return res.status(400).json({ success: false, message: err.message || 'Invalid upload.' });
+      }
+      return next(err);
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     if (!req.files?.length) {
       return res.status(400).json({ success: false, message: 'No images provided' });

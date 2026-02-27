@@ -28,6 +28,7 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Note: Image uploads use multipart (multer), max ~12MB per file × 4. If behind nginx/API Gateway, set body limit (e.g. nginx: client_max_body_size 50M;).
 
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
