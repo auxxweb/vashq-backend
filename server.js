@@ -18,9 +18,12 @@ import adminRoutes from './routes/admin.routes.js';
 
 const app = express();
 
-// Middleware
+// Middleware - allow FRONTEND_URL (string or comma-separated) or defaults
+const corsOrigin = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean)
+  : ['http://localhost:3000', 'http://localhost:4173', 'https://vashq.com'];
 app.use(cors({
-  origin: process.env.FRONTEND_URL || ['http://localhost:3000', 'http://localhost:4173','https://vashq.com'],
+  origin: corsOrigin.length === 1 ? corsOrigin[0] : corsOrigin,
   credentials: true
 }));
 app.use(express.json());
