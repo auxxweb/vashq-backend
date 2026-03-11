@@ -15,6 +15,7 @@ const __dirname = path.dirname(__filename);
 import authRoutes from './routes/auth.routes.js';
 import superAdminRoutes from './routes/superAdmin.routes.js';
 import adminRoutes from './routes/admin.routes.js';
+import publicRoutes from './routes/public.routes.js';
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/public', publicRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

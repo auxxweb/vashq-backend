@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import multer from 'multer';
 import { body, validationResult } from 'express-validator';
 import { authenticate, authorize } from '../middleware/auth.middleware.js';
@@ -22,6 +23,9 @@ import Tutorial from '../models/Tutorial.model.js';
 import SupportTicket from '../models/SupportTicket.model.js';
 import PlatformSettings from '../models/PlatformSettings.model.js';
 import User from '../models/User.model.js';
+import ExpenseType from '../models/ExpenseType.model.js';
+import Expense from '../models/Expense.model.js';
+import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
 
 const router = express.Router();
 
@@ -40,6 +44,7 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p === '/customers' ||
       p === '/services' ||
       p === '/settings' ||
+      p.startsWith('/invoices') ||
       p.startsWith('/cars');
     if (!allowed) {
       return res.status(403).json({ success: false, message: 'Access denied. Insufficient permissions.' });
@@ -98,7 +103,7 @@ router.post('/upload/images', (req, res, next) => {
     if (!req.files?.length) {
       return res.status(400).json({ success: false, message: 'No images provided' });
     }
-    const folder = req.body.folder === 'after' ? 'washq/jobs/after' : 'washq/jobs/before';
+    const folder = req.body.folder === 'after' ? 'washq/jobs/after' : req.body.folder === 'expenses' ? 'washq/expenses' : req.body.folder === 'payment' ? 'washq/payment' : 'washq/jobs/before';
     const urls = [];
     for (const file of req.files) {
       const { url } = await uploadBuffer(file.buffer, file.mimetype, folder);
@@ -111,6 +116,579 @@ router.post('/upload/images', (req, res, next) => {
       success: false,
       message: err.message || 'Image upload failed'
     });
+  }
+});
+
+// ==================== EXPENSE TYPES (Car Wash Admin only) ====================
+const expenseAdminOnly = (req, res, next) => {
+  if (req.user.role !== 'CAR_WASH_ADMIN') {
+    return res.status(403).json({ success: false, message: 'Access denied. Admin only.' });
+  }
+  next();
+};
+
+// GET /api/admin/expense-types
+router.get('/expense-types', expenseAdminOnly, async (req, res) => {
+  try {
+    const types = await ExpenseType.find({ businessId: req.businessId }).sort({ expenseName: 1 }).lean();
+    res.json({ success: true, expenseTypes: types });
+  } catch (error) {
+    console.error('List expense types error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/admin/expense-types
+router.post('/expense-types', expenseAdminOnly, [
+  body('expenseName').notEmpty().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const expenseType = await ExpenseType.create({
+      businessId: req.businessId,
+      expenseName: req.body.expenseName.trim()
+    });
+    res.status(201).json({ success: true, expenseType });
+  } catch (error) {
+    console.error('Create expense type error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PUT /api/admin/expense-types/:id
+router.put('/expense-types/:id', expenseAdminOnly, [
+  body('expenseName').optional().notEmpty().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const expenseType = await ExpenseType.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!expenseType) {
+      return res.status(404).json({ success: false, message: 'Expense type not found' });
+    }
+    if (req.body.expenseName != null) expenseType.expenseName = req.body.expenseName.trim();
+    await expenseType.save();
+    res.json({ success: true, expenseType });
+  } catch (error) {
+    console.error('Update expense type error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/expense-types/:id
+router.delete('/expense-types/:id', expenseAdminOnly, async (req, res) => {
+  try {
+    const expenseType = await ExpenseType.findOneAndDelete({ _id: req.params.id, businessId: req.businessId });
+    if (!expenseType) {
+      return res.status(404).json({ success: false, message: 'Expense type not found' });
+    }
+    res.json({ success: true, message: 'Expense type deleted' });
+  } catch (error) {
+    console.error('Delete expense type error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== EXPENSES (Car Wash Admin only) ====================
+
+// GET /api/admin/expenses?range=today|weekly|monthly|yearly|custom&from=&to=
+function parseExpenseDateRange(range, from, to) {
+  const now = new Date();
+  let start, end;
+  switch (range) {
+    case 'today':
+      start = new Date(now); start.setHours(0, 0, 0, 0);
+      end = new Date(start); end.setDate(end.getDate() + 1);
+      break;
+    case 'weekly':
+      start = new Date(now); start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    case 'monthly':
+      start = new Date(now.getFullYear(), now.getMonth(), 1);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    case 'yearly':
+      start = new Date(now.getFullYear(), 0, 1);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    case 'custom':
+      start = from && to ? new Date(from) : new Date(now); start.setHours(0, 0, 0, 0);
+      end = from && to ? new Date(to) : new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    default:
+      start = new Date(now); start.setHours(0, 0, 0, 0);
+      end = new Date(start); end.setDate(end.getDate() + 1);
+  }
+  return { start, end };
+}
+
+router.get('/expenses', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'today', from, to } = req.query;
+    const { start, end } = parseExpenseDateRange(range, from, to);
+    const query = { businessId: req.businessId, expenseDate: { $gte: start, $lte: end } };
+    const expenses = await Expense.find(query)
+      .populate('expenseTypeId', 'expenseName')
+      .populate('createdBy', 'name email')
+      .sort({ expenseDate: -1, createdAt: -1 })
+      .lean();
+    const totalAmount = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    res.json({ success: true, expenses, totalAmount, start, end });
+  } catch (error) {
+    console.error('List expenses error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/admin/expenses - single or multiple entries
+router.post('/expenses', expenseAdminOnly, [
+  body('expenseDate').optional().isISO8601(),
+  body('entries').isArray({ min: 1 }),
+  body('entries.*.expenseTypeId').notEmpty(),
+  body('entries.*.amount').isFloat({ min: 0 }),
+  body('entries.*.notes').optional().trim(),
+  body('entries.*.billImage').optional().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const expenseDate = req.body.expenseDate ? new Date(req.body.expenseDate) : new Date();
+    expenseDate.setHours(0, 0, 0, 0);
+    const created = [];
+    for (const entry of req.body.entries) {
+      const expenseType = await ExpenseType.findOne({ _id: entry.expenseTypeId, businessId: req.businessId });
+      if (!expenseType) {
+        return res.status(400).json({ success: false, message: 'Invalid expense type' });
+      }
+      const exp = await Expense.create({
+        businessId: req.businessId,
+        expenseTypeId: expenseType._id,
+        amount: Number(entry.amount),
+        notes: entry.notes || '',
+        billImage: entry.billImage || undefined,
+        expenseDate,
+        createdBy: req.user._id
+      });
+      await exp.populate('expenseTypeId', 'expenseName');
+      created.push(exp);
+    }
+    res.status(201).json({ success: true, expenses: created });
+  } catch (error) {
+    console.error('Create expenses error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PUT /api/admin/expenses/:id
+router.put('/expenses/:id', expenseAdminOnly, [
+  body('expenseTypeId').optional().notEmpty(),
+  body('amount').optional().isFloat({ min: 0 }),
+  body('notes').optional().trim(),
+  body('billImage').optional().trim(),
+  body('expenseDate').optional().isISO8601()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const expense = await Expense.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!expense) {
+      return res.status(404).json({ success: false, message: 'Expense not found' });
+    }
+    if (req.body.expenseTypeId != null) {
+      const expenseType = await ExpenseType.findOne({ _id: req.body.expenseTypeId, businessId: req.businessId });
+      if (!expenseType) {
+        return res.status(400).json({ success: false, message: 'Invalid expense type' });
+      }
+      expense.expenseTypeId = expenseType._id;
+    }
+    if (req.body.amount != null) expense.amount = Number(req.body.amount);
+    if (req.body.notes !== undefined) expense.notes = req.body.notes || '';
+    if (req.body.billImage !== undefined) expense.billImage = req.body.billImage || '';
+    if (req.body.expenseDate != null) {
+      const d = new Date(req.body.expenseDate);
+      d.setHours(0, 0, 0, 0);
+      expense.expenseDate = d;
+    }
+    await expense.save();
+    await expense.populate('expenseTypeId', 'expenseName');
+    res.json({ success: true, expense });
+  } catch (error) {
+    console.error('Update expense error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/expenses/:id
+router.delete('/expenses/:id', expenseAdminOnly, async (req, res) => {
+  try {
+    const expense = await Expense.findOneAndDelete({ _id: req.params.id, businessId: req.businessId });
+    if (!expense) {
+      return res.status(404).json({ success: false, message: 'Expense not found' });
+    }
+    res.json({ success: true, message: 'Expense deleted' });
+  } catch (error) {
+    console.error('Delete expense error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== INVOICES ====================
+// POST /api/admin/invoices - create invoice from job (admin or employee)
+router.post('/invoices', [
+  body('jobId').notEmpty().isMongoId()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const job = await Job.findOne({ _id: req.body.jobId, businessId: req.businessId })
+      .populate('customerId', 'name phone whatsappNumber email')
+      .populate('carId', 'carNumber model make color brand')
+      .populate({ path: 'services.serviceId', model: 'Service', select: 'name price' });
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
+    const existing = await Invoice.findOne({ jobId: job._id });
+    if (existing) {
+      return res.json({ success: true, invoice: existing, alreadyExists: true });
+    }
+    let invoiceNumber = generateInvoiceNumber();
+    while (await Invoice.findOne({ businessId: req.businessId, invoiceNumber })) {
+      invoiceNumber = generateInvoiceNumber();
+    }
+    const items = (job.services || []).map((s) => ({
+      serviceName: s.serviceId?.name || 'Service',
+      servicePrice: s.price ?? 0
+    }));
+    const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + i.servicePrice, 0);
+    const invoice = await Invoice.create({
+      jobId: job._id,
+      businessId: req.businessId,
+      invoiceNumber,
+      companyName: null,
+      companyAddress: null,
+      companyPhone: null,
+      companyGst: null,
+      customerName: job.customerId?.name ?? '',
+      customerPhone: job.customerId?.phone || job.customerId?.whatsappNumber || '',
+      vehicleNumber: job.carId?.carNumber ?? '',
+      items,
+      discount: 0,
+      subtotal,
+      finalAmount: subtotal,
+      paymentMethod: 'CASH',
+      paymentStatus: 'PENDING',
+      shareToken: generateShareToken(),
+      createdBy: req.user._id
+    });
+    res.status(201).json({ success: true, invoice });
+  } catch (error) {
+    console.error('Create invoice error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/invoices - list (optional jobId filter)
+router.get('/invoices', async (req, res) => {
+  try {
+    const query = { businessId: req.businessId };
+    if (req.query.jobId) query.jobId = req.query.jobId;
+    const invoices = await Invoice.find(query).populate('jobId', 'tokenNumber status').sort({ createdAt: -1 }).lean();
+    res.json({ success: true, invoices });
+  } catch (error) {
+    console.error('List invoices error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/invoices/:id
+router.get('/invoices/:id', async (req, res) => {
+  try {
+    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId })
+      .populate('jobId')
+      .lean();
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    res.json({ success: true, invoice });
+  } catch (error) {
+    console.error('Get invoice error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PUT /api/admin/invoices/:id
+router.put('/invoices/:id', [
+  body('companyName').optional().trim(),
+  body('companyAddress').optional().trim(),
+  body('companyPhone').optional().trim(),
+  body('companyGst').optional().trim(),
+  body('customerName').optional().trim(),
+  body('customerPhone').optional().trim(),
+  body('vehicleNumber').optional().trim(),
+  body('discount').optional().isFloat({ min: 0 }),
+  body('finalAmount').optional().isFloat({ min: 0 }),
+  body('taxPercentage').optional().isFloat({ min: 0, max: 100 }),
+  body('gstAmount').optional().isFloat({ min: 0 }),
+  body('paymentMethod').optional().isIn(['CASH', 'ONLINE'])
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    if (invoice.paymentStatus === 'RECEIVED') {
+      return res.status(403).json({ success: false, message: 'Invoice is closed. No further edits allowed.' });
+    }
+    const allowed = ['companyName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'paymentMethod'];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) invoice[key] = req.body[key];
+    }
+    if (req.body.finalAmount !== undefined) invoice.finalAmount = Number(req.body.finalAmount);
+    if (req.body.discount !== undefined) invoice.discount = Number(req.body.discount);
+    if (req.body.taxPercentage !== undefined) invoice.taxPercentage = Number(req.body.taxPercentage);
+    if (req.body.gstAmount !== undefined) invoice.gstAmount = Number(req.body.gstAmount);
+    await invoice.save();
+    const updated = await Invoice.findById(invoice._id).populate('jobId').lean();
+    res.json({ success: true, invoice: updated });
+  } catch (error) {
+    console.error('Update invoice error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/invoices/:id/share-url
+router.get('/invoices/:id/share-url', async (req, res) => {
+  try {
+    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    if (!invoice.shareToken) {
+      invoice.shareToken = generateShareToken();
+      await invoice.save();
+    }
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const viewUrl = `${baseUrl.replace(/\/$/, '')}/invoice/${invoice._id}/view?token=${invoice.shareToken}`;
+    res.json({ success: true, viewUrl });
+  } catch (error) {
+    console.error('Share URL error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/invoices/:id/close-job - set payment received & close job (DELIVERED)
+router.patch('/invoices/:id/close-job', async (req, res) => {
+  try {
+    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    invoice.paymentStatus = 'RECEIVED';
+    invoice.paymentReceivedAt = new Date();
+    await invoice.save();
+    await Job.findOneAndUpdate(
+      { _id: invoice.jobId, businessId: req.businessId },
+      { $set: { status: 'DELIVERED', actualDelivery: new Date() } }
+    );
+    res.json({ success: true, message: 'Job closed' });
+  } catch (error) {
+    console.error('Close job error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== REPORTS (Car Wash Admin only) ====================
+function parseReportDateRange(range, from, to) {
+  const now = new Date();
+  let start, end;
+  switch (range) {
+    case 'daily':
+    case 'today':
+      start = new Date(now); start.setHours(0, 0, 0, 0);
+      end = new Date(start); end.setDate(end.getDate() + 1);
+      break;
+    case 'weekly':
+      start = new Date(now); start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    case 'monthly':
+      start = new Date(now.getFullYear(), now.getMonth(), 1);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    case 'yearly':
+      start = new Date(now.getFullYear(), 0, 1);
+      end = new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    case 'custom':
+      start = from && to ? new Date(from) : new Date(now); start.setHours(0, 0, 0, 0);
+      end = from && to ? new Date(to) : new Date(now); end.setHours(23, 59, 59, 999);
+      break;
+    default:
+      start = new Date(now); start.setHours(0, 0, 0, 0);
+      end = new Date(start); end.setDate(end.getDate() + 1);
+  }
+  return { start, end };
+}
+
+// GET /api/admin/reports/jobs?range=daily|weekly|monthly|yearly|custom&from=&to=
+router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end } = parseReportDateRange(range, from, to);
+    const jobs = await Job.find({
+      businessId: req.businessId,
+      createdAt: { $gte: start, $lte: end }
+    })
+      .populate('customerId', 'name phone email')
+      .populate('carId', 'registrationNumber model make color')
+      .populate('assignedTo', 'name email employeeCode')
+      .populate({ path: 'services.serviceId', model: 'Service', select: 'name' })
+      .sort({ createdAt: -1 })
+      .lean();
+    const summary = {
+      totalJobs: jobs.length,
+      totalRevenue: jobs.filter(j => ['COMPLETED', 'DELIVERED'].includes(j.status)).reduce((s, j) => s + (j.totalPrice || 0), 0),
+      byStatus: jobs.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {})
+    };
+    res.json({ success: true, data: jobs, summary, start, end });
+  } catch (error) {
+    console.error('Reports jobs error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/employees?range=...&from=&to= (revenue = sum of invoice final amount for delivered jobs)
+router.get('/reports/employees', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end } = parseReportDateRange(range, from, to);
+    const employees = await User.find({ businessId: req.businessId, role: 'EMPLOYEE', status: 'ACTIVE' })
+      .select('name email employeeCode')
+      .lean();
+    const report = await Promise.all(employees.map(async (emp) => {
+      const jobs = await Job.find({
+        businessId: req.businessId,
+        assignedTo: emp._id,
+        createdAt: { $gte: start, $lte: end }
+      }).select('status _id createdAt actualDelivery').lean();
+      const completed = jobs.filter(j => ['COMPLETED', 'DELIVERED'].includes(j.status));
+      const completedJobIds = completed.map(j => j._id);
+      const invoices = await Invoice.find({
+        businessId: req.businessId,
+        jobId: { $in: completedJobIds }
+      }).select('finalAmount').lean();
+      const totalRevenue = Math.round(invoices.reduce((s, inv) => s + (inv.finalAmount || 0), 0) * 100) / 100;
+      const withDelivery = jobs.filter(j => j.actualDelivery);
+      const avgCompletionMinutes = withDelivery.length > 0
+        ? Math.round(withDelivery.reduce((s, j) => s + (j.actualDelivery - new Date(j.createdAt)) / (1000 * 60), 0) / withDelivery.length)
+        : 0;
+      return {
+        employeeId: emp._id,
+        employeeName: emp.name || emp.email,
+        email: emp.email,
+        employeeCode: emp.employeeCode,
+        totalJobsAssigned: jobs.length,
+        completedJobs: completed.length,
+        totalRevenue,
+        avgCompletionMinutes,
+        statusCounts: jobs.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {})
+      };
+    }));
+    res.json({ success: true, data: report, start, end });
+  } catch (error) {
+    console.error('Reports employees error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/expenses?range=...&from=&to=
+router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end } = parseReportDateRange(range, from, to);
+    const expenses = await Expense.find({
+      businessId: req.businessId,
+      expenseDate: { $gte: start, $lte: end }
+    })
+      .populate('expenseTypeId', 'expenseName')
+      .populate('createdBy', 'name email')
+      .sort({ expenseDate: -1, createdAt: -1 })
+      .lean();
+    const totalAmount = expenses.reduce((s, e) => s + (e.amount || 0), 0);
+    res.json({ success: true, data: expenses, totalAmount, summary: { totalExpenses: expenses.length, totalAmount }, start, end });
+  } catch (error) {
+    console.error('Reports expenses error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/sales?range=...&from=&to= (sales = invoices; revenue = sum of invoice final amount)
+router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end } = parseReportDateRange(range, from, to);
+    // Get invoices whose job was delivered in date range (use job.actualDelivery or job.updatedAt for "sale date")
+    const deliveredJobIds = await Job.find({
+      businessId: req.businessId,
+      status: 'DELIVERED',
+      $or: [
+        { actualDelivery: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end }, actualDelivery: { $exists: false } }
+      ]
+    }).distinct('_id');
+    const invoices = await Invoice.find({
+      businessId: req.businessId,
+      jobId: { $in: deliveredJobIds }
+    })
+      .populate({
+        path: 'jobId',
+        populate: [
+          { path: 'customerId', select: 'name phone email' },
+          { path: 'carId', select: 'registrationNumber carNumber model make color' },
+          { path: 'assignedTo', select: 'name email employeeCode' },
+          { path: 'services.serviceId', model: 'Service', select: 'name' }
+        ]
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+    const totalRevenue = invoices.reduce((s, inv) => s + (inv.finalAmount || 0), 0);
+    const totalDiscountAmount = invoices.reduce((s, inv) => {
+      const sub = inv.subtotal || 0;
+      const pct = inv.discount || 0;
+      return s + (sub * (pct / 100));
+    }, 0);
+    const totalGst = invoices.reduce((s, inv) => s + (inv.gstAmount || 0), 0);
+    res.json({
+      success: true,
+      data: invoices,
+      summary: {
+        totalSales: invoices.length,
+        totalRevenue: Math.round(totalRevenue * 100) / 100,
+        totalDiscountAmount: Math.round(totalDiscountAmount * 100) / 100,
+        totalGst: Math.round(totalGst * 100) / 100
+      },
+      start,
+      end
+    });
+  } catch (error) {
+    console.error('Reports sales error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -159,22 +737,36 @@ router.get('/dashboard', async (req, res) => {
       avgCompletionTime = Math.round(totalTime / completedJobs.length);
     }
 
-    // Today's revenue (0 for employee view if we don't show revenue per employee)
-    const todayJobsList = await Job.find({
+    // Today's revenue from invoice final amount (jobs delivered today)
+    const todayDeliveredJobIds = await Job.find({
       ...baseQuery,
-      createdAt: { $gte: today, $lt: tomorrow },
-      status: { $in: ['COMPLETED', 'DELIVERED'] }
-    });
-    const todayRevenue = todayJobsList.reduce((sum, job) => sum + job.totalPrice, 0);
+      status: 'DELIVERED',
+      $or: [
+        { actualDelivery: { $gte: today, $lt: tomorrow } },
+        { updatedAt: { $gte: today, $lt: tomorrow }, actualDelivery: { $exists: false } }
+      ]
+    }).distinct('_id');
+    const todayInvoices = await Invoice.find({
+      businessId: req.businessId,
+      jobId: { $in: todayDeliveredJobIds }
+    }).select('finalAmount').lean();
+    const todayRevenue = Math.round(todayInvoices.reduce((sum, inv) => sum + (inv.finalAmount || 0), 0) * 100) / 100;
 
-    // Monthly revenue
+    // Monthly revenue from invoice final amount
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthlyJobs = await Job.find({
+    const monthDeliveredJobIds = await Job.find({
       ...baseQuery,
-      createdAt: { $gte: startOfMonth },
-      status: { $in: ['COMPLETED', 'DELIVERED'] }
-    });
-    const monthlyRevenue = monthlyJobs.reduce((sum, job) => sum + job.totalPrice, 0);
+      status: 'DELIVERED',
+      $or: [
+        { actualDelivery: { $gte: startOfMonth } },
+        { updatedAt: { $gte: startOfMonth }, actualDelivery: { $exists: false } }
+      ]
+    }).distinct('_id');
+    const monthInvoices = await Invoice.find({
+      businessId: req.businessId,
+      jobId: { $in: monthDeliveredJobIds }
+    }).select('finalAmount').lean();
+    const monthlyRevenue = Math.round(monthInvoices.reduce((sum, inv) => sum + (inv.finalAmount || 0), 0) * 100) / 100;
 
     // Pending deliveries
     const pendingDeliveries = await Job.countDocuments({
@@ -200,7 +792,7 @@ router.get('/dashboard', async (req, res) => {
       });
     }
 
-    // Chart: Revenue per day (last 7 days)
+    // Chart: Revenue per day (last 7 days) from invoice final amount
     const revenueTrend = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date(today);
@@ -208,17 +800,35 @@ router.get('/dashboard', async (req, res) => {
       d.setHours(0, 0, 0, 0);
       const next = new Date(d);
       next.setDate(next.getDate() + 1);
-      const dayJobs = await Job.find({
+      const dayDeliveredIds = await Job.find({
         ...baseQuery,
-        createdAt: { $gte: d, $lt: next },
-        status: { $in: ['COMPLETED', 'DELIVERED'] }
-      }).select('totalPrice');
-      const revenue = dayJobs.reduce((sum, job) => sum + (job.totalPrice || 0), 0);
+        status: 'DELIVERED',
+        $or: [
+          { actualDelivery: { $gte: d, $lt: next } },
+          { updatedAt: { $gte: d, $lt: next }, actualDelivery: { $exists: false } }
+        ]
+      }).distinct('_id');
+      const dayInvoices = await Invoice.find({
+        businessId: req.businessId,
+        jobId: { $in: dayDeliveredIds }
+      }).select('finalAmount').lean();
+      const revenue = dayInvoices.reduce((sum, inv) => sum + (inv.finalAmount || 0), 0);
       revenueTrend.push({
         date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
         revenue: Math.round(revenue * 100) / 100
       });
     }
+
+    // Today's expenses and closing balance (admin only)
+    let todayExpenses = 0;
+    if (!isEmployee) {
+      const todayExpenseDocs = await Expense.aggregate([
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId), expenseDate: { $gte: today, $lt: tomorrow } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]);
+      todayExpenses = todayExpenseDocs[0]?.total ?? 0;
+    }
+    const closingBalance = !isEmployee ? (todayRevenue - todayExpenses) : 0;
 
     // Do not expose revenue/sales to employee
     const statsPayload = {
@@ -231,9 +841,13 @@ router.get('/dashboard', async (req, res) => {
     if (!isEmployee) {
       statsPayload.todayRevenue = todayRevenue;
       statsPayload.monthlyRevenue = monthlyRevenue;
+      statsPayload.todayExpenses = todayExpenses;
+      statsPayload.closingBalance = closingBalance;
     } else {
       statsPayload.todayRevenue = 0;
       statsPayload.monthlyRevenue = 0;
+      statsPayload.todayExpenses = 0;
+      statsPayload.closingBalance = 0;
     }
 
     res.json({
@@ -1128,13 +1742,28 @@ router.get('/jobs', async (req, res) => {
       .populate('assignedTo', 'name employeeCode email')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .skip((page - 1) * limit)
+      .lean();
+
+    const deliveredIds = jobs.filter(j => j.status === 'DELIVERED').map(j => j._id);
+    let invoiceFinalByJob = {};
+    if (deliveredIds.length > 0) {
+      const invoices = await Invoice.find({ businessId: req.businessId, jobId: { $in: deliveredIds } }).select('jobId finalAmount').lean();
+      invoices.forEach(inv => { invoiceFinalByJob[inv.jobId?.toString()] = inv.finalAmount; });
+    }
+    const jobsWithFinal = jobs.map(j => {
+      const out = { ...j };
+      if (j.status === 'DELIVERED' && invoiceFinalByJob[j._id.toString()] != null) {
+        out.invoiceFinalAmount = invoiceFinalByJob[j._id.toString()];
+      }
+      return out;
+    });
 
     const total = await Job.countDocuments(query);
 
     res.json({
       success: true,
-      jobs,
+      jobs: jobsWithFinal,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -1682,7 +2311,12 @@ router.put('/settings', [
   body('whatsappTemplates.washing').optional().isString(),
   body('whatsappTemplates.drying').optional().isString(),
   body('whatsappTemplates.completed').optional().isString(),
-  body('whatsappTemplates.delivered').optional().isString()
+  body('whatsappTemplates.delivered').optional().isString(),
+  body('upiId').optional().trim().isString(),
+  body('qrCodeImage').optional().trim().isString(),
+  body('paymentMobileNumber').optional().trim().isString(),
+  body('gstNumber').optional({ nullable: true }).trim().isString(),
+  body('taxPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1698,6 +2332,14 @@ router.put('/settings', [
     if (req.body.shopWhatsappNumber !== undefined) updateFields.shopWhatsappNumber = req.body.shopWhatsappNumber?.trim() || null;
     if (req.body.googleReviewLink !== undefined) updateFields.googleReviewLink = req.body.googleReviewLink?.trim() || null;
     if (req.body.whatsappTemplates !== undefined) updateFields.whatsappTemplates = req.body.whatsappTemplates;
+    if (req.body.upiId !== undefined) updateFields.upiId = req.body.upiId?.trim() || null;
+    if (req.body.qrCodeImage !== undefined) updateFields.qrCodeImage = req.body.qrCodeImage?.trim() || null;
+    if (req.body.paymentMobileNumber !== undefined) updateFields.paymentMobileNumber = req.body.paymentMobileNumber?.trim() || null;
+    if (req.body.gstNumber !== undefined) {
+      updateFields.gstNumber = req.body.gstNumber?.trim() || null;
+      if (!updateFields.gstNumber) updateFields.taxPercentage = null;
+    }
+    if (req.body.taxPercentage !== undefined) updateFields.taxPercentage = req.body.taxPercentage;
 
     let settings = await BusinessSettings.findOne({ businessId: req.businessId });
     if (!settings) {

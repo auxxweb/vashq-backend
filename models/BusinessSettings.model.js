@@ -60,7 +60,14 @@ const businessSettingsSchema = new mongoose.Schema({
     drying: { type: String, trim: true },
     completed: { type: String, trim: true },
     delivered: { type: String, trim: true }
-  }
+  },
+  // Payment (Online) - for invoice & WhatsApp share
+  upiId: { type: String, trim: true },
+  qrCodeImage: { type: String, trim: true },
+  paymentMobileNumber: { type: String, trim: true },
+  // GST (optional) - shown on invoice when set
+  gstNumber: { type: String, trim: true },
+  taxPercentage: { type: Number, min: 0, max: 100 }
 }, {
   timestamps: true
 });
