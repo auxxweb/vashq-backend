@@ -32,7 +32,6 @@ const planUpgradeRequestSchema = new mongoose.Schema({
   timestamps: true
 });
 
-planUpgradeRequestSchema.index({ shopId: 1 });
 planUpgradeRequestSchema.index({ status: 1 });
 planUpgradeRequestSchema.index({ createdAt: -1 });
 

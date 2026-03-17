@@ -30,7 +30,6 @@ const shopSubscriptionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-shopSubscriptionSchema.index({ shopId: 1 });
 shopSubscriptionSchema.index({ status: 1 });
 shopSubscriptionSchema.index({ expiryDate: 1 });
 

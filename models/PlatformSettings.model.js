@@ -22,12 +22,24 @@ const platformSettingsSchema = new mongoose.Schema({
   defaultLanguage: {
     type: String,
     default: 'en'
+  },
+  // Phone dial code (E.164 prefix) used across the platform (e.g. +91)
+  defaultPhoneDialCode: {
+    type: String,
+    default: '+1',
+    trim: true
+  },
+  // ISO2 country code for phone validation/formatting (e.g. IN)
+  defaultPhoneCountryIso2: {
+    type: String,
+    default: 'US',
+    trim: true,
+    uppercase: true
   }
 }, {
   timestamps: true
 });
 
-// Single document for platform-wide settings
-platformSettingsSchema.index({ _id: 1 }, { unique: true });
+// Single document for platform-wide settings (do not create custom _id index)
 
 export default mongoose.model('PlatformSettings', platformSettingsSchema);

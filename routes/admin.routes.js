@@ -45,7 +45,8 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p === '/services' ||
       p === '/settings' ||
       p.startsWith('/invoices') ||
-      p.startsWith('/cars');
+      p.startsWith('/cars') ||
+      p === '/business';
     if (!allowed) {
       return res.status(403).json({ success: false, message: 'Access denied. Insufficient permissions.' });
     }
@@ -112,6 +113,11 @@ router.post('/upload/images', (req, res, next) => {
     res.json({ success: true, urls });
   } catch (err) {
     console.error('Upload images error:', err);
+    const name = err?.name || '';
+    const msg = String(err?.message || '');
+    if (name === 'TimeoutError' || /timeout/i.test(msg)) {
+      return res.status(504).json({ success: false, message: 'Image upload timed out. Please try again.' });
+    }
     res.status(500).json({
       success: false,
       message: err.message || 'Image upload failed'
@@ -483,8 +489,20 @@ router.get('/invoices/:id/share-url', async (req, res) => {
       invoice.shareToken = generateShareToken();
       await invoice.save();
     }
-    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const viewUrl = `${baseUrl.replace(/\/$/, '')}/invoice/${invoice._id}/view?token=${invoice.shareToken}`;
+    const envBaseUrl = (process.env.FRONTEND_URL || '').trim();
+    const originHeader = (req.get('origin') || '').trim();
+    const refererHeader = (req.get('referer') || '').trim();
+    const refererBase = refererHeader ? (() => {
+      try {
+        const u = new URL(refererHeader);
+        return u.origin;
+      } catch {
+        return '';
+      }
+    })() : '';
+    const requestBase = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = (envBaseUrl || originHeader || refererBase || requestBase || 'http://localhost:3000').replace(/\/$/, '');
+    const viewUrl = `${baseUrl}/invoice/${invoice._id}/view?token=${invoice.shareToken}`;
     res.json({ success: true, viewUrl });
   } catch (error) {
     console.error('Share URL error:', error);
@@ -1787,7 +1805,9 @@ router.post('/jobs', [
   body('customerId').notEmpty(),
   body('carId').notEmpty(),
   body('serviceIds').isArray({ min: 1 }),
-  body('beforeImages').isArray({ min: 2 }).withMessage('At least 2 before images are required'),
+  // Images are optional; client may still send createWithoutImages for UI behavior.
+  body('createWithoutImages').optional().toBoolean(),
+  body('beforeImages').optional().isArray(),
   body('estimatedDelivery').optional().isISO8601(),
   body('assignedTo').optional().isMongoId()
 ], async (req, res) => {
@@ -1875,7 +1895,7 @@ router.post('/jobs', [
           tokenNumber,
           totalPrice,
           estimatedDelivery,
-          beforeImages: beforeImages,
+          beforeImages: Array.isArray(beforeImages) ? beforeImages : [],
           notes,
           assignedTo,
           services: services.map(s => ({
@@ -1978,13 +1998,6 @@ router.patch('/jobs/:id/status', [
     }
 
     const { status, notes, afterImages } = req.body;
-
-    if (status === 'DELIVERED' && (!Array.isArray(afterImages) || afterImages.length < 2)) {
-      return res.status(400).json({
-        success: false,
-        message: 'At least 2 after images are required when marking job as Delivered'
-      });
-    }
 
     const jobFilter = { _id: req.params.id, businessId: req.businessId };
     if (req.user.role === 'EMPLOYEE') {
@@ -2280,6 +2293,12 @@ router.get('/settings', async (req, res) => {
     const platform = await PlatformSettings.findOne({}).lean();
     if (platform?.defaultCurrency) {
       settingsObj.currency = platform.defaultCurrency;
+    }
+    if (platform?.defaultPhoneDialCode) {
+      settingsObj.defaultPhoneDialCode = platform.defaultPhoneDialCode;
+    }
+    if (platform?.defaultPhoneCountryIso2) {
+      settingsObj.defaultPhoneCountryIso2 = platform.defaultPhoneCountryIso2;
     }
     res.json({
       success: true,

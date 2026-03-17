@@ -82,7 +82,6 @@ const businessSchema = new mongoose.Schema({
 });
 
 // Indexes
-businessSchema.index({ email: 1 });
 businessSchema.index({ status: 1 });
 
 export default mongoose.model('Business', businessSchema);

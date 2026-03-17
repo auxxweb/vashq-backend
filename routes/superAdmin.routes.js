@@ -1020,7 +1020,9 @@ router.get('/settings', async (req, res) => {
         supportEmail: process.env.SUPPORT_EMAIL || '',
         supportPhone: process.env.SUPPORT_PHONE || '',
         defaultCurrency: process.env.DEFAULT_CURRENCY || 'USD',
-        defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en'
+        defaultLanguage: process.env.DEFAULT_LANGUAGE || 'en',
+        defaultPhoneDialCode: process.env.DEFAULT_PHONE_DIAL_CODE || '+1',
+        defaultPhoneCountryIso2: process.env.DEFAULT_PHONE_COUNTRY_ISO2 || 'US'
       });
     }
     const settingsObj = settings.toObject ? settings.toObject() : settings;
@@ -1045,7 +1047,9 @@ router.put('/settings', [
   body('supportEmail').optional().trim(),
   body('supportPhone').optional().trim(),
   body('defaultCurrency').optional().isString(),
-  body('defaultLanguage').optional().isString()
+  body('defaultLanguage').optional().isString(),
+  body('defaultPhoneDialCode').optional().isString(),
+  body('defaultPhoneCountryIso2').optional().isString()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1058,6 +1062,20 @@ router.put('/settings', [
     if (req.body.supportPhone !== undefined) updateFields.supportPhone = req.body.supportPhone;
     if (req.body.defaultCurrency !== undefined) updateFields.defaultCurrency = req.body.defaultCurrency;
     if (req.body.defaultLanguage !== undefined) updateFields.defaultLanguage = req.body.defaultLanguage;
+    if (req.body.defaultPhoneDialCode !== undefined) {
+      const dial = String(req.body.defaultPhoneDialCode || '').trim();
+      if (dial && !/^\+\d{1,4}$/.test(dial)) {
+        return res.status(400).json({ success: false, message: 'defaultPhoneDialCode must look like +91' });
+      }
+      updateFields.defaultPhoneDialCode = dial || '+1';
+    }
+    if (req.body.defaultPhoneCountryIso2 !== undefined) {
+      const iso2 = String(req.body.defaultPhoneCountryIso2 || '').trim().toUpperCase();
+      if (iso2 && !/^[A-Z]{2}$/.test(iso2)) {
+        return res.status(400).json({ success: false, message: 'defaultPhoneCountryIso2 must be ISO2 like IN' });
+      }
+      updateFields.defaultPhoneCountryIso2 = iso2 || 'US';
+    }
 
     let settings = await PlatformSettings.findOne({});
     if (!settings) {
@@ -1067,6 +1085,8 @@ router.put('/settings', [
         supportPhone: '',
         defaultCurrency: 'USD',
         defaultLanguage: 'en',
+        defaultPhoneDialCode: '+1',
+        defaultPhoneCountryIso2: 'US',
         ...updateFields
       });
     } else {
@@ -1081,6 +1101,41 @@ router.put('/settings', [
       const newCurrency = settings.defaultCurrency || req.body.defaultCurrency;
       await BusinessSettings.updateMany({}, { $set: { currency: newCurrency } });
       await Business.updateMany({}, { $set: { defaultCurrency: newCurrency } });
+    }
+    // When platform phone dial code changes, prefix it for records missing country code
+    if (req.body.defaultPhoneDialCode !== undefined) {
+      const dial = settings.defaultPhoneDialCode || updateFields.defaultPhoneDialCode || '+1';
+      const pipeline = [
+        {
+          $set: {
+            phone: {
+              $cond: [
+                { $and: [{ $ne: ['$phone', null] }, { $ne: ['$phone', ''] }, { $ne: [{ $substrCP: ['$phone', 0, 1] }, '+'] }] },
+                { $concat: [dial, '$phone'] },
+                '$phone'
+              ]
+            }
+          }
+        }
+      ];
+      const pipelineWhatsapp = [
+        {
+          $set: {
+            whatsappNumber: {
+              $cond: [
+                { $and: [{ $ne: ['$whatsappNumber', null] }, { $ne: ['$whatsappNumber', ''] }, { $ne: [{ $substrCP: ['$whatsappNumber', 0, 1] }, '+'] }] },
+                { $concat: [dial, '$whatsappNumber'] },
+                '$whatsappNumber'
+              ]
+            }
+          }
+        }
+      ];
+      await Business.updateMany({ phone: { $exists: true, $ne: null, $ne: '' } }, pipeline);
+      await Business.updateMany({ whatsappNumber: { $exists: true, $ne: null, $ne: '' } }, pipelineWhatsapp);
+      await Customer.updateMany({ phone: { $exists: true, $ne: null, $ne: '' } }, pipeline);
+      await Customer.updateMany({ whatsappNumber: { $exists: true, $ne: null, $ne: '' } }, pipelineWhatsapp);
+      await User.updateMany({ phone: { $exists: true, $ne: null, $ne: '' } }, pipeline);
     }
     const settingsObj = settings.toObject ? settings.toObject() : settings;
     res.json({
