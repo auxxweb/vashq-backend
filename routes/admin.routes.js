@@ -37,7 +37,7 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
   if (req.user.role === 'EMPLOYEE') {
     const p = req.path;
     const allowed =
-      p === '/dashboard' ||
+      p === '/dashboard' || p.startsWith('/dashboard/') ||
       p.startsWith('/jobs') ||
       p.startsWith('/upload') ||
       p === '/leaderboard' ||
@@ -46,7 +46,10 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p === '/settings' ||
       p.startsWith('/invoices') ||
       p.startsWith('/cars') ||
-      p === '/business';
+      p === '/business' ||
+      p === '/my-subscription' ||
+      p === '/available-plans' ||
+      p.startsWith('/upgrade-request');
     if (!allowed) {
       return res.status(403).json({ success: false, message: 'Access denied. Insufficient permissions.' });
     }
@@ -713,142 +716,116 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
 // ==================== DASHBOARD ====================
 
 // @route   GET /api/admin/dashboard
-// @desc    Get dashboard statistics (for admin: all business; for employee: assigned jobs only)
+// @desc    Fast dashboard stats only (KPIs). Use /admin/dashboard/charts for lazy-loaded charts.
 // @access  Private (Car Wash Admin, Employee)
 router.get('/dashboard', async (req, res) => {
   try {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
-    const baseQuery = { businessId };
-    if (isEmployee) baseQuery.assignedTo = req.user._id;
+    const baseMatch = { businessId: new mongoose.Types.ObjectId(businessId) };
+    if (isEmployee) baseMatch.assignedTo = req.user._id;
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
-
-    // Today's jobs
-    const todayJobs = await Job.countDocuments({
-      ...baseQuery,
-      createdAt: { $gte: today, $lt: tomorrow }
-    });
-
-    // Jobs in progress (pending + ongoing)
-    const inProgress = await Job.countDocuments({
-      ...baseQuery,
-      status: { $nin: ['COMPLETED', 'DELIVERED', 'CANCELLED'] }
-    });
-
-    // Completed/Delivered for avg time and revenue
-    const completedJobs = await Job.find({
-      ...baseQuery,
-      status: 'DELIVERED',
-      actualDelivery: { $exists: true }
-    }).select('createdAt actualDelivery');
-
-    let avgCompletionTime = 0;
-    if (completedJobs.length > 0) {
-      const totalTime = completedJobs.reduce((sum, job) => {
-        const diff = job.actualDelivery - job.createdAt;
-        return sum + (diff / (1000 * 60)); // Convert to minutes
-      }, 0);
-      avgCompletionTime = Math.round(totalTime / completedJobs.length);
-    }
-
-    // Today's revenue from invoice final amount (jobs delivered today)
-    const todayDeliveredJobIds = await Job.find({
-      ...baseQuery,
-      status: 'DELIVERED',
-      $or: [
-        { actualDelivery: { $gte: today, $lt: tomorrow } },
-        { updatedAt: { $gte: today, $lt: tomorrow }, actualDelivery: { $exists: false } }
-      ]
-    }).distinct('_id');
-    const todayInvoices = await Invoice.find({
-      businessId: req.businessId,
-      jobId: { $in: todayDeliveredJobIds }
-    }).select('finalAmount').lean();
-    const todayRevenue = Math.round(todayInvoices.reduce((sum, inv) => sum + (inv.finalAmount || 0), 0) * 100) / 100;
-
-    // Monthly revenue from invoice final amount
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthDeliveredJobIds = await Job.find({
-      ...baseQuery,
-      status: 'DELIVERED',
-      $or: [
-        { actualDelivery: { $gte: startOfMonth } },
-        { updatedAt: { $gte: startOfMonth }, actualDelivery: { $exists: false } }
-      ]
-    }).distinct('_id');
-    const monthInvoices = await Invoice.find({
-      businessId: req.businessId,
-      jobId: { $in: monthDeliveredJobIds }
-    }).select('finalAmount').lean();
-    const monthlyRevenue = Math.round(monthInvoices.reduce((sum, inv) => sum + (inv.finalAmount || 0), 0) * 100) / 100;
 
-    // Pending deliveries
-    const pendingDeliveries = await Job.countDocuments({
-      ...baseQuery,
-      status: 'COMPLETED'
-    });
-
-    // Chart: Jobs per day (last 7 days)
-    const jobsTrend = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      d.setHours(0, 0, 0, 0);
-      const next = new Date(d);
-      next.setDate(next.getDate() + 1);
-      const count = await Job.countDocuments({
-        ...baseQuery,
-        createdAt: { $gte: d, $lt: next }
-      });
-      jobsTrend.push({
-        date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
-        jobs: count
-      });
-    }
-
-    // Chart: Revenue per day (last 7 days) from invoice final amount
-    const revenueTrend = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      d.setHours(0, 0, 0, 0);
-      const next = new Date(d);
-      next.setDate(next.getDate() + 1);
-      const dayDeliveredIds = await Job.find({
-        ...baseQuery,
-        status: 'DELIVERED',
-        $or: [
-          { actualDelivery: { $gte: d, $lt: next } },
-          { updatedAt: { $gte: d, $lt: next }, actualDelivery: { $exists: false } }
-        ]
-      }).distinct('_id');
-      const dayInvoices = await Invoice.find({
-        businessId: req.businessId,
-        jobId: { $in: dayDeliveredIds }
-      }).select('finalAmount').lean();
-      const revenue = dayInvoices.reduce((sum, inv) => sum + (inv.finalAmount || 0), 0);
-      revenueTrend.push({
-        date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
-        revenue: Math.round(revenue * 100) / 100
-      });
-    }
-
-    // Today's expenses and closing balance (admin only)
-    let todayExpenses = 0;
-    if (!isEmployee) {
-      const todayExpenseDocs = await Expense.aggregate([
+    // Single aggregation for all job stats (parallel in one pipeline)
+    const [jobStats, avgResult, todayRevResult, monthRevResult, todayExpResult] = await Promise.all([
+      Job.aggregate([
+        { $match: baseMatch },
+        {
+          $facet: {
+            todayJobs: [
+              { $match: { createdAt: { $gte: today, $lt: tomorrow } } },
+              { $count: 'count' }
+            ],
+            inProgress: [
+              { $match: { status: { $nin: ['COMPLETED', 'DELIVERED', 'CANCELLED'] } } },
+              { $count: 'count' }
+            ],
+            pendingDeliveries: [
+              { $match: { status: 'COMPLETED' } },
+              { $count: 'count' }
+            ]
+          }
+        }
+      ]).then((r) => r[0] || {}),
+      Job.aggregate([
+        { $match: { ...baseMatch, status: 'DELIVERED', actualDelivery: { $exists: true } } },
+        {
+          $group: {
+            _id: null,
+            avgMinutes: { $avg: { $divide: [{ $subtract: ['$actualDelivery', '$createdAt'] }, 60000] } }
+          }
+        }
+      ]),
+      Invoice.aggregate([
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+        {
+          $lookup: {
+            from: 'jobs',
+            let: { jid: '$jobId' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: { $eq: ['$_id', '$$jid'] },
+                  status: 'DELIVERED',
+                  $or: [
+                    { actualDelivery: { $gte: today, $lt: tomorrow } },
+                    { actualDelivery: { $exists: false }, updatedAt: { $gte: today, $lt: tomorrow } }
+                  ]
+                }
+              },
+              { $limit: 1 }
+            ],
+            as: 'job'
+          }
+        },
+        { $match: { job: { $ne: [] } } },
+        { $group: { _id: null, total: { $sum: '$finalAmount' } } }
+      ]),
+      Invoice.aggregate([
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+        {
+          $lookup: {
+            from: 'jobs',
+            let: { jid: '$jobId' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: { $eq: ['$_id', '$$jid'] },
+                  status: 'DELIVERED',
+                  $or: [
+                    { actualDelivery: { $gte: startOfMonth } },
+                    { actualDelivery: { $exists: false }, updatedAt: { $gte: startOfMonth } }
+                  ]
+                }
+              },
+              { $limit: 1 }
+            ],
+            as: 'job'
+          }
+        },
+        { $match: { job: { $ne: [] } } },
+        { $group: { _id: null, total: { $sum: '$finalAmount' } } }
+      ]),
+      isEmployee ? Promise.resolve([]) : Expense.aggregate([
         { $match: { businessId: new mongoose.Types.ObjectId(businessId), expenseDate: { $gte: today, $lt: tomorrow } } },
         { $group: { _id: null, total: { $sum: '$amount' } } }
-      ]);
-      todayExpenses = todayExpenseDocs[0]?.total ?? 0;
-    }
+      ])
+    ]);
+
+    const todayJobs = jobStats.todayJobs?.[0]?.count ?? 0;
+    const inProgress = jobStats.inProgress?.[0]?.count ?? 0;
+    const pendingDeliveries = jobStats.pendingDeliveries?.[0]?.count ?? 0;
+    const avgCompletionTime = Math.round(avgResult[0]?.avgMinutes ?? 0);
+    const todayRevenue = Math.round((todayRevResult[0]?.total ?? 0) * 100) / 100;
+    const monthlyRevenue = Math.round((monthRevResult[0]?.total ?? 0) * 100) / 100;
+    const todayExpenses = todayExpResult[0]?.total ?? 0;
     const closingBalance = !isEmployee ? (todayRevenue - todayExpenses) : 0;
 
-    // Do not expose revenue/sales to employee
     const statsPayload = {
       todayJobs,
       inProgress,
@@ -868,52 +845,194 @@ router.get('/dashboard', async (req, res) => {
       statsPayload.closingBalance = 0;
     }
 
-    res.json({
-      success: true,
-      stats: statsPayload,
-      jobsTrend,
-      revenueTrend: isEmployee ? [] : revenueTrend,
-      isEmployee: !!isEmployee
-    });
+    res.json({ success: true, stats: statsPayload, isEmployee: !!isEmployee });
   } catch (error) {
     console.error('Dashboard error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/admin/dashboard/charts
+// @desc    Lazy-loaded charts: revenue trend + services distribution
+// @access  Private (Car Wash Admin, Employee)
+router.get('/dashboard/charts', async (req, res) => {
+  try {
+    const businessId = req.businessId;
+    const isEmployee = req.user.role === 'EMPLOYEE';
+    const baseMatch = { businessId: new mongoose.Types.ObjectId(businessId) };
+    if (isEmployee) baseMatch.assignedTo = req.user._id;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Revenue trend: run 7 day queries in parallel
+    const revenuePromises = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      d.setHours(0, 0, 0, 0);
+      const next = new Date(d);
+      next.setDate(next.getDate() + 1);
+      revenuePromises.push(
+        Invoice.aggregate([
+          { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+          {
+            $lookup: {
+              from: 'jobs',
+              let: { jid: '$jobId' },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: { $eq: ['$_id', '$$jid'] },
+                    status: 'DELIVERED',
+                    $or: [
+                      { actualDelivery: { $gte: d, $lt: next } },
+                      { actualDelivery: { $exists: false }, updatedAt: { $gte: d, $lt: next } }
+                    ]
+                  }
+                },
+                { $limit: 1 }
+              ],
+              as: 'j'
+            }
+          },
+          { $match: { j: { $ne: [] } } },
+          { $group: { _id: null, total: { $sum: '$finalAmount' } } }
+        ]).then((r) => ({ d, total: r[0]?.total ?? 0 }))
+      );
+    }
+    const revenueResults = await Promise.all(revenuePromises);
+    const revenueTrend = revenueResults.map(({ d, total }) => ({
+      date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+      revenue: Math.round(total * 100) / 100
+    }));
+
+    // Services distribution: single aggregation
+    const servicesDist = await Job.aggregate([
+      { $match: { ...baseMatch, status: 'DELIVERED' } },
+      { $unwind: '$services' },
+      { $group: { _id: '$services.serviceId', count: { $sum: 1 } } },
+      { $lookup: { from: 'services', localField: '_id', foreignField: '_id', as: 'svc' } },
+      { $unwind: { path: '$svc', preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: null,
+          items: {
+            $push: {
+              name: { $ifNull: ['$svc.name', 'Other'] },
+              value: '$count'
+            }
+          }
+        }
+      }
+    ]);
+
+    const servicesDistribution = servicesDist[0]?.items ?? [];
+
+    // Job trend for employees: jobs completed per day (last 7 days)
+    let jobTrend = [];
+    if (isEmployee) {
+      const jobPromises = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        d.setHours(0, 0, 0, 0);
+        const next = new Date(d);
+        next.setDate(next.getDate() + 1);
+        jobPromises.push(
+          Job.aggregate([
+            {
+              $match: {
+                ...baseMatch,
+                status: 'DELIVERED',
+                $or: [
+                  { actualDelivery: { $gte: d, $lt: next } },
+                  { actualDelivery: { $exists: false }, updatedAt: { $gte: d, $lt: next } }
+                ]
+              }
+            },
+            { $count: 'count' }
+          ]).then((r) => ({ d, count: r[0]?.count ?? 0 }))
+        );
+      }
+      const jobResults = await Promise.all(jobPromises);
+      jobTrend = jobResults.map(({ d, count }) => ({
+        date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+        jobs: count
+      }));
+    }
+
+    res.json({
+      success: true,
+      revenueTrend: isEmployee ? [] : revenueTrend,
+      jobTrend,
+      servicesDistribution
     });
+  } catch (error) {
+    console.error('Dashboard charts error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 // @route   GET /api/admin/leaderboard
-// @desc    Leaderboard: employees with completed job count and avg completion time
+// @desc    Leaderboard: employees with completed job count and avg completion time (aggregation)
 // @access  Private (Car Wash Admin, Employee)
 router.get('/leaderboard', async (req, res) => {
   try {
     const businessId = req.businessId;
-    const employees = await User.find({ businessId, role: 'EMPLOYEE', status: 'ACTIVE' })
+    const leaderboard = await Job.aggregate([
+      {
+        $match: {
+          businessId: new mongoose.Types.ObjectId(businessId),
+          status: 'DELIVERED',
+          actualDelivery: { $exists: true },
+          assignedTo: { $exists: true, $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: '$assignedTo',
+          count: { $sum: 1 },
+          totalMinutes: { $sum: { $divide: [{ $subtract: ['$actualDelivery', '$createdAt'] }, 60000] } }
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user',
+          pipeline: [{ $match: { role: 'EMPLOYEE', status: 'ACTIVE' } }, { $project: { name: 1, email: 1, employeeCode: 1 } }]
+        }
+      },
+      { $unwind: { path: '$user', preserveNullAndEmptyArrays: false } },
+      {
+        $project: {
+          userId: '$_id',
+          name: { $ifNull: ['$user.name', '$user.email'] },
+          employeeCode: '$user.employeeCode',
+          completedCount: '$count',
+          avgCompletionMinutes: { $round: [{ $divide: ['$totalMinutes', '$count'] }, 0] }
+        }
+      },
+      { $sort: { completedCount: -1 } }
+    ]);
+    // Include employees with zero completed jobs
+    const empIds = new Set(leaderboard.map((l) => l.userId?.toString()));
+    const allEmployees = await User.find({ businessId, role: 'EMPLOYEE', status: 'ACTIVE' })
       .select('name email employeeCode')
       .lean();
-    const leaderboard = await Promise.all(employees.map(async (emp) => {
-      const delivered = await Job.find({
-        businessId,
-        assignedTo: emp._id,
-        status: 'DELIVERED',
-        actualDelivery: { $exists: true }
-      }).select('createdAt actualDelivery');
-      const count = delivered.length;
-      const avgMinutes = count > 0
-        ? Math.round(delivered.reduce((sum, j) => sum + (j.actualDelivery - j.createdAt) / (1000 * 60), 0) / count)
-        : 0;
-      return {
-        userId: emp._id,
-        name: emp.name || emp.email,
-        employeeCode: emp.employeeCode,
-        completedCount: count,
-        avgCompletionMinutes: avgMinutes
-      };
-    }));
-    leaderboard.sort((a, b) => b.completedCount - a.completedCount);
-    res.json({ success: true, leaderboard });
+    const zeroEmps = allEmployees
+      .filter((e) => !empIds.has(e._id.toString()))
+      .map((e) => ({
+        userId: e._id,
+        name: e.name || e.email,
+        employeeCode: e.employeeCode,
+        completedCount: 0,
+        avgCompletionMinutes: 0
+      }));
+    const combined = [...leaderboard, ...zeroEmps].sort((a, b) => b.completedCount - a.completedCount);
+    res.json({ success: true, leaderboard: combined });
   } catch (error) {
     console.error('Leaderboard error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -1802,19 +1921,25 @@ router.get('/jobs', async (req, res) => {
 // @desc    Create new job
 // @access  Private (Car Wash Admin)
 router.post('/jobs', [
-  body('customerId').notEmpty(),
-  body('carId').notEmpty(),
-  body('serviceIds').isArray({ min: 1 }),
-  // Images are optional; client may still send createWithoutImages for UI behavior.
+  body('customerId').notEmpty().withMessage('Customer is required'),
+  body('carId').notEmpty().withMessage('Car is required'),
+  body('serviceIds').isArray({ min: 1 }).withMessage('At least one service is required'),
   body('createWithoutImages').optional().toBoolean(),
   body('beforeImages').optional().isArray(),
+  body('notes').optional().trim(),
   body('estimatedDelivery').optional().isISO8601(),
-  body('assignedTo').optional().isMongoId()
+  body('assignedTo').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid employee')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      const errList = errors.array();
+      const firstMsg = errList[0]?.msg || errList[0]?.message || 'Validation failed';
+      return res.status(400).json({
+        success: false,
+        message: firstMsg,
+        errors: errList
+      });
     }
 
     const { customerId, carId, serviceIds, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody } = req.body;
@@ -1847,19 +1972,46 @@ router.post('/jobs', [
       });
     }
 
-    // Fetch services
-    const services = await Service.find({
-      _id: { $in: serviceIds },
-      businessId: req.businessId,
-      isActive: true
-    });
+    // Fetch services - convert IDs for reliable $in match, accept active or unset isActive
+    const serviceIdsObj = serviceIds.map((id) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
 
-    if (services.length !== serviceIds.length) {
+    if (serviceIdsObj.length !== serviceIds.length) {
       return res.status(400).json({
         success: false,
-        message: 'One or more services not found'
+        message: 'Invalid service ID format'
       });
     }
+
+    const businessIdObj = typeof req.businessId === 'string'
+      ? new mongoose.Types.ObjectId(req.businessId)
+      : req.businessId;
+
+    // Use unique IDs for lookup (handles duplicates); build job services from original order
+    const uniqueIds = [...new Set(serviceIdsObj.map((id) => id.toString()))].map((id) => new mongoose.Types.ObjectId(id));
+    const servicesFound = await Service.find({
+      _id: { $in: uniqueIds },
+      businessId: businessIdObj,
+      isActive: { $ne: false }
+    });
+
+    if (servicesFound.length !== uniqueIds.length) {
+      const foundIds = new Set(servicesFound.map((s) => s._id.toString()));
+      const missingIds = uniqueIds.filter((id) => !foundIds.has(id.toString()));
+      return res.status(400).json({
+        success: false,
+        message: 'One or more services not found. Ensure services exist, are active, and belong to your business.',
+        missingServiceIds: missingIds.map((id) => id.toString())
+      });
+    }
+
+    const serviceMap = new Map(servicesFound.map((s) => [s._id.toString(), s]));
+    const services = serviceIdsObj.map((id) => serviceMap.get(id.toString())).filter(Boolean);
 
     // Calculate total price and ETA (use body value if provided and valid, else calculate from services)
     const totalPrice = services.reduce((sum, s) => sum + s.price, 0);

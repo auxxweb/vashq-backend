@@ -25,19 +25,9 @@ router.use(authorize('SUPER_ADMIN'));
 
 // ==================== DASHBOARD ====================
 
-// @route   GET /api/super-admin/dashboard
-// @desc    Get dashboard statistics
-// @access  Private (Super Admin)
-router.get('/dashboard', async (req, res) => {
+// @route   GET /api/super-admin/dashboard/charts - must be before /dashboard
+router.get('/dashboard/charts', async (req, res) => {
   try {
-    const totalBusinesses = await Business.countDocuments();
-    const activeBusinesses = await Business.countDocuments({ status: 'ACTIVE' });
-
-    const activePlans = await ShopSubscription.countDocuments({ status: 'ACTIVE' });
-    const expiredPlans = await ShopSubscription.countDocuments({ status: 'EXPIRED' });
-
-    const monthlyRevenue = 0;
-    const yearlyRevenue = 0;
     const revenueTrend = [];
     for (let i = 5; i >= 0; i--) {
       const date = new Date();
@@ -48,18 +38,15 @@ router.get('/dashboard', async (req, res) => {
       });
     }
 
-    // Business onboarding trend
     const onboardingTrend = [];
     for (let i = 5; i >= 0; i--) {
       const date = new Date();
       date.setMonth(date.getMonth() - i);
       const startOfMonth = new Date(date.getFullYear(), date.getMonth(), 1);
       const endOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0);
-      
       const count = await Business.countDocuments({
         createdAt: { $gte: startOfMonth, $lte: endOfMonth }
       });
-      
       onboardingTrend.push({
         month: date.toLocaleString('default', { month: 'short' }),
         count
@@ -68,16 +55,40 @@ router.get('/dashboard', async (req, res) => {
 
     res.json({
       success: true,
+      revenueTrend,
+      onboardingTrend
+    });
+  } catch (error) {
+    console.error('Dashboard charts error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/super-admin/dashboard
+// @desc    Fast dashboard stats only (KPIs). Use /super-admin/dashboard/charts for lazy-loaded charts.
+// @access  Private (Super Admin)
+router.get('/dashboard', async (req, res) => {
+  try {
+    const [totalBusinesses, activeBusinesses, activePlans, expiredPlans] = await Promise.all([
+      Business.countDocuments(),
+      Business.countDocuments({ status: 'ACTIVE' }),
+      ShopSubscription.countDocuments({ status: 'ACTIVE' }),
+      ShopSubscription.countDocuments({ status: 'EXPIRED' })
+    ]);
+
+    res.json({
+      success: true,
       stats: {
         totalBusinesses,
         activeBusinesses,
         activePlans,
         expiredPlans,
-        monthlyRevenue,
-        yearlyRevenue
-      },
-      revenueTrend,
-      onboardingTrend
+        monthlyRevenue: 0,
+        yearlyRevenue: 0
+      }
     });
   } catch (error) {
     console.error('Dashboard error:', error);
