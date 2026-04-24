@@ -732,7 +732,7 @@ router.get('/dashboard', async (req, res) => {
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
 
     // Single aggregation for all job stats (parallel in one pipeline)
-    const [jobStats, avgResult, todayRevResult, monthRevResult, todayExpResult] = await Promise.all([
+    const [jobStats, avgResult, todayRevResult, todayRevByMethodResult, monthRevResult, todayExpResult] = await Promise.all([
       Job.aggregate([
         { $match: baseMatch },
         {
@@ -798,6 +798,31 @@ router.get('/dashboard', async (req, res) => {
                   $expr: { $eq: ['$_id', '$$jid'] },
                   status: 'DELIVERED',
                   $or: [
+                    { actualDelivery: { $gte: today, $lt: tomorrow } },
+                    { actualDelivery: { $exists: false }, updatedAt: { $gte: today, $lt: tomorrow } }
+                  ]
+                }
+              },
+              { $limit: 1 }
+            ],
+            as: 'job'
+          }
+        },
+        { $match: { job: { $ne: [] } } },
+        { $group: { _id: '$paymentMethod', total: { $sum: '$finalAmount' } } }
+      ]),
+      Invoice.aggregate([
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+        {
+          $lookup: {
+            from: 'jobs',
+            let: { jid: '$jobId' },
+            pipeline: [
+              {
+                $match: {
+                  $expr: { $eq: ['$_id', '$$jid'] },
+                  status: 'DELIVERED',
+                  $or: [
                     { actualDelivery: { $gte: startOfMonth } },
                     { actualDelivery: { $exists: false }, updatedAt: { $gte: startOfMonth } }
                   ]
@@ -822,6 +847,8 @@ router.get('/dashboard', async (req, res) => {
     const pendingDeliveries = jobStats.pendingDeliveries?.[0]?.count ?? 0;
     const avgCompletionTime = Math.round(avgResult[0]?.avgMinutes ?? 0);
     const todayRevenue = Math.round((todayRevResult[0]?.total ?? 0) * 100) / 100;
+    const todayRevenueCash = Math.round(((todayRevByMethodResult || []).find((r) => r._id === 'CASH')?.total ?? 0) * 100) / 100;
+    const todayRevenueOnline = Math.round(((todayRevByMethodResult || []).find((r) => r._id === 'ONLINE')?.total ?? 0) * 100) / 100;
     const monthlyRevenue = Math.round((monthRevResult[0]?.total ?? 0) * 100) / 100;
     const todayExpenses = todayExpResult[0]?.total ?? 0;
     const closingBalance = !isEmployee ? (todayRevenue - todayExpenses) : 0;
@@ -835,11 +862,15 @@ router.get('/dashboard', async (req, res) => {
     };
     if (!isEmployee) {
       statsPayload.todayRevenue = todayRevenue;
+      statsPayload.todayRevenueCash = todayRevenueCash;
+      statsPayload.todayRevenueOnline = todayRevenueOnline;
       statsPayload.monthlyRevenue = monthlyRevenue;
       statsPayload.todayExpenses = todayExpenses;
       statsPayload.closingBalance = closingBalance;
     } else {
       statsPayload.todayRevenue = 0;
+      statsPayload.todayRevenueCash = 0;
+      statsPayload.todayRevenueOnline = 0;
       statsPayload.monthlyRevenue = 0;
       statsPayload.todayExpenses = 0;
       statsPayload.closingBalance = 0;
@@ -1885,13 +1916,24 @@ router.get('/jobs', async (req, res) => {
     const deliveredIds = jobs.filter(j => j.status === 'DELIVERED').map(j => j._id);
     let invoiceFinalByJob = {};
     if (deliveredIds.length > 0) {
-      const invoices = await Invoice.find({ businessId: req.businessId, jobId: { $in: deliveredIds } }).select('jobId finalAmount').lean();
-      invoices.forEach(inv => { invoiceFinalByJob[inv.jobId?.toString()] = inv.finalAmount; });
+      const invoices = await Invoice.find({ businessId: req.businessId, jobId: { $in: deliveredIds } })
+        .select('jobId finalAmount paymentMethod paymentStatus')
+        .lean();
+      invoices.forEach(inv => {
+        invoiceFinalByJob[inv.jobId?.toString()] = {
+          finalAmount: inv.finalAmount,
+          paymentMethod: inv.paymentMethod,
+          paymentStatus: inv.paymentStatus
+        };
+      });
     }
     const jobsWithFinal = jobs.map(j => {
       const out = { ...j };
-      if (j.status === 'DELIVERED' && invoiceFinalByJob[j._id.toString()] != null) {
-        out.invoiceFinalAmount = invoiceFinalByJob[j._id.toString()];
+      const inv = invoiceFinalByJob[j._id.toString()];
+      if (j.status === 'DELIVERED' && inv != null) {
+        out.invoiceFinalAmount = inv.finalAmount;
+        out.invoicePaymentMethod = inv.paymentMethod;
+        out.invoicePaymentStatus = inv.paymentStatus;
       }
       return out;
     });
@@ -2237,6 +2279,106 @@ router.patch('/jobs/:id/status', [
       success: false,
       message: 'Server error'
     });
+  }
+});
+
+// @route   PUT /api/admin/jobs/:id
+// @desc    Edit job (services/notes/ETA) while not delivered
+// @access  Private (Car Wash Admin, Employee on assigned job)
+router.put('/jobs/:id', [
+  body('serviceIds').optional().isArray({ min: 1 }).withMessage('At least one service is required'),
+  body('notes').optional().isString(),
+  body('estimatedDelivery').optional().isISO8601()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      const errList = errors.array();
+      const firstMsg = errList[0]?.msg || errList[0]?.message || 'Validation failed';
+      return res.status(400).json({ success: false, message: firstMsg, errors: errList });
+    }
+
+    const jobFilter = { _id: req.params.id, businessId: req.businessId };
+    if (req.user.role === 'EMPLOYEE') {
+      jobFilter.assignedTo = req.user._id;
+    }
+
+    const job = await Job.findOne(jobFilter);
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
+
+    if (job.status === 'DELIVERED' || job.status === 'CANCELLED') {
+      return res.status(400).json({
+        success: false,
+        message: 'Delivered/cancelled jobs cannot be edited'
+      });
+    }
+
+    const { serviceIds, notes, estimatedDelivery } = req.body;
+
+    if (typeof notes === 'string') {
+      job.notes = notes.trim();
+    }
+
+    // Update services (and total/ETA) if provided
+    if (Array.isArray(serviceIds)) {
+      const serviceIdsObj = serviceIds.map((id) => {
+        try {
+          return new mongoose.Types.ObjectId(id);
+        } catch {
+          return null;
+        }
+      }).filter(Boolean);
+
+      if (serviceIdsObj.length !== serviceIds.length) {
+        return res.status(400).json({ success: false, message: 'Invalid service ID format' });
+      }
+
+      const businessIdObj = typeof req.businessId === 'string'
+        ? new mongoose.Types.ObjectId(req.businessId)
+        : req.businessId;
+
+      const uniqueIds = [...new Set(serviceIdsObj.map((id) => id.toString()))].map((id) => new mongoose.Types.ObjectId(id));
+      const servicesFound = await Service.find({
+        _id: { $in: uniqueIds },
+        businessId: businessIdObj,
+        isActive: { $ne: false }
+      });
+
+      if (servicesFound.length !== uniqueIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'One or more services not found. Ensure services exist, are active, and belong to your business.'
+        });
+      }
+
+      const serviceMap = new Map(servicesFound.map((s) => [s._id.toString(), s]));
+      const orderedServices = serviceIdsObj.map((id) => serviceMap.get(id.toString())).filter(Boolean);
+
+      job.services = orderedServices.map((s) => ({ serviceId: s._id, price: s.price }));
+      job.totalPrice = orderedServices.reduce((sum, s) => sum + s.price, 0);
+
+      // ETA: use body if provided and valid, else recalc from services
+      job.estimatedDelivery = (estimatedDelivery && !isNaN(Date.parse(estimatedDelivery)))
+        ? new Date(estimatedDelivery)
+        : calculateETA(orderedServices);
+    } else if (estimatedDelivery && !isNaN(Date.parse(estimatedDelivery))) {
+      // Allow ETA-only edit without touching services
+      job.estimatedDelivery = new Date(estimatedDelivery);
+    }
+
+    await job.save();
+
+    await job.populate('customerId', 'name phone whatsappNumber');
+    await job.populate('carId', 'carNumber brand model color');
+    await job.populate('services.serviceId', 'name');
+    await job.populate('assignedTo', 'name employeeCode email');
+
+    res.json({ success: true, job });
+  } catch (error) {
+    console.error('Edit job error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

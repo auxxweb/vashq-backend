@@ -6,10 +6,13 @@ import mongoose from 'mongoose';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 // ES6 module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+const backendPkg = require('./package.json');
 
 // Import routes
 import authRoutes from './routes/auth.routes.js';
@@ -37,6 +40,17 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Server is running' });
+});
+
+// Version check (frontend safety for backend compatibility)
+app.get('/version.json', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.json({
+    version: process.env.APP_VERSION || backendPkg.version || '0.0.0',
+    name: backendPkg.name || 'backend',
+  });
 });
 
 // Routes

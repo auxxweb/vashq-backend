@@ -120,9 +120,9 @@ export const getNextStatus = (currentStatus) => {
  * Check if status transition is valid
  */
 export const isValidStatusTransition = (currentStatus, newStatus) => {
-  // Can always cancel
+  // Cancel is allowed only before work starts
   if (newStatus === 'CANCELLED') {
-    return currentStatus !== 'DELIVERED' && currentStatus !== 'CANCELLED';
+    return currentStatus === 'RECEIVED';
   }
 
   // Can't go backwards (except to cancel)
