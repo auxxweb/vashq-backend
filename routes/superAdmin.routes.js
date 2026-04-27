@@ -625,9 +625,20 @@ router.patch('/upgrade-requests/:id/approve', async (req, res) => {
     if (request.status !== 'PENDING') {
       return res.status(400).json({ success: false, message: 'Request already processed' });
     }
-    const plan = request.requestedPlanId;
-    if (!plan) {
-      return res.status(400).json({ success: false, message: 'Requested plan not found' });
+    const { planId, transactionId, method, amount, paidAt, notes } = req.body || {};
+    const approvedPlanId = planId || request.requestedPlanId?._id;
+    if (!approvedPlanId) {
+      return res.status(400).json({ success: false, message: 'Approved plan is required' });
+    }
+    const plan = await SubscriptionPlan.findById(approvedPlanId);
+    if (!plan || !plan.isActive) {
+      return res.status(400).json({ success: false, message: 'Invalid or inactive plan' });
+    }
+    if (!transactionId || !String(transactionId).trim()) {
+      return res.status(400).json({ success: false, message: 'Transaction ID is required' });
+    }
+    if (amount == null || Number.isNaN(Number(amount))) {
+      return res.status(400).json({ success: false, message: 'Amount is required' });
     }
     const currentPlan = request.currentPlanId;
     if (currentPlan && (currentPlan.isFreeTrial || (currentPlan.name && /free tier/i.test(currentPlan.name)))) {
@@ -640,7 +651,7 @@ router.patch('/upgrade-requests/:id/approve', async (req, res) => {
     await ShopSubscription.findOneAndUpdate(
       { shopId: request.shopId },
       {
-        planId: request.requestedPlanId._id,
+        planId: plan._id,
         startDate,
         expiryDate,
         status: 'ACTIVE'
@@ -648,6 +659,14 @@ router.patch('/upgrade-requests/:id/approve', async (req, res) => {
       { upsert: true, new: true }
     );
 
+    request.approvedPlanId = plan._id;
+    request.transaction = {
+      transactionId: String(transactionId).trim(),
+      method: method ? String(method).trim() : undefined,
+      amount: Number(amount),
+      paidAt: paidAt ? new Date(paidAt) : new Date(),
+      notes: notes ? String(notes).trim() : undefined
+    };
     request.status = 'APPROVED';
     request.actionedAt = new Date();
     await request.save();

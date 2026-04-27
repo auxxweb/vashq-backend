@@ -16,9 +16,21 @@ const planUpgradeRequestSchema = new mongoose.Schema({
     ref: 'SubscriptionPlan',
     required: true
   },
+  approvedPlanId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SubscriptionPlan',
+    default: null
+  },
   message: {
     type: String,
     trim: true
+  },
+  transaction: {
+    transactionId: { type: String, trim: true },
+    method: { type: String, trim: true },
+    amount: { type: Number, min: 0 },
+    paidAt: { type: Date },
+    notes: { type: String, trim: true }
   },
   status: {
     type: String,
@@ -34,5 +46,6 @@ const planUpgradeRequestSchema = new mongoose.Schema({
 
 planUpgradeRequestSchema.index({ status: 1 });
 planUpgradeRequestSchema.index({ createdAt: -1 });
+planUpgradeRequestSchema.index({ shopId: 1, status: 1 });
 
 export default mongoose.model('PlanUpgradeRequest', planUpgradeRequestSchema);

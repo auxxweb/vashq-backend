@@ -17,7 +17,9 @@ const customerSchema = new mongoose.Schema({
   },
   whatsappNumber: {
     type: String,
-    required: [true, 'WhatsApp number is required']
+    // Backward compatible: historically required. We now treat "mobile number" as the single source,
+    // and default whatsappNumber to phone when not provided.
+    required: false
   },
   email: {
     type: String,
@@ -29,6 +31,11 @@ const customerSchema = new mongoose.Schema({
   },
   notes: {
     type: String
+  },
+  loyaltyPointsBalance: {
+    type: Number,
+    default: 0,
+    min: [0, 'Loyalty points balance must be non-negative']
   }
 }, {
   timestamps: true

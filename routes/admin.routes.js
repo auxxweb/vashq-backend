@@ -26,11 +26,49 @@ import User from '../models/User.model.js';
 import ExpenseType from '../models/ExpenseType.model.js';
 import Expense from '../models/Expense.model.js';
 import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
+import CustomerPackage from '../models/CustomerPackage.model.js';
+import PackageVisit from '../models/PackageVisit.model.js';
+import { sendPushNotification } from '../services/notificationService.js';
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(authenticate);
+
+// -------------------- PUSH NOTIFICATIONS (BUSINESS OWNERS ONLY) --------------------
+// POST /api/admin/push/fcm-token
+// Body: { token: string }
+// Stores token only for CAR_WASH_ADMIN
+router.post('/push/fcm-token', [
+  body('token').notEmpty().isString().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    if (req.user.role !== 'CAR_WASH_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Only business owners can register push tokens' });
+    }
+    const token = String(req.body.token).trim();
+    // Add token and cap list size to keep it sane
+    await User.updateOne(
+      { _id: req.user._id },
+      {
+        $addToSet: { fcmTokens: token },
+      }
+    );
+    // Optional cap to last 20 tokens
+    await User.updateOne(
+      { _id: req.user._id },
+      [{ $set: { fcmTokens: { $slice: ['$fcmTokens', -20] } } }]
+    ).catch(() => {});
+    res.json({ success: true, message: 'Token saved' });
+  } catch (e) {
+    console.error('Save FCM token error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
 // Allow CAR_WASH_ADMIN for all; EMPLOYEE for dashboard, jobs, upload, leaderboard, and job-creation data (customers, services, cars, settings)
 const allowAdminOrEmployeeForJobs = (req, res, next) => {
@@ -44,6 +82,8 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p === '/customers' ||
       p === '/services' ||
       p === '/settings' ||
+      p.startsWith('/packages') ||
+      p.startsWith('/notifications') ||
       p.startsWith('/invoices') ||
       p.startsWith('/cars') ||
       p === '/business' ||
@@ -73,6 +113,52 @@ const requireBusiness = (req, res, next) => {
 };
 
 router.use(requireBusiness);
+
+// -------------------- SUBSCRIPTION GATING --------------------
+// If subscription is expired (or pending upgrade after expiry), lock all features except plan upgrade workflow.
+const allowWhenLocked = (p) => {
+  return (
+    p === '/my-subscription' ||
+    p === '/available-plans' ||
+    p === '/upgrade-request' ||
+    p === '/upgrade-requests'
+  );
+};
+
+const enforceActiveSubscription = async (req, res, next) => {
+  try {
+    const p = req.path;
+    if (allowWhenLocked(p)) return next();
+
+    // Only gate business-scoped roles
+    if (!req.businessId) return next();
+
+    const sub = await ShopSubscription.findOne({ shopId: req.businessId }).select('status expiryDate').lean();
+    if (!sub) return next(); // fallback: let my-subscription create defaults
+
+    const now = new Date();
+    let status = sub.status;
+    if (sub.expiryDate && new Date(sub.expiryDate) < now && status === 'ACTIVE') {
+      await ShopSubscription.updateOne({ shopId: req.businessId }, { status: 'EXPIRED' }).catch(() => {});
+      status = 'EXPIRED';
+    }
+
+    if (status !== 'ACTIVE') {
+      return res.status(402).json({
+        success: false,
+        code: 'SUBSCRIPTION_EXPIRED',
+        message: 'Your subscription has expired. Please request a plan upgrade.',
+        subscriptionStatus: status
+      });
+    }
+    next();
+  } catch (e) {
+    console.error('Subscription gate error:', e);
+    next();
+  }
+};
+
+router.use(enforceActiveSubscription);
 
 // Multer: max 4 files, 20MB each (client compresses large images; this is a safety limit)
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -239,9 +325,31 @@ function parseExpenseDateRange(range, from, to) {
 
 router.get('/expenses', expenseAdminOnly, async (req, res) => {
   try {
-    const { range = 'today', from, to } = req.query;
+    const { range = 'today', from, to, search, expenseTypeId } = req.query;
     const { start, end } = parseExpenseDateRange(range, from, to);
     const query = { businessId: req.businessId, expenseDate: { $gte: start, $lte: end } };
+    if (expenseTypeId && String(expenseTypeId).trim()) {
+      query.expenseTypeId = String(expenseTypeId).trim();
+    }
+    if (search && typeof search === 'string' && search.trim()) {
+      const termRaw = search.trim();
+      const term = termRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const or = [
+        { notes: { $regex: term, $options: 'i' } },
+      ];
+      const asNumber = Number(termRaw);
+      if (!Number.isNaN(asNumber)) {
+        or.push({ amount: asNumber });
+      }
+      const typeIds = await ExpenseType.find({
+        businessId: req.businessId,
+        expenseName: { $regex: term, $options: 'i' }
+      }).distinct('_id');
+      if (typeIds?.length) {
+        or.push({ expenseTypeId: { $in: typeIds } });
+      }
+      query.$or = or;
+    }
     const expenses = await Expense.find(query)
       .populate('expenseTypeId', 'expenseName')
       .populate('createdBy', 'name email')
@@ -391,6 +499,7 @@ router.post('/invoices', [
       companyGst: null,
       customerName: job.customerId?.name ?? '',
       customerPhone: job.customerId?.phone || job.customerId?.whatsappNumber || '',
+      customerGst: null,
       vehicleNumber: job.carId?.carNumber ?? '',
       items,
       discount: 0,
@@ -413,7 +522,11 @@ router.get('/invoices', async (req, res) => {
   try {
     const query = { businessId: req.businessId };
     if (req.query.jobId) query.jobId = req.query.jobId;
-    const invoices = await Invoice.find(query).populate('jobId', 'tokenNumber status').sort({ createdAt: -1 }).lean();
+    const invoices = await Invoice.find(query)
+      .populate('jobId', 'tokenNumber status')
+      .populate('packageId', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
     res.json({ success: true, invoices });
   } catch (error) {
     console.error('List invoices error:', error);
@@ -426,6 +539,7 @@ router.get('/invoices/:id', async (req, res) => {
   try {
     const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId })
       .populate('jobId')
+      .populate('packageId', 'name')
       .lean();
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
@@ -445,11 +559,14 @@ router.put('/invoices/:id', [
   body('companyGst').optional().trim(),
   body('customerName').optional().trim(),
   body('customerPhone').optional().trim(),
+  body('customerGst').optional().trim(),
   body('vehicleNumber').optional().trim(),
   body('discount').optional().isFloat({ min: 0 }),
   body('finalAmount').optional().isFloat({ min: 0 }),
   body('taxPercentage').optional().isFloat({ min: 0, max: 100 }),
   body('gstAmount').optional().isFloat({ min: 0 }),
+  body('loyaltyRedeemedPoints').optional().isInt({ min: 0 }),
+  body('loyaltyRedeemedAmount').optional().isFloat({ min: 0 }),
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE'])
 ], async (req, res) => {
   try {
@@ -464,7 +581,50 @@ router.put('/invoices/:id', [
     if (invoice.paymentStatus === 'RECEIVED') {
       return res.status(403).json({ success: false, message: 'Invoice is closed. No further edits allowed.' });
     }
-    const allowed = ['companyName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'paymentMethod'];
+    const prevRedeemedPoints = Number(invoice.loyaltyRedeemedPoints || 0);
+    const nextRedeemedPointsRaw = req.body.loyaltyRedeemedPoints !== undefined ? Number(req.body.loyaltyRedeemedPoints || 0) : prevRedeemedPoints;
+    const nextRedeemedPoints = Math.max(0, Math.floor(nextRedeemedPointsRaw));
+
+    // If loyalty points are being updated, immediately reflect it in customer balance (reserve/release points).
+    if (req.body.loyaltyRedeemedPoints !== undefined) {
+      const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId }).select('customerId').lean();
+      if (job?.customerId) {
+        const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('loyaltyPointValueInr loyaltyMaxRedeemPointsPerJob').lean();
+        const pointValue = Math.max(0, Number(settings?.loyaltyPointValueInr || 0));
+        const maxPerJob = Math.max(0, Number(settings?.loyaltyMaxRedeemPointsPerJob || 0));
+        if (pointValue <= 0 || maxPerJob <= 0) {
+          if (nextRedeemedPoints > 0) {
+            return res.status(400).json({ success: false, message: 'Loyalty redemption is disabled in settings' });
+          }
+        } else {
+          if (nextRedeemedPoints > maxPerJob) {
+            return res.status(400).json({ success: false, message: `Max redeem per job is ${maxPerJob} points` });
+          }
+        }
+
+        const customer = await Customer.findOne({ _id: job.customerId, businessId: req.businessId }).select('loyaltyPointsBalance');
+        if (customer) {
+          const delta = nextRedeemedPoints - prevRedeemedPoints; // + means deduct more, - means refund
+          if (delta > 0) {
+            if (Number(customer.loyaltyPointsBalance || 0) < delta) {
+              return res.status(400).json({ success: false, message: 'Insufficient loyalty points' });
+            }
+            customer.loyaltyPointsBalance = Number(customer.loyaltyPointsBalance || 0) - delta;
+            await customer.save();
+          } else if (delta < 0) {
+            customer.loyaltyPointsBalance = Number(customer.loyaltyPointsBalance || 0) + Math.abs(delta);
+            await customer.save();
+          }
+        }
+
+        // Keep amount consistent with settings (server-side source of truth)
+        if (req.body.loyaltyRedeemedAmount !== undefined && pointValue > 0) {
+          req.body.loyaltyRedeemedAmount = nextRedeemedPoints * pointValue;
+        }
+      }
+    }
+
+    const allowed = ['companyName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'customerGst', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount', 'paymentMethod'];
     for (const key of allowed) {
       if (req.body[key] !== undefined) invoice[key] = req.body[key];
     }
@@ -520,6 +680,13 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    if (invoice.paymentStatus === 'RECEIVED') {
+      return res.json({ success: true, message: 'Job already closed' });
+    }
+
+    const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId })
+      .select('customerId services assignedTo')
+      .lean();
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
@@ -527,7 +694,54 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
       { _id: invoice.jobId, businessId: req.businessId },
       { $set: { status: 'DELIVERED', actualDelivery: new Date() } }
     );
+
+    // Loyalty points: earn from services (redeem is already applied when invoice is saved)
+    if (job?.customerId) {
+      const serviceIds = Array.isArray(job.services) ? job.services.map((s) => s?.serviceId).filter(Boolean) : [];
+      let earned = 0;
+      if (serviceIds.length) {
+        const svc = await Service.find({ businessId: req.businessId, _id: { $in: serviceIds } })
+          .select('loyaltyPointsEarned')
+          .lean();
+        earned = svc.reduce((sum, s) => sum + Math.max(0, Number(s.loyaltyPointsEarned || 0)), 0);
+      }
+      if (earned !== 0) {
+        const customer = await Customer.findOne({ _id: job.customerId, businessId: req.businessId }).select('loyaltyPointsBalance');
+        if (customer) {
+          customer.loyaltyPointsBalance = Math.max(0, Number(customer.loyaltyPointsBalance || 0) + earned);
+          await customer.save();
+        }
+      }
+    }
     res.json({ success: true, message: 'Job closed' });
+
+    // Push notification to business owner + assigned employee (job_closed)
+    try {
+      const ownerId = req.user.role === 'CAR_WASH_ADMIN'
+        ? req.user._id
+        : (await User.findOne({ businessId: req.businessId, role: 'CAR_WASH_ADMIN', status: 'ACTIVE' }).select('_id').lean())?._id;
+      if (ownerId) {
+        const pushRes = await sendPushNotification({
+          businessOwnerId: ownerId,
+          title: 'Booking completed',
+          body: 'Invoice marked paid. Booking closed.',
+          data: { type: 'job_closed', bookingId: invoice.jobId, url: `/admin/invoices/${invoice._id}` }
+        });
+        console.log('Push job_closed:', pushRes);
+      }
+
+      if (job?.assignedTo) {
+        const pushEmp = await sendPushNotification({
+          businessOwnerId: job.assignedTo,
+          title: 'Job closed',
+          body: 'Invoice marked paid. Job delivered.',
+          data: { type: 'job_closed', bookingId: invoice.jobId, url: `/employee/invoices/${invoice._id}` }
+        });
+        console.log('Push job_closed (employee):', pushEmp);
+      }
+    } catch (pushErr) {
+      console.warn('Push notification error (job_closed):', pushErr?.message || pushErr);
+    }
   } catch (error) {
     console.error('Close job error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -662,33 +876,65 @@ router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
 // GET /api/admin/reports/sales?range=...&from=&to= (sales = invoices; revenue = sum of invoice final amount)
 router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
   try {
-    const { range = 'daily', from, to } = req.query;
+    const { range = 'daily', from, to, source = 'all' } = req.query;
     const { start, end } = parseReportDateRange(range, from, to);
-    // Get invoices whose job was delivered in date range (use job.actualDelivery or job.updatedAt for "sale date")
-    const deliveredJobIds = await Job.find({
-      businessId: req.businessId,
-      status: 'DELIVERED',
-      $or: [
-        { actualDelivery: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end }, actualDelivery: { $exists: false } }
-      ]
-    }).distinct('_id');
-    const invoices = await Invoice.find({
-      businessId: req.businessId,
-      jobId: { $in: deliveredJobIds }
-    })
-      .populate({
-        path: 'jobId',
-        populate: [
-          { path: 'customerId', select: 'name phone email' },
-          { path: 'carId', select: 'registrationNumber carNumber model make color' },
-          { path: 'assignedTo', select: 'name email employeeCode' },
-          { path: 'services.serviceId', model: 'Service', select: 'name' }
+
+    let invoices = [];
+    if (source === 'all' || source === 'jobs') {
+      // Job sales: invoices whose job was delivered in date range (use job.actualDelivery or job.updatedAt for "sale date")
+      const deliveredJobIds = await Job.find({
+        businessId: req.businessId,
+        status: 'DELIVERED',
+        $or: [
+          { actualDelivery: { $gte: start, $lte: end } },
+          { updatedAt: { $gte: start, $lte: end }, actualDelivery: { $exists: false } }
         ]
+      }).distinct('_id');
+      invoices = await Invoice.find({
+        businessId: req.businessId,
+        jobId: { $in: deliveredJobIds }
       })
-      .sort({ createdAt: -1 })
-      .lean();
-    const totalRevenue = invoices.reduce((s, inv) => s + (inv.finalAmount || 0), 0);
+        .populate({
+          path: 'jobId',
+          populate: [
+            { path: 'customerId', select: 'name phone email' },
+            { path: 'carId', select: 'registrationNumber carNumber model make color' },
+            { path: 'assignedTo', select: 'name email employeeCode' },
+            { path: 'services.serviceId', model: 'Service', select: 'name' }
+          ]
+        })
+        .sort({ createdAt: -1 })
+        .lean();
+      invoices = invoices.map((inv) => ({ ...inv, saleType: 'job' }));
+    }
+
+    let packageSales = [];
+    if (source === 'all' || source === 'packages') {
+      packageSales = await Invoice.find({
+        businessId: req.businessId,
+        saleType: 'PACKAGE',
+        paymentStatus: 'RECEIVED',
+        paymentReceivedAt: { $gte: start, $lte: end }
+      })
+        .sort({ paymentReceivedAt: -1, createdAt: -1 })
+        .lean();
+      packageSales = packageSales.map((inv) => ({
+        ...inv,
+        saleType: 'package'
+      }));
+    }
+
+    const data = [...invoices, ...packageSales].sort((a, b) => {
+      const da = a.saleType === 'job'
+        ? (a.jobId?.actualDelivery || a.jobId?.createdAt || a.createdAt)
+        : (a.paymentReceivedAt || a.createdAt);
+      const db = b.saleType === 'job'
+        ? (b.jobId?.actualDelivery || b.jobId?.createdAt || b.createdAt)
+        : (b.paymentReceivedAt || b.createdAt);
+      return new Date(db).getTime() - new Date(da).getTime();
+    });
+
+    const totalRevenue = data.reduce((s, inv) => s + (inv.finalAmount || 0), 0);
     const totalDiscountAmount = invoices.reduce((s, inv) => {
       const sub = inv.subtotal || 0;
       const pct = inv.discount || 0;
@@ -697,9 +943,9 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     const totalGst = invoices.reduce((s, inv) => s + (inv.gstAmount || 0), 0);
     res.json({
       success: true,
-      data: invoices,
+      data,
       summary: {
-        totalSales: invoices.length,
+        totalSales: data.length,
         totalRevenue: Math.round(totalRevenue * 100) / 100,
         totalDiscountAmount: Math.round(totalDiscountAmount * 100) / 100,
         totalGst: Math.round(totalGst * 100) / 100
@@ -709,6 +955,74 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     });
   } catch (error) {
     console.error('Reports sales error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/visits?range=...&from=&to=
+router.get('/reports/visits', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end } = parseReportDateRange(range, from, to);
+
+    const visits = await PackageVisit.find({
+      businessId: req.businessId,
+      date: { $gte: start, $lte: end }
+    })
+      .populate({
+        path: 'customerPackageId',
+        select: 'name status totalVisits visitsUsed visitsRemaining customerId',
+        populate: { path: 'customerId', select: 'name phone email' }
+      })
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
+
+    // Compute remaining visits "as of" each row date (so older rows don't show today's remaining).
+    const pkgIds = [...new Set(visits.map((v) => v.customerPackageId?._id).filter(Boolean).map((id) => id.toString()))];
+    const completed = pkgIds.length ? await PackageVisit.find({
+      businessId: req.businessId,
+      customerPackageId: { $in: pkgIds },
+      status: 'completed',
+      date: { $lte: end }
+    }).select('customerPackageId date').sort({ date: 1, createdAt: 1 }).lean() : [];
+
+    const completedDatesByPkg = new Map();
+    for (const r of completed) {
+      const key = String(r.customerPackageId);
+      if (!completedDatesByPkg.has(key)) completedDatesByPkg.set(key, []);
+      completedDatesByPkg.get(key).push(new Date(r.date).getTime());
+    }
+
+    const countCompletedUpTo = (arr, t) => {
+      // upper_bound (<= t)
+      let lo = 0, hi = arr.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (arr[mid] <= t) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+
+    const visitsWithComputed = visits.map((v) => {
+      const pkg = v.customerPackageId || {};
+      const pkgId = pkg?._id ? String(pkg._id) : '';
+      const total = Number(pkg.totalVisits || 0);
+      const arr = pkgId ? (completedDatesByPkg.get(pkgId) || []) : [];
+      const t = v.date ? new Date(v.date).getTime() : 0;
+      const usedAfter = t && arr.length ? countCompletedUpTo(arr, t) : 0;
+      const remainingAfter = Math.max(0, total - usedAfter);
+      return { ...v, usedAfter, remainingAfter };
+    });
+
+    const summary = {
+      totalVisits: visits.length,
+      byStatus: visits.reduce((acc, v) => { acc[v.status] = (acc[v.status] || 0) + 1; return acc; }, {})
+    };
+
+    res.json({ success: true, data: visitsWithComputed, summary, start, end });
+  } catch (error) {
+    console.error('Reports visits error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -1377,6 +1691,41 @@ router.post('/employees/:id/reset-password', async (req, res) => {
 
 // ==================== CUSTOMER MANAGEMENT ====================
 
+// @route   GET /api/admin/customers/:id/visits
+// @desc    Get customer visit count (jobs count)
+// @access  Private (Car Wash Admin)
+router.get('/customers/:id/visits', async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId }).select('_id').lean();
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+    const visits = await Job.countDocuments({ businessId: req.businessId, customerId: customer._id });
+    res.json({ success: true, visits });
+  } catch (error) {
+    console.error('Get customer visits error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/admin/customers/:id/loyalty
+// @desc    Get customer loyalty points balance
+// @access  Private (Car Wash Admin)
+router.get('/customers/:id/loyalty', async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId })
+      .select('_id loyaltyPointsBalance')
+      .lean();
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+    res.json({ success: true, loyaltyPointsBalance: customer.loyaltyPointsBalance ?? 0 });
+  } catch (error) {
+    console.error('Get customer loyalty error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   GET /api/admin/customers
 // @desc    Get customers (search, pagination)
 // @access  Private (Car Wash Admin)
@@ -1412,9 +1761,25 @@ router.get('/customers', async (req, res) => {
       })
     );
 
+    // Active package badge: customer has an active package with remaining visits and not expired
+    const now = new Date();
+    const customerIds = customers.map((c) => c._id);
+    const activePkgCustomerIds = await CustomerPackage.find({
+      businessId: req.businessId,
+      customerId: { $in: customerIds },
+      status: 'active',
+      visitsRemaining: { $gt: 0 },
+      expiryDate: { $gte: now }
+    }).distinct('customerId');
+    const activeSet = new Set(activePkgCustomerIds.map((id) => id.toString()));
+    const customersWithBadges = customersWithStats.map((c) => ({
+      ...c,
+      hasActivePackage: activeSet.has(String(c._id))
+    }));
+
     res.json({
       success: true,
-      customers: customersWithStats,
+      customers: customersWithBadges,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -1437,7 +1802,7 @@ router.get('/customers', async (req, res) => {
 router.post('/customers', [
   body('name').notEmpty().trim(),
   body('phone').notEmpty(),
-  body('whatsappNumber').notEmpty()
+  body('whatsappNumber').optional()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1445,8 +1810,28 @@ router.post('/customers', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
+    const phone = String(req.body.phone || '').trim();
+    const whatsappNumber = String(req.body.whatsappNumber || '').trim();
+    const normalizedPhone = phone.replace(/[^\d+]/g, '');
+    const normalizedWhatsapp = whatsappNumber.replace(/[^\d+]/g, '');
+
+    // Ensure a single mobile number per customer and prevent duplicates per business.
+    const existing = await Customer.findOne({
+      businessId: req.businessId,
+      $or: [
+        { phone: normalizedPhone },
+        { whatsappNumber: normalizedPhone },
+        ...(normalizedWhatsapp ? [{ phone: normalizedWhatsapp }, { whatsappNumber: normalizedWhatsapp }] : [])
+      ]
+    }).lean();
+    if (existing) {
+      return res.status(400).json({ success: false, message: 'Mobile number already exists' });
+    }
+
     const customer = await Customer.create({
       ...req.body,
+      phone: normalizedPhone,
+      whatsappNumber: normalizedWhatsapp || normalizedPhone,
       businessId: req.businessId
     });
 
@@ -1469,12 +1854,22 @@ router.post('/customers', [
 router.put('/customers/:id', [
   body('name').optional().notEmpty().trim(),
   body('phone').optional().notEmpty(),
-  body('whatsappNumber').optional().notEmpty()
+  body('whatsappNumber').optional()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    if (req.body.phone) {
+      const normalizedPhone = String(req.body.phone || '').trim().replace(/[^\d+]/g, '');
+      req.body.phone = normalizedPhone;
+      if (!req.body.whatsappNumber) {
+        req.body.whatsappNumber = normalizedPhone;
+      }
+    }
+    if (req.body.whatsappNumber) {
+      req.body.whatsappNumber = String(req.body.whatsappNumber || '').trim().replace(/[^\d+]/g, '');
     }
     const customer = await Customer.findOneAndUpdate(
       { _id: req.params.id, businessId: req.businessId },
@@ -1737,7 +2132,8 @@ router.post('/services', [
   body('name').notEmpty().trim(),
   body('price').isFloat({ min: 0 }),
   body('minTime').optional().isInt({ min: 0 }),
-  body('maxTime').optional().isInt({ min: 0 })
+  body('maxTime').optional().isInt({ min: 0 }),
+  body('loyaltyPointsEarned').optional().isInt({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1770,7 +2166,8 @@ router.put('/services/:id', [
   body('name').optional().notEmpty().trim(),
   body('price').optional().isFloat({ min: 0 }),
   body('minTime').optional().isInt({ min: 0 }),
-  body('maxTime').optional().isInt({ min: 0 })
+  body('maxTime').optional().isInt({ min: 0 }),
+  body('loyaltyPointsEarned').optional().isInt({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1873,7 +2270,7 @@ router.get('/jobs/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/jobs', async (req, res) => {
   try {
-    const { status, page = 1, limit = 20, search } = req.query;
+    const { status, page = 1, limit = 20, search, from, to } = req.query;
     const query = { businessId: req.businessId };
     // Employee sees only jobs assigned to them
     if (req.user.role === 'EMPLOYEE') {
@@ -1901,6 +2298,20 @@ router.get('/jobs', async (req, res) => {
         { customerId: { $in: customerIds } },
         { carId: { $in: carIds } }
       ];
+    }
+
+    // Date range filter (createdAt) - supports from/to as ISO or YYYY-MM-DD
+    if ((from && String(from).trim()) || (to && String(to).trim())) {
+      const range = {};
+      if (from && String(from).trim()) {
+        const d = new Date(String(from).trim());
+        if (!Number.isNaN(d.getTime())) range.$gte = d;
+      }
+      if (to && String(to).trim()) {
+        const d = new Date(String(to).trim());
+        if (!Number.isNaN(d.getTime())) range.$lte = d;
+      }
+      if (Object.keys(range).length) query.createdAt = range;
     }
 
     const jobs = await Job.find(query)
@@ -1970,7 +2381,8 @@ router.post('/jobs', [
   body('beforeImages').optional().isArray(),
   body('notes').optional().trim(),
   body('estimatedDelivery').optional().isISO8601(),
-  body('assignedTo').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid employee')
+  body('assignedTo').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid employee'),
+  body('customerPackageId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid package')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1984,7 +2396,7 @@ router.post('/jobs', [
       });
     }
 
-    const { customerId, carId, serviceIds, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody } = req.body;
+    const { customerId, carId, serviceIds, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId } = req.body;
 
     // Check capacity
     const capacityCheck = await canAcceptNewJob(req.businessId);
@@ -2092,6 +2504,7 @@ router.post('/jobs', [
           beforeImages: Array.isArray(beforeImages) ? beforeImages : [],
           notes,
           assignedTo,
+          customerPackageId: customerPackageId || null,
           services: services.map(s => ({
             serviceId: s._id,
             price: s.price
@@ -2168,6 +2581,35 @@ router.post('/jobs', [
       success: true,
       job
     });
+
+    // Push notification to business owner + assigned employee (job_received)
+    try {
+      const ownerId = req.user.role === 'CAR_WASH_ADMIN'
+        ? req.user._id
+        : (await User.findOne({ businessId: req.businessId, role: 'CAR_WASH_ADMIN', status: 'ACTIVE' }).select('_id').lean())?._id;
+      if (ownerId) {
+        const pushRes = await sendPushNotification({
+          businessOwnerId: ownerId,
+          title: 'New booking received',
+          body: `Token ${job.tokenNumber} · ${customer?.name || 'Customer'}`,
+          data: { type: 'job_received', bookingId: job._id, url: `/admin/jobs/${job._id}` }
+        });
+        console.log('Push job_received:', pushRes);
+      }
+
+      // If job is assigned, notify that employee too
+      if (job.assignedTo) {
+        const pushEmp = await sendPushNotification({
+          businessOwnerId: job.assignedTo,
+          title: 'New job assigned',
+          body: `Token ${job.tokenNumber} · ${customer?.name || 'Customer'}`,
+          data: { type: 'job_received', bookingId: job._id, url: `/employee/jobs/${job._id}` }
+        });
+        console.log('Push job_received (employee):', pushEmp);
+      }
+    } catch (pushErr) {
+      console.warn('Push notification error (job_received):', pushErr?.message || pushErr);
+    }
   } catch (error) {
     console.error('Create job error:', error);
     res.status(500).json({
@@ -2226,6 +2668,38 @@ router.patch('/jobs/:id/status', [
     });
 
     await job.save();
+
+    // Package integration (optional): deduct ONE visit only on completion (DELIVERED).
+    // Idempotent: uses bookingId=job._id to avoid double-deduct on repeated status updates.
+    if (status === 'DELIVERED' && job.customerPackageId) {
+      try {
+        const already = await PackageVisit.findOne({
+          businessId: req.businessId,
+          customerPackageId: job.customerPackageId,
+          bookingId: job._id,
+          status: 'completed'
+        }).select('_id').lean();
+        if (!already) {
+          const pkg = await CustomerPackage.findOne({ _id: job.customerPackageId, businessId: req.businessId });
+          if (pkg && pkg.status === 'active' && pkg.visitsRemaining > 0 && (!pkg.expiryDate || new Date() <= new Date(pkg.expiryDate))) {
+            await PackageVisit.create({
+              businessId: req.businessId,
+              customerPackageId: pkg._id,
+              bookingId: job._id,
+              date: new Date(),
+              status: 'completed',
+              notes: `Auto from job ${job.tokenNumber}`
+            });
+            pkg.visitsUsed = Number(pkg.visitsUsed || 0) + 1;
+            pkg.visitsRemaining = Math.max(0, Number(pkg.visitsRemaining || 0) - 1);
+            if (pkg.visitsRemaining === 0) pkg.status = 'completed';
+            await pkg.save();
+          }
+        }
+      } catch (pkgErr) {
+        console.error('Package visit completion error:', pkgErr);
+      }
+    }
 
     // Send WhatsApp notification
     try {
@@ -2629,7 +3103,9 @@ router.put('/settings', [
   body('qrCodeImage').optional().trim().isString(),
   body('paymentMobileNumber').optional().trim().isString(),
   body('gstNumber').optional({ nullable: true }).trim().isString(),
-  body('taxPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 })
+  body('taxPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+  body('loyaltyPointValueInr').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('loyaltyMaxRedeemPointsPerJob').optional({ nullable: true }).isInt({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -2653,6 +3129,8 @@ router.put('/settings', [
       if (!updateFields.gstNumber) updateFields.taxPercentage = null;
     }
     if (req.body.taxPercentage !== undefined) updateFields.taxPercentage = req.body.taxPercentage;
+    if (req.body.loyaltyPointValueInr !== undefined) updateFields.loyaltyPointValueInr = req.body.loyaltyPointValueInr === '' ? 0 : Number(req.body.loyaltyPointValueInr);
+    if (req.body.loyaltyMaxRedeemPointsPerJob !== undefined) updateFields.loyaltyMaxRedeemPointsPerJob = req.body.loyaltyMaxRedeemPointsPerJob === '' ? 0 : Number(req.body.loyaltyMaxRedeemPointsPerJob);
 
     let settings = await BusinessSettings.findOne({ businessId: req.businessId });
     if (!settings) {
@@ -2841,6 +3319,20 @@ router.post('/upgrade-request', [
       message: req.body.message || undefined,
       status: 'PENDING'
     });
+
+    // If the subscription is already expired, mark it as pending upgrade to keep the shop locked until Super Admin assigns a plan.
+    try {
+      const now = new Date();
+      const exp = subscription?.expiryDate ? new Date(subscription.expiryDate) : null;
+      const isExpired = subscription?.status === 'EXPIRED' || (exp && exp < now);
+      if (isExpired) {
+        await ShopSubscription.updateOne(
+          { shopId: req.businessId },
+          { status: 'PENDING_UPGRADE' }
+        );
+      }
+    } catch (_) {}
+
     await request.populate('currentPlanId', 'name');
     await request.populate('requestedPlanId', 'name validityDays features');
     res.status(201).json({ success: true, request });

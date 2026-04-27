@@ -35,6 +35,9 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, trim: true },
   address: { type: String, trim: true },
   employeeCode: { type: String, trim: true },
+  // Firebase Cloud Messaging tokens for push notifications (BUSINESS OWNERS ONLY).
+  // Do NOT store tokens for customers (customers do not log into the app).
+  fcmTokens: { type: [String], default: [] },
   lastLoginAt: {
     type: Date
   }

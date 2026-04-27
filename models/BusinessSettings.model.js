@@ -67,7 +67,10 @@ const businessSettingsSchema = new mongoose.Schema({
   paymentMobileNumber: { type: String, trim: true },
   // GST (optional) - shown on invoice when set
   gstNumber: { type: String, trim: true },
-  taxPercentage: { type: Number, min: 0, max: 100 }
+  taxPercentage: { type: Number, min: 0, max: 100 },
+  // Loyalty program (optional)
+  loyaltyPointValueInr: { type: Number, min: 0, default: 0 }, // 1 point = ₹X
+  loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 } // 0 = no redeem allowed
 }, {
   timestamps: true
 });

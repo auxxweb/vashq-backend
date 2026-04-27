@@ -7,7 +7,10 @@ const invoiceItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({
-  jobId: { type: mongoose.Schema.Types.ObjectId, ref: 'Job', required: true },
+  saleType: { type: String, enum: ['JOB', 'PACKAGE'], default: 'JOB', index: true },
+  jobId: { type: mongoose.Schema.Types.ObjectId, ref: 'Job' },
+  packageId: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomerPackage' },
+  packageName: { type: String, trim: true },
   businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true },
   invoiceNumber: { type: String, required: true, trim: true },
   // Company (for display)
@@ -18,6 +21,7 @@ const invoiceSchema = new mongoose.Schema({
   // Customer
   customerName: { type: String, trim: true },
   customerPhone: { type: String, trim: true },
+  customerGst: { type: String, trim: true },
   vehicleNumber: { type: String, trim: true },
   // Line items & totals
   items: [invoiceItemSchema],
@@ -25,6 +29,8 @@ const invoiceSchema = new mongoose.Schema({
   subtotal: { type: Number, required: true, min: 0 },
   taxPercentage: { type: Number, min: 0, max: 100 },
   gstAmount: { type: Number, default: 0, min: 0 },
+  loyaltyRedeemedPoints: { type: Number, default: 0, min: 0 },
+  loyaltyRedeemedAmount: { type: Number, default: 0, min: 0 },
   finalAmount: { type: Number, required: true, min: 0 },
   // Payment
   paymentMethod: { type: String, enum: ['CASH', 'ONLINE'], default: 'CASH' },
@@ -37,7 +43,10 @@ const invoiceSchema = new mongoose.Schema({
 
 invoiceSchema.index({ businessId: 1 });
 invoiceSchema.index({ businessId: 1, invoiceNumber: 1 }, { unique: true });
-invoiceSchema.index({ jobId: 1 }, { unique: true });
+// Unique invoice per job (sparse to allow package invoices with no jobId)
+invoiceSchema.index({ jobId: 1 }, { unique: true, sparse: true });
+// Unique invoice per package purchase (optional but prevents duplicates)
+invoiceSchema.index({ packageId: 1 }, { unique: true, sparse: true });
 invoiceSchema.index({ shareToken: 1 });
 
 export function generateShareToken() {

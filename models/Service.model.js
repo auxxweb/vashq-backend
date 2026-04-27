@@ -29,6 +29,11 @@ const serviceSchema = new mongoose.Schema({
   description: {
     type: String
   },
+  loyaltyPointsEarned: {
+    type: Number,
+    default: 0,
+    min: [0, 'Loyalty points must be non-negative']
+  },
   isActive: {
     type: Boolean,
     default: true

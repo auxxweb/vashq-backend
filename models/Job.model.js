@@ -77,6 +77,13 @@ const jobSchema = new mongoose.Schema({
     ref: 'User',
     default: null
   },
+  // Optional package linkage (prepaid package). Do NOT deduct on job creation; only on completion.
+  customerPackageId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CustomerPackage',
+    default: null,
+    index: true
+  },
   services: [jobServiceSchema],
   statusHistory: [jobStatusHistorySchema]
 }, {
