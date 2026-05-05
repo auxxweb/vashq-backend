@@ -57,6 +57,27 @@ const jobSchema = new mongoose.Schema({
     required: true,
     default: 0
   },
+  /** Optional amount collected when the job is created (applied on invoice as advance). */
+  advancePayment: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  advancePaymentMethod: {
+    type: String,
+    enum: ['CASH', 'ONLINE', 'SPLIT'],
+    default: 'CASH'
+  },
+  advanceCashAmount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  advanceOnlineAmount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   estimatedDelivery: {
     type: Date
   },

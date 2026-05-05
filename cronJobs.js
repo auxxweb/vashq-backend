@@ -5,6 +5,7 @@ import Job from './models/Job.model.js';
 import CustomerPackage from './models/CustomerPackage.model.js';
 import PackageVisit from './models/PackageVisit.model.js';
 import ShopSubscription from './models/ShopSubscription.model.js';
+import OwnerTask from './models/OwnerTask.model.js';
 import { sendPushNotification } from './services/notificationService.js';
 
 function startOfDay(d) {
@@ -114,11 +115,61 @@ async function runDailyOwnerNotifications() {
   }
 }
 
+async function runOwnerTaskReminders() {
+  if (mongoose.connection.readyState !== 1) return;
+  const now = new Date();
+  const in1h = new Date(now.getTime() + 60 * 60 * 1000);
+  const windowStart = new Date(in1h.getTime() - 5 * 60 * 1000); // 5 min scheduler window
+  const windowEnd = new Date(in1h.getTime() + 5 * 60 * 1000);
+
+  // Tasks ending in ~1 hour (±5min), still pending, not reminded
+  const tasks = await OwnerTask.find({
+    status: 'PENDING',
+    reminderSentAt: { $exists: false },
+    endAt: { $gte: windowStart, $lte: windowEnd },
+  })
+    .select('_id businessId title endAt')
+    .lean();
+  if (!tasks.length) return;
+
+  const ownersByBiz = new Map();
+  const bizIds = [...new Set(tasks.map((t) => String(t.businessId)).filter(Boolean))];
+  const owners = await User.find({ role: 'CAR_WASH_ADMIN', status: 'ACTIVE', businessId: { $in: bizIds } })
+    .select('_id businessId')
+    .lean();
+  for (const o of owners) {
+    const k = String(o.businessId);
+    if (!ownersByBiz.has(k)) ownersByBiz.set(k, []);
+    ownersByBiz.get(k).push(o._id);
+  }
+
+  for (const t of tasks) {
+    const bizKey = String(t.businessId);
+    const recipients = ownersByBiz.get(bizKey) || [];
+    if (!recipients.length) continue;
+    const endTime = t.endAt ? new Date(t.endAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    for (const ownerId of recipients) {
+      await sendPushNotification({
+        businessOwnerId: ownerId,
+        title: 'Task reminder',
+        body: `${t.title}${endTime ? ` (ends at ${endTime})` : ''} in 1 hour.`,
+        data: { type: 'owner_task_reminder', taskId: String(t._id) },
+      });
+    }
+    await OwnerTask.updateOne({ _id: t._id, reminderSentAt: { $exists: false } }, { $set: { reminderSentAt: new Date() } });
+  }
+}
+
 export function startCronJobs() {
   // DAILY 9 AM local business timezone (default Asia/Kolkata; override with CRON_TZ if needed)
   const tz = process.env.CRON_TZ || 'Asia/Kolkata';
   cron.schedule('0 9 * * *', () => {
     runDailyOwnerNotifications().catch((e) => console.error('Daily cron error:', e));
+  }, { timezone: tz });
+
+  // Every 5 minutes: owner task reminders (1 hour before endAt)
+  cron.schedule('*/5 * * * *', () => {
+    runOwnerTaskReminders().catch((e) => console.error('Task reminder cron error:', e));
   }, { timezone: tz });
 }
 

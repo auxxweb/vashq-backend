@@ -29,6 +29,11 @@ import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/In
 import CustomerPackage from '../models/CustomerPackage.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
+import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
+import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields } from '../utils/invoicePayment.js';
+import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
+import { invoiceSettlementAggregationStages, invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
+import OwnerTask from '../models/OwnerTask.model.js';
 
 const router = express.Router();
 
@@ -221,6 +226,125 @@ const expenseAdminOnly = (req, res, next) => {
   }
   next();
 };
+
+// ==================== OWNER TASKS (Car Wash Admin only) ====================
+function computedTaskStatus(task, now = new Date()) {
+  const endAt = task?.endAt ? new Date(task.endAt) : null;
+  const completedAt = task?.completedAt ? new Date(task.completedAt) : null;
+  if (task?.status === 'COMPLETED') {
+    const early = !!(completedAt && endAt && completedAt.getTime() + 30_000 < endAt.getTime()); // 30s tolerance
+    return early ? 'EARLY' : 'COMPLETED';
+  }
+  if (endAt && endAt.getTime() < now.getTime()) return 'OVERDUE';
+  return 'PENDING';
+}
+
+// GET /api/admin/tasks?from=ISO&to=ISO
+router.get('/tasks', expenseAdminOnly, async (req, res) => {
+  try {
+    const from = req.query.from ? new Date(String(req.query.from)) : null;
+    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    const q = { businessId: req.businessId };
+    if (from && !Number.isNaN(from.getTime())) q.endAt = { ...(q.endAt || {}), $gte: from };
+    if (to && !Number.isNaN(to.getTime())) q.startAt = { ...(q.startAt || {}), $lte: to };
+    const tasks = await OwnerTask.find(q).sort({ startAt: 1 }).lean();
+    const now = new Date();
+    const out = tasks.map((t) => ({ ...t, computedStatus: computedTaskStatus(t, now) }));
+    res.json({ success: true, tasks: out });
+  } catch (e) {
+    console.error('List tasks error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/admin/tasks
+router.post('/tasks', expenseAdminOnly, [
+  body('title').notEmpty().trim().isLength({ max: 120 }),
+  body('description').optional().trim().isLength({ max: 2000 }),
+  body('endAt').notEmpty().isISO8601()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      const errList = errors.array();
+      const firstMsg = errList[0]?.msg || errList[0]?.message || 'Validation failed';
+      return res.status(400).json({ success: false, message: firstMsg, errors: errList });
+    }
+    const endAt = new Date(req.body.endAt);
+    const startAt = req.body.startAt ? new Date(req.body.startAt) : new Date(endAt);
+    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid time' });
+    }
+    if (endAt.getTime() < startAt.getTime()) {
+      return res.status(400).json({ success: false, message: 'End time must be after start time' });
+    }
+    const task = await OwnerTask.create({
+      businessId: req.businessId,
+      title: String(req.body.title).trim(),
+      description: String(req.body.description || '').trim(),
+      startAt,
+      endAt,
+      status: 'PENDING',
+      createdBy: req.user._id
+    });
+    const out = task.toObject();
+    out.computedStatus = computedTaskStatus(out, new Date());
+    res.status(201).json({ success: true, task: out });
+  } catch (e) {
+    console.error('Create task error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/tasks/:id - update fields (title/description/startAt/endAt) when pending
+router.patch('/tasks/:id', expenseAdminOnly, [
+  body('title').optional().trim().isLength({ min: 1, max: 120 }),
+  body('description').optional().trim().isLength({ max: 2000 }),
+  body('endAt').optional().isISO8601(),
+  body('status').optional().isIn(['PENDING', 'COMPLETED'])
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+    const task = await OwnerTask.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
+
+    const nextStatus = req.body.status;
+    if (nextStatus === 'COMPLETED') {
+      if (task.status !== 'COMPLETED') {
+        task.status = 'COMPLETED';
+        task.completedAt = new Date();
+      }
+    } else if (nextStatus === 'PENDING') {
+      task.status = 'PENDING';
+      task.completedAt = null;
+      task.reminderSentAt = null; // allow reminder again if rescheduled
+    }
+
+    if (task.status === 'COMPLETED' && (req.body.title || req.body.description || req.body.startAt || req.body.endAt)) {
+      return res.status(403).json({ success: false, message: 'Completed tasks are read-only (reopen to edit)' });
+    }
+
+    if (req.body.title !== undefined) task.title = String(req.body.title).trim();
+    if (req.body.description !== undefined) task.description = String(req.body.description).trim();
+    if (req.body.endAt !== undefined) task.endAt = new Date(req.body.endAt);
+    // If startAt is not being used by client, keep it aligned with endAt for day grouping.
+    if (req.body.endAt !== undefined && (req.body.startAt === undefined || req.body.startAt === null || req.body.startAt === '')) {
+      task.startAt = new Date(task.endAt);
+    }
+    if (task.endAt.getTime() < task.startAt.getTime()) {
+      return res.status(400).json({ success: false, message: 'End time must be after start time' });
+    }
+    await task.save();
+    const out = task.toObject();
+    out.computedStatus = computedTaskStatus(out, new Date());
+    res.json({ success: true, task: out });
+  } catch (e) {
+    console.error('Update task error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
 // GET /api/admin/expense-types
 router.get('/expense-types', expenseAdminOnly, async (req, res) => {
@@ -489,6 +613,7 @@ router.post('/invoices', [
       servicePrice: s.price ?? 0
     }));
     const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + i.servicePrice, 0);
+    const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
     const invoice = await Invoice.create({
       jobId: job._id,
       businessId: req.businessId,
@@ -505,7 +630,10 @@ router.post('/invoices', [
       discount: 0,
       subtotal,
       finalAmount: subtotal,
+      advancePayment: advanceFromJob,
       paymentMethod: 'CASH',
+      paymentCashAmount: 0,
+      paymentOnlineAmount: 0,
       paymentStatus: 'PENDING',
       shareToken: generateShareToken(),
       createdBy: req.user._id
@@ -567,7 +695,9 @@ router.put('/invoices/:id', [
   body('gstAmount').optional().isFloat({ min: 0 }),
   body('loyaltyRedeemedPoints').optional().isInt({ min: 0 }),
   body('loyaltyRedeemedAmount').optional().isFloat({ min: 0 }),
-  body('paymentMethod').optional().isIn(['CASH', 'ONLINE'])
+  body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('paymentCashAmount').optional().isFloat({ min: 0 }),
+  body('paymentOnlineAmount').optional().isFloat({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -624,7 +754,7 @@ router.put('/invoices/:id', [
       }
     }
 
-    const allowed = ['companyName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'customerGst', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount', 'paymentMethod'];
+    const allowed = ['companyName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'customerGst', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount', 'paymentMethod', 'paymentCashAmount', 'paymentOnlineAmount'];
     for (const key of allowed) {
       if (req.body[key] !== undefined) invoice[key] = req.body[key];
     }
@@ -632,6 +762,12 @@ router.put('/invoices/:id', [
     if (req.body.discount !== undefined) invoice.discount = Number(req.body.discount);
     if (req.body.taxPercentage !== undefined) invoice.taxPercentage = Number(req.body.taxPercentage);
     if (req.body.gstAmount !== undefined) invoice.gstAmount = Number(req.body.gstAmount);
+    try {
+      normalizeInvoicePaymentFields(invoice, req.body);
+    } catch (normErr) {
+      const status = normErr.status || 500;
+      return res.status(status).json({ success: false, message: normErr.message || 'Invalid payment split' });
+    }
     await invoice.save();
     const updated = await Invoice.findById(invoice._id).populate('jobId').lean();
     res.json({ success: true, invoice: updated });
@@ -687,6 +823,17 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId })
       .select('customerId services assignedTo')
       .lean();
+    try {
+      const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
+      assertSettlementMatchesDue(
+        invoice.paymentMethod,
+        due,
+        invoice.paymentCashAmount,
+        invoice.paymentOnlineAmount
+      );
+    } catch (e) {
+      return res.status(400).json({ success: false, message: e.message || 'Payment does not match balance due' });
+    }
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
@@ -749,6 +896,27 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
 });
 
 // ==================== REPORTS (Car Wash Admin only) ====================
+function parseServiceIdsFromQuery(query) {
+  const raw = query.serviceIds ?? query.service_id;
+  if (raw == null || raw === '') return [];
+  const parts = Array.isArray(raw) ? raw : String(raw).split(',');
+  return [
+    ...new Set(
+      parts
+        .map((s) => String(s).trim())
+        .filter(Boolean)
+        .filter((id) => mongoose.isValidObjectId(id))
+    )
+  ];
+}
+
+async function serviceObjectIdsForBusiness(businessId, idStrings) {
+  if (!idStrings.length) return [];
+  const oids = idStrings.map((id) => new mongoose.Types.ObjectId(id));
+  const found = await Service.find({ businessId, _id: { $in: oids } }).select('_id').lean();
+  return found.map((f) => f._id);
+}
+
 function parseReportDateRange(range, from, to) {
   const now = new Date();
   let start, end;
@@ -781,15 +949,24 @@ function parseReportDateRange(range, from, to) {
   return { start, end };
 }
 
-// GET /api/admin/reports/jobs?range=daily|weekly|monthly|yearly|custom&from=&to=
+// GET /api/admin/reports/jobs?range=daily|weekly|monthly|yearly|custom&from=&to=&serviceIds=id1,id2
+// serviceIds: optional; jobs that include at least one of these services (OR). Scoped to this business.
 router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
     const { start, end } = parseReportDateRange(range, from, to);
-    const jobs = await Job.find({
+    const serviceObjectIds = await serviceObjectIdsForBusiness(
+      req.businessId,
+      parseServiceIdsFromQuery(req.query)
+    );
+    const jobQuery = {
       businessId: req.businessId,
       createdAt: { $gte: start, $lte: end }
-    })
+    };
+    if (serviceObjectIds.length) {
+      jobQuery.services = { $elemMatch: { serviceId: { $in: serviceObjectIds } } };
+    }
+    const jobs = await Job.find(jobQuery)
       .populate('customerId', 'name phone email')
       .populate('carId', 'registrationNumber model make color')
       .populate('assignedTo', 'name email employeeCode')
@@ -873,11 +1050,21 @@ router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/reports/sales?range=...&from=&to= (sales = invoices; revenue = sum of invoice final amount)
+// GET /api/admin/reports/sales?range=...&from=&to=&source=all|jobs|packages&serviceIds=id1,id2
+// serviceIds: optional; limits job-linked invoices to jobs that include at least one selected service.
+// Package invoices are omitted when serviceIds is set (filter applies to job line items only).
 router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to, source = 'all' } = req.query;
     const { start, end } = parseReportDateRange(range, from, to);
+    const serviceObjectIds = await serviceObjectIdsForBusiness(
+      req.businessId,
+      parseServiceIdsFromQuery(req.query)
+    );
+    const jobServiceMatch =
+      serviceObjectIds.length > 0
+        ? { services: { $elemMatch: { serviceId: { $in: serviceObjectIds } } } }
+        : {};
 
     let invoices = [];
     if (source === 'all' || source === 'jobs') {
@@ -888,7 +1075,8 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
         $or: [
           { actualDelivery: { $gte: start, $lte: end } },
           { updatedAt: { $gte: start, $lte: end }, actualDelivery: { $exists: false } }
-        ]
+        ],
+        ...jobServiceMatch
       }).distinct('_id');
       invoices = await Invoice.find({
         businessId: req.businessId,
@@ -909,7 +1097,10 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     }
 
     let packageSales = [];
-    if (source === 'all' || source === 'packages') {
+    // Package rows are not filtered by job line items. Omit packages from "all" only when narrowing job sales by service.
+    const includePackageSales =
+      source === 'packages' || (source === 'all' && !serviceObjectIds.length);
+    if (includePackageSales) {
       packageSales = await Invoice.find({
         businessId: req.businessId,
         saleType: 'PACKAGE',
@@ -935,6 +1126,13 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     });
 
     const totalRevenue = data.reduce((s, inv) => s + (inv.finalAmount || 0), 0);
+    let totalCashReceived = 0;
+    let totalOnlineReceived = 0;
+    for (const inv of data) {
+      const ch = invoiceSettlementCashOnline(inv);
+      totalCashReceived += ch.cash;
+      totalOnlineReceived += ch.online;
+    }
     const totalDiscountAmount = invoices.reduce((s, inv) => {
       const sub = inv.subtotal || 0;
       const pct = inv.discount || 0;
@@ -947,6 +1145,8 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
       summary: {
         totalSales: data.length,
         totalRevenue: Math.round(totalRevenue * 100) / 100,
+        totalCashReceived: Math.round(totalCashReceived * 100) / 100,
+        totalOnlineReceived: Math.round(totalOnlineReceived * 100) / 100,
         totalDiscountAmount: Math.round(totalDiscountAmount * 100) / 100,
         totalGst: Math.round(totalGst * 100) / 100
       },
@@ -1045,8 +1245,22 @@ router.get('/dashboard', async (req, res) => {
     tomorrow.setDate(tomorrow.getDate() + 1);
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
 
+    /** Paid invoices counted toward "received today" (cash register); legacy rows may lack paymentReceivedAt. */
+    const invoicePaidTodayWindow = {
+      paymentStatus: 'RECEIVED',
+      $or: [
+        { paymentReceivedAt: { $gte: today, $lt: tomorrow } },
+        {
+          $and: [
+            { $or: [{ paymentReceivedAt: { $exists: false } }, { paymentReceivedAt: null }] },
+            { updatedAt: { $gte: today, $lt: tomorrow } }
+          ]
+        }
+      ]
+    };
+
     // Single aggregation for all job stats (parallel in one pipeline)
-    const [jobStats, avgResult, todayRevResult, todayRevByMethodResult, monthRevResult, todayExpResult] = await Promise.all([
+    const [jobStats, avgResult, todayRevResult, todayRevByMethodResult, todayPackageSettleResult, todayAdvanceCollectedResult, monthRevResult, todayExpResult] = await Promise.all([
       Job.aggregate([
         { $match: baseMatch },
         {
@@ -1100,8 +1314,15 @@ router.get('/dashboard', async (req, res) => {
         { $match: { job: { $ne: [] } } },
         { $group: { _id: null, total: { $sum: '$finalAmount' } } }
       ]),
-      Invoice.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+      isEmployee ? Promise.resolve([{}]) : Invoice.aggregate([
+        {
+          $match: {
+            businessId: new mongoose.Types.ObjectId(businessId),
+            jobId: { $exists: true, $ne: null },
+            saleType: { $nin: ['PACKAGE'] },
+            ...invoicePaidTodayWindow
+          }
+        },
         {
           $lookup: {
             from: 'jobs',
@@ -1110,11 +1331,8 @@ router.get('/dashboard', async (req, res) => {
               {
                 $match: {
                   $expr: { $eq: ['$_id', '$$jid'] },
-                  status: 'DELIVERED',
-                  $or: [
-                    { actualDelivery: { $gte: today, $lt: tomorrow } },
-                    { actualDelivery: { $exists: false }, updatedAt: { $gte: today, $lt: tomorrow } }
-                  ]
+                  businessId: new mongoose.Types.ObjectId(businessId),
+                  status: 'DELIVERED'
                 }
               },
               { $limit: 1 }
@@ -1123,7 +1341,93 @@ router.get('/dashboard', async (req, res) => {
           }
         },
         { $match: { job: { $ne: [] } } },
-        { $group: { _id: '$paymentMethod', total: { $sum: '$finalAmount' } } }
+        ...invoiceSettlementAggregationStages(),
+        { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
+      ]),
+      isEmployee ? Promise.resolve([{}]) : Invoice.aggregate([
+        {
+          $match: {
+            businessId: new mongoose.Types.ObjectId(businessId),
+            saleType: 'PACKAGE',
+            ...invoicePaidTodayWindow
+          }
+        },
+        ...invoiceSettlementAggregationStages(),
+        { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
+      ]),
+      isEmployee ? Promise.resolve([]) : Job.aggregate([
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId), createdAt: { $gte: today, $lt: tomorrow } } },
+        {
+          $addFields: {
+            advCash: {
+              $cond: [
+                { $lte: [{ $ifNull: ['$advancePayment', 0] }, 0] },
+                0,
+                {
+                  $ifNull: [
+                    '$advanceCashAmount',
+                    {
+                      $cond: [
+                        { $eq: ['$advancePaymentMethod', 'ONLINE'] },
+                        0,
+                        { $ifNull: ['$advancePayment', 0] }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            advOnline: {
+              $cond: [
+                { $lte: [{ $ifNull: ['$advancePayment', 0] }, 0] },
+                0,
+                {
+                  $ifNull: [
+                    '$advanceOnlineAmount',
+                    {
+                      $cond: [
+                        { $eq: ['$advancePaymentMethod', 'ONLINE'] },
+                        { $ifNull: ['$advancePayment', 0] },
+                        0
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          $addFields: {
+            advCashFinal: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$advancePaymentMethod', 'SPLIT'] },
+                    { $gt: [{ $ifNull: ['$advancePayment', 0] }, 0] },
+                    { $lte: [{ $add: ['$advCash', '$advOnline'] }, 0.01] }
+                  ]
+                },
+                { $ifNull: ['$advancePayment', 0] },
+                '$advCash'
+              ]
+            },
+            advOnlineFinal: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$advancePaymentMethod', 'SPLIT'] },
+                    { $gt: [{ $ifNull: ['$advancePayment', 0] }, 0] },
+                    { $lte: [{ $add: ['$advCash', '$advOnline'] }, 0.01] }
+                  ]
+                },
+                0,
+                '$advOnline'
+              ]
+            }
+          }
+        },
+        { $group: { _id: null, cash: { $sum: '$advCashFinal' }, online: { $sum: '$advOnlineFinal' } } }
       ]),
       Invoice.aggregate([
         { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
@@ -1161,8 +1465,15 @@ router.get('/dashboard', async (req, res) => {
     const pendingDeliveries = jobStats.pendingDeliveries?.[0]?.count ?? 0;
     const avgCompletionTime = Math.round(avgResult[0]?.avgMinutes ?? 0);
     const todayRevenue = Math.round((todayRevResult[0]?.total ?? 0) * 100) / 100;
-    const todayRevenueCash = Math.round(((todayRevByMethodResult || []).find((r) => r._id === 'CASH')?.total ?? 0) * 100) / 100;
-    const todayRevenueOnline = Math.round(((todayRevByMethodResult || []).find((r) => r._id === 'ONLINE')?.total ?? 0) * 100) / 100;
+    const methodAgg = todayRevByMethodResult[0];
+    const packageSettleAgg = todayPackageSettleResult[0];
+    const advanceAgg = todayAdvanceCollectedResult[0];
+    const settleCash = (methodAgg?.cash ?? 0) + (packageSettleAgg?.cash ?? 0);
+    const settleOnline = (methodAgg?.online ?? 0) + (packageSettleAgg?.online ?? 0);
+    const advCashToday = advanceAgg?.cash ?? 0;
+    const advOnlineToday = advanceAgg?.online ?? 0;
+    const todayRevenueCash = Math.round((settleCash + advCashToday) * 100) / 100;
+    const todayRevenueOnline = Math.round((settleOnline + advOnlineToday) * 100) / 100;
     const monthlyRevenue = Math.round((monthRevResult[0]?.total ?? 0) * 100) / 100;
     const todayExpenses = todayExpResult[0]?.total ?? 0;
     const closingBalance = !isEmployee ? (todayRevenue - todayExpenses) : 0;
@@ -1252,27 +1563,48 @@ router.get('/dashboard/charts', async (req, res) => {
       revenue: Math.round(total * 100) / 100
     }));
 
-    // Services distribution: single aggregation
+    const settingsLean = await BusinessSettings.findOne({ businessId })
+      .select('timezone')
+      .lean();
+    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const { start: svcDayStart, end: svcDayEnd, label: servicesDayLabel, zone: servicesTz } =
+      getZonedDayBoundsUtc(new Date(), businessTz);
+
+    const deliveredTodayMatch = {
+      ...baseMatch,
+      status: 'DELIVERED',
+      $or: [
+        { actualDelivery: { $gte: svcDayStart, $lt: svcDayEnd } },
+        { actualDelivery: { $exists: false }, updatedAt: { $gte: svcDayStart, $lt: svcDayEnd } }
+      ]
+    };
+
+    // Today's service mix: line-item count + revenue (sum of per-job line prices)
     const servicesDist = await Job.aggregate([
-      { $match: { ...baseMatch, status: 'DELIVERED' } },
+      { $match: deliveredTodayMatch },
       { $unwind: '$services' },
-      { $group: { _id: '$services.serviceId', count: { $sum: 1 } } },
+      {
+        $group: {
+          _id: '$services.serviceId',
+          count: { $sum: 1 },
+          revenue: { $sum: { $ifNull: ['$services.price', 0] } }
+        }
+      },
       { $lookup: { from: 'services', localField: '_id', foreignField: '_id', as: 'svc' } },
       { $unwind: { path: '$svc', preserveNullAndEmptyArrays: true } },
       {
-        $group: {
-          _id: null,
-          items: {
-            $push: {
-              name: { $ifNull: ['$svc.name', 'Other'] },
-              value: '$count'
-            }
-          }
+        $project: {
+          _id: 0,
+          name: { $ifNull: ['$svc.name', 'Other'] },
+          count: 1,
+          revenue: { $round: [{ $ifNull: ['$revenue', 0] }, 2] },
+          value: '$count'
         }
-      }
+      },
+      { $sort: { revenue: -1, count: -1, name: 1 } }
     ]);
 
-    const servicesDistribution = servicesDist[0]?.items ?? [];
+    const servicesDistribution = servicesDist;
 
     // Job trend for employees: jobs completed per day (last 7 days)
     let jobTrend = [];
@@ -1311,7 +1643,13 @@ router.get('/dashboard/charts', async (req, res) => {
       success: true,
       revenueTrend: isEmployee ? [] : revenueTrend,
       jobTrend,
-      servicesDistribution
+      servicesDistribution,
+      servicesDistributionMeta: {
+        label: servicesDayLabel,
+        timezone: servicesTz,
+        start: svcDayStart.toISOString(),
+        end: svcDayEnd.toISOString()
+      }
     });
   } catch (error) {
     console.error('Dashboard charts error:', error);
@@ -2252,9 +2590,15 @@ router.get('/jobs/:id', async (req, res) => {
       });
     }
 
+    const invoiceForJob = await Invoice.findOne({ businessId: req.businessId, jobId: job._id })
+      .select('finalAmount advancePayment paymentMethod paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber')
+      .lean();
+
     res.json({
       success: true,
-      job
+      job,
+      hasInvoice: !!invoiceForJob,
+      invoice: invoiceForJob || null
     });
   } catch (error) {
     console.error('Get job error:', error);
@@ -2382,7 +2726,11 @@ router.post('/jobs', [
   body('notes').optional().trim(),
   body('estimatedDelivery').optional().isISO8601(),
   body('assignedTo').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid employee'),
-  body('customerPackageId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid package')
+  body('customerPackageId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid package'),
+  body('advancePayment').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('Advance must be a non-negative number'),
+  body('advancePaymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('advanceCashAmount').optional().isFloat({ min: 0 }),
+  body('advanceOnlineAmount').optional().isFloat({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -2396,7 +2744,7 @@ router.post('/jobs', [
       });
     }
 
-    const { customerId, carId, serviceIds, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId } = req.body;
+    const { customerId, carId, serviceIds, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId, advancePayment: advanceBody } = req.body;
 
     // Check capacity
     const capacityCheck = await canAcceptNewJob(req.businessId);
@@ -2469,6 +2817,19 @@ router.post('/jobs', [
 
     // Calculate total price and ETA (use body value if provided and valid, else calculate from services)
     const totalPrice = services.reduce((sum, s) => sum + s.price, 0);
+    const advancePayment = advanceBody != null && advanceBody !== '' ? Math.max(0, Number(advanceBody)) : 0;
+    if (advancePayment > totalPrice + 1e-6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Advance payment cannot exceed the job service total'
+      });
+    }
+    let advanceFields;
+    try {
+      advanceFields = normalizeJobAdvanceForCreate(req.body, advancePayment);
+    } catch (advErr) {
+      return res.status(advErr.status || 400).json({ success: false, message: advErr.message || 'Invalid advance split' });
+    }
     const estimatedDelivery = (estimatedDeliveryBody && !isNaN(Date.parse(estimatedDeliveryBody)))
       ? new Date(estimatedDeliveryBody)
       : calculateETA(services);
@@ -2500,6 +2861,7 @@ router.post('/jobs', [
           carId,
           tokenNumber,
           totalPrice,
+          ...advanceFields,
           estimatedDelivery,
           beforeImages: Array.isArray(beforeImages) ? beforeImages : [],
           notes,
@@ -2852,6 +3214,48 @@ router.put('/jobs/:id', [
     res.json({ success: true, job });
   } catch (error) {
     console.error('Edit job error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/admin/jobs/:id
+// @desc    Permanently delete a job (business owner only). Not allowed for DELIVERED or if an invoice exists.
+// @access  Private — CAR_WASH_ADMIN only
+router.delete('/jobs/:id', async (req, res) => {
+  try {
+    if (req.user.role !== 'CAR_WASH_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the business owner can delete jobs.'
+      });
+    }
+
+    const job = await Job.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
+
+    if (job.status === 'DELIVERED') {
+      return res.status(400).json({
+        success: false,
+        message: 'Delivered jobs cannot be deleted.'
+      });
+    }
+
+    const invoice = await Invoice.findOne({ businessId: req.businessId, jobId: job._id }).select('_id').lean();
+    if (invoice) {
+      return res.status(400).json({
+        success: false,
+        message: 'This job has an invoice and cannot be deleted.'
+      });
+    }
+
+    await WhatsAppMessage.deleteMany({ businessId: req.businessId, jobId: job._id });
+    await Job.deleteOne({ _id: job._id });
+
+    res.json({ success: true, message: 'Job deleted successfully' });
+  } catch (error) {
+    console.error('Delete job error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

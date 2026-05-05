@@ -7,6 +7,7 @@ import Car from '../models/Car.model.js';
 import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
 import User from '../models/User.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
+import { balanceDue, assertSettlementMatchesDue } from '../utils/invoicePayment.js';
 
 function startOfToday() {
   const d = new Date();
@@ -233,7 +234,10 @@ export async function purchasePackage(req, res) {
       discount: 0,
       subtotal,
       finalAmount: subtotal,
+      advancePayment: 0,
       paymentMethod: 'CASH',
+      paymentCashAmount: 0,
+      paymentOnlineAmount: 0,
       paymentStatus: 'PENDING',
       shareToken: generateShareToken(),
       createdBy: req.user?._id
@@ -283,6 +287,18 @@ export async function closePackageSale(req, res) {
 
     if (invoice.paymentStatus === 'RECEIVED') {
       return res.json({ success: true, invoice, message: 'Package already marked paid' });
+    }
+
+    try {
+      const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
+      assertSettlementMatchesDue(
+        invoice.paymentMethod,
+        due,
+        invoice.paymentCashAmount,
+        invoice.paymentOnlineAmount
+      );
+    } catch (e) {
+      return res.status(400).json({ success: false, message: e.message || 'Payment does not match balance due' });
     }
 
     invoice.paymentStatus = 'RECEIVED';

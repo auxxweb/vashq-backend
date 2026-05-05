@@ -32,8 +32,13 @@ const invoiceSchema = new mongoose.Schema({
   loyaltyRedeemedPoints: { type: Number, default: 0, min: 0 },
   loyaltyRedeemedAmount: { type: Number, default: 0, min: 0 },
   finalAmount: { type: Number, required: true, min: 0 },
+  /** Copied from job at invoice creation; capped by final amount when computing balance due. */
+  advancePayment: { type: Number, default: 0, min: 0 },
   // Payment
-  paymentMethod: { type: String, enum: ['CASH', 'ONLINE'], default: 'CASH' },
+  paymentMethod: { type: String, enum: ['CASH', 'ONLINE', 'SPLIT'], default: 'CASH' },
+  /** Amounts collected at settlement (balance due); SPLIT uses both. */
+  paymentCashAmount: { type: Number, default: 0, min: 0 },
+  paymentOnlineAmount: { type: Number, default: 0, min: 0 },
   paymentStatus: { type: String, enum: ['PENDING', 'RECEIVED'], default: 'PENDING' },
   paymentReceivedAt: { type: Date },
   // Share (public view by token)
