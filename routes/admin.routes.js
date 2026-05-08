@@ -34,6 +34,7 @@ import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields }
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
 import { invoiceSettlementAggregationStages, invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
 import OwnerTask from '../models/OwnerTask.model.js';
+import { DateTime } from 'luxon';
 
 const router = express.Router();
 
@@ -424,6 +425,13 @@ function parseExpenseDateRange(range, from, to) {
       start = new Date(now); start.setHours(0, 0, 0, 0);
       end = new Date(start); end.setDate(end.getDate() + 1);
       break;
+    case 'yesterday': {
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      start = new Date(y); start.setHours(0, 0, 0, 0);
+      end = new Date(start); end.setDate(end.getDate() + 1);
+      break;
+    }
     case 'weekly':
       start = new Date(now); start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
       end = new Date(now); end.setHours(23, 59, 59, 999);
@@ -926,6 +934,13 @@ function parseReportDateRange(range, from, to) {
       start = new Date(now); start.setHours(0, 0, 0, 0);
       end = new Date(start); end.setDate(end.getDate() + 1);
       break;
+    case 'yesterday': {
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      start = new Date(y); start.setHours(0, 0, 0, 0);
+      end = new Date(start); end.setDate(end.getDate() + 1);
+      break;
+    }
     case 'weekly':
       start = new Date(now); start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
       end = new Date(now); end.setHours(23, 59, 59, 999);
@@ -1239,21 +1254,69 @@ router.get('/dashboard', async (req, res) => {
     const baseMatch = { businessId: new mongoose.Types.ObjectId(businessId) };
     if (isEmployee) baseMatch.assignedTo = req.user._id;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const settingsLean = await BusinessSettings.findOne({ businessId })
+      .select('timezone')
+      .lean();
+    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+
+    const range = String(req.query.range || 'today').toLowerCase(); // today|yesterday|week|month|year|custom
+    const fromQ = String(req.query.from || '').trim(); // YYYY-MM-DD (custom)
+    const toQ = String(req.query.to || '').trim(); // YYYY-MM-DD (custom)
+
+    const nowZ = DateTime.now().setZone(businessTz);
+    const startOfDayZ = (dt) => dt.startOf('day');
+    const endExclusiveDayZ = (dt) => dt.plus({ days: 1 }).startOf('day');
+    const weekStartMonZ = (dt) => startOfDayZ(dt.minus({ days: dt.weekday - 1 }));
+
+    let startZ;
+    let endExclusiveZ;
+    let rangeLabel = 'Today';
+
+    if (range === 'yesterday') {
+      const y = nowZ.minus({ days: 1 });
+      startZ = startOfDayZ(y);
+      endExclusiveZ = endExclusiveDayZ(startZ);
+      rangeLabel = 'Yesterday';
+    } else if (range === 'week') {
+      startZ = weekStartMonZ(nowZ);
+      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
+      rangeLabel = 'This week';
+    } else if (range === 'month') {
+      startZ = nowZ.startOf('month');
+      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
+      rangeLabel = 'This month';
+    } else if (range === 'year') {
+      startZ = nowZ.startOf('year');
+      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
+      rangeLabel = 'This year';
+    } else if (range === 'custom') {
+      const fromZ = fromQ ? DateTime.fromISO(fromQ, { zone: businessTz }).startOf('day') : null;
+      const toZ = toQ ? DateTime.fromISO(toQ, { zone: businessTz }).startOf('day') : null;
+      if (!fromZ?.isValid || !toZ?.isValid) {
+        return res.status(400).json({ success: false, message: 'Custom range requires valid from/to (YYYY-MM-DD)' });
+      }
+      startZ = fromZ;
+      endExclusiveZ = endExclusiveDayZ(toZ);
+      rangeLabel = 'Custom';
+    } else {
+      startZ = startOfDayZ(nowZ);
+      endExclusiveZ = endExclusiveDayZ(startZ);
+      rangeLabel = 'Today';
+    }
+
+    const startUtc = startZ.toUTC().toJSDate();
+    const endUtc = endExclusiveZ.toUTC().toJSDate();
+    const startOfMonthUtc = nowZ.startOf('month').toUTC().toJSDate();
 
     /** Paid invoices counted toward "received today" (cash register); legacy rows may lack paymentReceivedAt. */
     const invoicePaidTodayWindow = {
       paymentStatus: 'RECEIVED',
       $or: [
-        { paymentReceivedAt: { $gte: today, $lt: tomorrow } },
+        { paymentReceivedAt: { $gte: startUtc, $lt: endUtc } },
         {
           $and: [
             { $or: [{ paymentReceivedAt: { $exists: false } }, { paymentReceivedAt: null }] },
-            { updatedAt: { $gte: today, $lt: tomorrow } }
+            { updatedAt: { $gte: startUtc, $lt: endUtc } }
           ]
         }
       ]
@@ -1266,22 +1329,22 @@ router.get('/dashboard', async (req, res) => {
         {
           $facet: {
             todayJobs: [
-              { $match: { createdAt: { $gte: today, $lt: tomorrow } } },
+              { $match: { createdAt: { $gte: startUtc, $lt: endUtc } } },
               { $count: 'count' }
             ],
             inProgress: [
-              { $match: { status: { $nin: ['COMPLETED', 'DELIVERED', 'CANCELLED'] } } },
+              { $match: { status: { $nin: ['COMPLETED', 'DELIVERED', 'CANCELLED'] }, createdAt: { $gte: startUtc, $lt: endUtc } } },
               { $count: 'count' }
             ],
             pendingDeliveries: [
-              { $match: { status: 'COMPLETED' } },
+              { $match: { status: 'COMPLETED', createdAt: { $gte: startUtc, $lt: endUtc } } },
               { $count: 'count' }
             ]
           }
         }
       ]).then((r) => r[0] || {}),
       Job.aggregate([
-        { $match: { ...baseMatch, status: 'DELIVERED', actualDelivery: { $exists: true } } },
+        { $match: { ...baseMatch, status: 'DELIVERED', actualDelivery: { $gte: startUtc, $lt: endUtc } } },
         {
           $group: {
             _id: null,
@@ -1301,8 +1364,8 @@ router.get('/dashboard', async (req, res) => {
                   $expr: { $eq: ['$_id', '$$jid'] },
                   status: 'DELIVERED',
                   $or: [
-                    { actualDelivery: { $gte: today, $lt: tomorrow } },
-                    { actualDelivery: { $exists: false }, updatedAt: { $gte: today, $lt: tomorrow } }
+                    { actualDelivery: { $gte: startUtc, $lt: endUtc } },
+                    { actualDelivery: { $exists: false }, updatedAt: { $gte: startUtc, $lt: endUtc } }
                   ]
                 }
               },
@@ -1356,7 +1419,7 @@ router.get('/dashboard', async (req, res) => {
         { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
       ]),
       isEmployee ? Promise.resolve([]) : Job.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId), createdAt: { $gte: today, $lt: tomorrow } } },
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId), createdAt: { $gte: startUtc, $lt: endUtc } } },
         {
           $addFields: {
             advCash: {
@@ -1441,8 +1504,8 @@ router.get('/dashboard', async (req, res) => {
                   $expr: { $eq: ['$_id', '$$jid'] },
                   status: 'DELIVERED',
                   $or: [
-                    { actualDelivery: { $gte: startOfMonth } },
-                    { actualDelivery: { $exists: false }, updatedAt: { $gte: startOfMonth } }
+                    { actualDelivery: { $gte: startOfMonthUtc } },
+                    { actualDelivery: { $exists: false }, updatedAt: { $gte: startOfMonthUtc } }
                   ]
                 }
               },
@@ -1455,7 +1518,7 @@ router.get('/dashboard', async (req, res) => {
         { $group: { _id: null, total: { $sum: '$finalAmount' } } }
       ]),
       isEmployee ? Promise.resolve([]) : Expense.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId), expenseDate: { $gte: today, $lt: tomorrow } } },
+        { $match: { businessId: new mongoose.Types.ObjectId(businessId), expenseDate: { $gte: startUtc, $lt: endUtc } } },
         { $group: { _id: null, total: { $sum: '$amount' } } }
       ])
     ]);
@@ -1483,7 +1546,12 @@ router.get('/dashboard', async (req, res) => {
       inProgress,
       avgCompletionTime,
       pendingDeliveries,
-      isEmployee: !!isEmployee
+      isEmployee: !!isEmployee,
+      range: range,
+      rangeLabel,
+      rangeStartUtc: startUtc,
+      rangeEndUtc: endUtc,
+      businessTz
     };
     if (!isEmployee) {
       statsPayload.todayRevenue = todayRevenue;
@@ -1518,17 +1586,66 @@ router.get('/dashboard/charts', async (req, res) => {
     const baseMatch = { businessId: new mongoose.Types.ObjectId(businessId) };
     if (isEmployee) baseMatch.assignedTo = req.user._id;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const settingsLean = await BusinessSettings.findOne({ businessId })
+      .select('timezone')
+      .lean();
+    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+
+    const range = String(req.query.range || 'today').toLowerCase(); // today|yesterday|week|month|year|custom
+    const fromQ = String(req.query.from || '').trim(); // YYYY-MM-DD (custom)
+    const toQ = String(req.query.to || '').trim(); // YYYY-MM-DD (custom)
+
+    const nowZ = DateTime.now().setZone(businessTz);
+    const startOfDayZ = (dt) => dt.startOf('day');
+    const endExclusiveDayZ = (dt) => dt.plus({ days: 1 }).startOf('day');
+    const weekStartMonZ = (dt) => startOfDayZ(dt.minus({ days: dt.weekday - 1 }));
+
+    let startZ;
+    let endExclusiveZ;
+    let rangeLabel = 'Today';
+
+    if (range === 'yesterday') {
+      const y = nowZ.minus({ days: 1 });
+      startZ = startOfDayZ(y);
+      endExclusiveZ = endExclusiveDayZ(startZ);
+      rangeLabel = 'Yesterday';
+    } else if (range === 'week') {
+      startZ = weekStartMonZ(nowZ);
+      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
+      rangeLabel = 'This week';
+    } else if (range === 'month') {
+      startZ = nowZ.startOf('month');
+      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
+      rangeLabel = 'This month';
+    } else if (range === 'year') {
+      startZ = nowZ.startOf('year');
+      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
+      rangeLabel = 'This year';
+    } else if (range === 'custom') {
+      const fromZ = fromQ ? DateTime.fromISO(fromQ, { zone: businessTz }).startOf('day') : null;
+      const toZ = toQ ? DateTime.fromISO(toQ, { zone: businessTz }).startOf('day') : null;
+      if (!fromZ?.isValid || !toZ?.isValid) {
+        return res.status(400).json({ success: false, message: 'Custom range requires valid from/to (YYYY-MM-DD)' });
+      }
+      startZ = fromZ;
+      endExclusiveZ = endExclusiveDayZ(toZ);
+      rangeLabel = 'Custom';
+    } else {
+      startZ = startOfDayZ(nowZ);
+      endExclusiveZ = endExclusiveDayZ(startZ);
+      rangeLabel = 'Today';
+    }
+
+    const startUtc = startZ.toUTC().toJSDate();
+    const endUtc = endExclusiveZ.toUTC().toJSDate();
 
     // Revenue trend: run 7 day queries in parallel
     const revenuePromises = [];
+    const anchorDayZ = endExclusiveZ.minus({ days: 1 }).startOf('day');
     for (let i = 6; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      d.setHours(0, 0, 0, 0);
-      const next = new Date(d);
-      next.setDate(next.getDate() + 1);
+      const dayZ = anchorDayZ.minus({ days: i });
+      const d = dayZ.toUTC().toJSDate();
+      const next = dayZ.plus({ days: 1 }).toUTC().toJSDate();
       revenuePromises.push(
         Invoice.aggregate([
           { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
@@ -1559,29 +1676,22 @@ router.get('/dashboard/charts', async (req, res) => {
     }
     const revenueResults = await Promise.all(revenuePromises);
     const revenueTrend = revenueResults.map(({ d, total }) => ({
-      date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+      date: DateTime.fromJSDate(d).setZone(businessTz).toFormat('ccc, LLL d'),
       revenue: Math.round(total * 100) / 100
     }));
 
-    const settingsLean = await BusinessSettings.findOne({ businessId })
-      .select('timezone')
-      .lean();
-    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
-    const { start: svcDayStart, end: svcDayEnd, label: servicesDayLabel, zone: servicesTz } =
-      getZonedDayBoundsUtc(new Date(), businessTz);
-
-    const deliveredTodayMatch = {
+    const deliveredInRangeMatch = {
       ...baseMatch,
       status: 'DELIVERED',
       $or: [
-        { actualDelivery: { $gte: svcDayStart, $lt: svcDayEnd } },
-        { actualDelivery: { $exists: false }, updatedAt: { $gte: svcDayStart, $lt: svcDayEnd } }
+        { actualDelivery: { $gte: startUtc, $lt: endUtc } },
+        { actualDelivery: { $exists: false }, updatedAt: { $gte: startUtc, $lt: endUtc } }
       ]
     };
 
-    // Today's service mix: line-item count + revenue (sum of per-job line prices)
+    // Service mix for selected range: line-item count + revenue (sum of per-job line prices)
     const servicesDist = await Job.aggregate([
-      { $match: deliveredTodayMatch },
+      { $match: deliveredInRangeMatch },
       { $unwind: '$services' },
       {
         $group: {
@@ -1610,12 +1720,11 @@ router.get('/dashboard/charts', async (req, res) => {
     let jobTrend = [];
     if (isEmployee) {
       const jobPromises = [];
+      const anchorEmpDayZ = endExclusiveZ.minus({ days: 1 }).startOf('day');
       for (let i = 6; i >= 0; i--) {
-        const d = new Date(today);
-        d.setDate(d.getDate() - i);
-        d.setHours(0, 0, 0, 0);
-        const next = new Date(d);
-        next.setDate(next.getDate() + 1);
+        const dayZ = anchorEmpDayZ.minus({ days: i });
+        const d = dayZ.toUTC().toJSDate();
+        const next = dayZ.plus({ days: 1 }).toUTC().toJSDate();
         jobPromises.push(
           Job.aggregate([
             {
@@ -1634,7 +1743,7 @@ router.get('/dashboard/charts', async (req, res) => {
       }
       const jobResults = await Promise.all(jobPromises);
       jobTrend = jobResults.map(({ d, count }) => ({
-        date: d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+        date: DateTime.fromJSDate(d).setZone(businessTz).toFormat('ccc, LLL d'),
         jobs: count
       }));
     }
@@ -1645,10 +1754,11 @@ router.get('/dashboard/charts', async (req, res) => {
       jobTrend,
       servicesDistribution,
       servicesDistributionMeta: {
-        label: servicesDayLabel,
-        timezone: servicesTz,
-        start: svcDayStart.toISOString(),
-        end: svcDayEnd.toISOString()
+        label: rangeLabel,
+        timezone: businessTz,
+        range,
+        start: startUtc.toISOString(),
+        end: endUtc.toISOString()
       }
     });
   } catch (error) {
