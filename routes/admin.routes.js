@@ -2544,7 +2544,7 @@ router.delete('/cars/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/services', async (req, res) => {
   try {
-    const { search, page = 1, limit = 20 } = req.query;
+    const { search, page = 1, limit = 20, all } = req.query;
     const query = { businessId: req.businessId };
     if (search && typeof search === 'string' && search.trim()) {
       const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2552,6 +2552,19 @@ router.get('/services', async (req, res) => {
         { name: { $regex: term, $options: 'i' } },
         { description: { $regex: term, $options: 'i' } }
       ];
+    }
+    const returnAll = all === '1' || all === 'true';
+    if (returnAll) {
+      const services = await Service.find(query)
+        .sort({ name: 1 })
+        .select('name price minTime maxTime description loyaltyPointsEarned isActive createdAt')
+        .lean();
+      const total = services.length;
+      return res.json({
+        success: true,
+        services,
+        pagination: { page: 1, limit: total, total, totalPages: 1 }
+      });
     }
     const total = await Service.countDocuments(query);
     const services = await Service.find(query)
