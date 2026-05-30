@@ -120,5 +120,9 @@ jobSchema.index({ status: 1 });
 // Compound unique index: tokenNumber must be unique per business
 jobSchema.index({ businessId: 1, tokenNumber: 1 }, { unique: true });
 jobSchema.index({ createdAt: -1 });
+jobSchema.index({ businessId: 1, status: 1, createdAt: -1 });
+jobSchema.index({ businessId: 1, assignedTo: 1, status: 1, createdAt: -1 });
+jobSchema.index({ businessId: 1, status: 1, actualDelivery: -1 });
+jobSchema.index({ businessId: 1, customerId: 1 });
 
 export default mongoose.model('Job', jobSchema);

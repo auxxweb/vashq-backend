@@ -34,6 +34,9 @@ import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields }
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
 import { invoiceSettlementAggregationStages, invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
 import OwnerTask from '../models/OwnerTask.model.js';
+import SettlementChangeRequest from '../models/SettlementChangeRequest.model.js';
+import { applySettlementDateChange } from '../utils/settlementChange.js';
+import { cacheGetOrSet } from '../utils/cache.js';
 import { DateTime } from 'luxon';
 
 const router = express.Router();
@@ -95,7 +98,8 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p === '/business' ||
       p === '/my-subscription' ||
       p === '/available-plans' ||
-      p.startsWith('/upgrade-request');
+      p.startsWith('/upgrade-request') ||
+      p.startsWith('/settlement-change-requests');
     if (!allowed) {
       return res.status(403).json({ success: false, message: 'Access denied. Insufficient permissions.' });
     }
@@ -127,7 +131,9 @@ const allowWhenLocked = (p) => {
     p === '/my-subscription' ||
     p === '/available-plans' ||
     p === '/upgrade-request' ||
-    p === '/upgrade-requests'
+    p === '/upgrade-requests' ||
+    p.startsWith('/settlement-change-requests') ||
+    /\/jobs\/[^/]+\/settlement-dates$/.test(p)
   );
 };
 
@@ -139,7 +145,9 @@ const enforceActiveSubscription = async (req, res, next) => {
     // Only gate business-scoped roles
     if (!req.businessId) return next();
 
-    const sub = await ShopSubscription.findOne({ shopId: req.businessId }).select('status expiryDate').lean();
+    const sub = await cacheGetOrSet(`sub:${req.businessId}`, 60_000, () =>
+      ShopSubscription.findOne({ shopId: req.businessId }).select('status expiryDate').lean()
+    );
     if (!sub) return next(); // fallback: let my-subscription create defaults
 
     const now = new Date();
@@ -653,17 +661,65 @@ router.post('/invoices', [
   }
 });
 
-// GET /api/admin/invoices - list (optional jobId filter)
+// GET /api/admin/invoices - list (optional jobId filter, pagination, search)
 router.get('/invoices', async (req, res) => {
   try {
+    const { search, page = 1, limit = 20, from, to, jobId } = req.query;
     const query = { businessId: req.businessId };
-    if (req.query.jobId) query.jobId = req.query.jobId;
-    const invoices = await Invoice.find(query)
-      .populate('jobId', 'tokenNumber status')
-      .populate('packageId', 'name')
-      .sort({ createdAt: -1 })
-      .lean();
-    res.json({ success: true, invoices });
+    if (jobId) query.jobId = jobId;
+
+    if (search && typeof search === 'string' && search.trim()) {
+      const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const matchingJobIds = await Job.find({
+        businessId: req.businessId,
+        tokenNumber: { $regex: term, $options: 'i' }
+      }).distinct('_id');
+      query.$or = [
+        { invoiceNumber: { $regex: term, $options: 'i' } },
+        { customerName: { $regex: term, $options: 'i' } },
+        { customerPhone: { $regex: term, $options: 'i' } },
+        { vehicleNumber: { $regex: term, $options: 'i' } },
+        ...(matchingJobIds.length ? [{ jobId: { $in: matchingJobIds } }] : [])
+      ];
+    }
+
+    if ((from && String(from).trim()) || (to && String(to).trim())) {
+      const range = {};
+      if (from && String(from).trim()) {
+        const d = new Date(String(from).trim());
+        if (!Number.isNaN(d.getTime())) range.$gte = d;
+      }
+      if (to && String(to).trim()) {
+        const d = new Date(String(to).trim());
+        if (!Number.isNaN(d.getTime())) range.$lte = d;
+      }
+      if (Object.keys(range).length) query.createdAt = range;
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+
+    const [invoices, total] = await Promise.all([
+      Invoice.find(query)
+        .populate('jobId', 'tokenNumber status')
+        .populate('packageId', 'name')
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean(),
+      Invoice.countDocuments(query)
+    ]);
+
+    res.json({
+      success: true,
+      invoices,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum) || 1
+      }
+    });
   } catch (error) {
     console.error('List invoices error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -2198,27 +2254,44 @@ router.get('/customers', async (req, res) => {
       .limit(parseInt(limit))
       .lean();
 
-    const customersWithStats = await Promise.all(
-      customers.map(async (customer) => {
-        const carsCount = await Car.countDocuments({ customerId: customer._id });
-        const jobsCount = await Job.countDocuments({ customerId: customer._id });
-        return {
-          ...customer,
-          stats: { cars: carsCount, jobs: jobsCount }
-        };
-      })
-    );
+    const customerIds = customers.map((c) => c._id);
+    const [carCounts, jobCounts] = customerIds.length
+      ? await Promise.all([
+          Car.aggregate([
+            { $match: { customerId: { $in: customerIds } } },
+            { $group: { _id: '$customerId', count: { $sum: 1 } } }
+          ]),
+          Job.aggregate([
+            { $match: { customerId: { $in: customerIds } } },
+            { $group: { _id: '$customerId', count: { $sum: 1 } } }
+          ])
+        ])
+      : [[], []];
+    const carCountMap = new Map(carCounts.map((r) => [String(r._id), r.count]));
+    const jobCountMap = new Map(jobCounts.map((r) => [String(r._id), r.count]));
+
+    const customersWithStats = customers.map((customer) => {
+      const id = String(customer._id);
+      return {
+        ...customer,
+        stats: {
+          cars: carCountMap.get(id) || 0,
+          jobs: jobCountMap.get(id) || 0
+        }
+      };
+    });
 
     // Active package badge: customer has an active package with remaining visits and not expired
     const now = new Date();
-    const customerIds = customers.map((c) => c._id);
-    const activePkgCustomerIds = await CustomerPackage.find({
-      businessId: req.businessId,
-      customerId: { $in: customerIds },
-      status: 'active',
-      visitsRemaining: { $gt: 0 },
-      expiryDate: { $gte: now }
-    }).distinct('customerId');
+    const activePkgCustomerIds = customerIds.length
+      ? await CustomerPackage.find({
+          businessId: req.businessId,
+          customerId: { $in: customerIds },
+          status: 'active',
+          visitsRemaining: { $gt: 0 },
+          expiryDate: { $gte: now }
+        }).distinct('customerId')
+      : [];
     const activeSet = new Set(activePkgCustomerIds.map((id) => id.toString()));
     const customersWithBadges = customersWithStats.map((c) => ({
       ...c,
@@ -2714,14 +2787,26 @@ router.get('/jobs/:id', async (req, res) => {
     }
 
     const invoiceForJob = await Invoice.findOne({ businessId: req.businessId, jobId: job._id })
-      .select('finalAmount advancePayment paymentMethod paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber')
+      .select('finalAmount advancePayment paymentMethod paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber createdAt paymentReceivedAt')
       .lean();
+
+    const pendingSettlementRequest = invoiceForJob
+      ? await SettlementChangeRequest.findOne({
+          businessId: req.businessId,
+          jobId: job._id,
+          invoiceId: invoiceForJob._id,
+          status: 'PENDING'
+        })
+          .populate('requestedBy', 'name email employeeCode')
+          .lean()
+      : null;
 
     res.json({
       success: true,
       job,
       hasInvoice: !!invoiceForJob,
-      invoice: invoiceForJob || null
+      invoice: invoiceForJob || null,
+      pendingSettlementRequest: pendingSettlementRequest || null
     });
   } catch (error) {
     console.error('Get job error:', error);
@@ -2748,22 +2833,38 @@ router.get('/jobs', async (req, res) => {
     }
     if (search && typeof search === 'string' && search.trim()) {
       const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const businessCustomerIds = await Customer.find({ businessId: req.businessId }).distinct('_id');
-      const customerIds = await Customer.find({
-        businessId: req.businessId,
-        $or: [
-          { name: { $regex: term, $options: 'i' } },
-          { phone: { $regex: term, $options: 'i' } }
-        ]
-      }).distinct('_id');
-      const carIds = await Car.find({
-        customerId: { $in: businessCustomerIds },
-        carNumber: { $regex: term, $options: 'i' }
-      }).distinct('_id');
+      const [customerIds, carIdRows] = await Promise.all([
+        Customer.find({
+          businessId: req.businessId,
+          $or: [
+            { name: { $regex: term, $options: 'i' } },
+            { phone: { $regex: term, $options: 'i' } }
+          ]
+        }).distinct('_id'),
+        Car.aggregate([
+          {
+            $lookup: {
+              from: 'customers',
+              localField: 'customerId',
+              foreignField: '_id',
+              as: 'cust'
+            }
+          },
+          { $unwind: '$cust' },
+          {
+            $match: {
+              'cust.businessId': new mongoose.Types.ObjectId(req.businessId),
+              carNumber: { $regex: term, $options: 'i' }
+            }
+          },
+          { $project: { _id: 1 } }
+        ])
+      ]);
+      const carIds = carIdRows.map((r) => r._id);
       query.$or = [
         { tokenNumber: { $regex: term, $options: 'i' } },
-        { customerId: { $in: customerIds } },
-        { carId: { $in: carIds } }
+        ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
+        ...(carIds.length ? [{ carId: { $in: carIds } }] : [])
       ];
     }
 
@@ -2781,15 +2882,19 @@ router.get('/jobs', async (req, res) => {
       if (Object.keys(range).length) query.createdAt = range;
     }
 
-    const jobs = await Job.find(query)
-      .populate('customerId', 'name phone whatsappNumber')
-      .populate('carId', 'carNumber brand model color')
-      .populate('services.serviceId', 'name')
-      .populate('assignedTo', 'name employeeCode email')
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .lean();
+    const [jobs, total] = await Promise.all([
+      Job.find(query)
+        .select('-beforeImages -afterImages -statusHistory -notes')
+        .populate('customerId', 'name phone whatsappNumber')
+        .populate('carId', 'carNumber brand model color')
+        .populate('services.serviceId', 'name')
+        .populate('assignedTo', 'name employeeCode email')
+        .sort({ createdAt: -1 })
+        .limit(limit * 1)
+        .skip((page - 1) * limit)
+        .lean(),
+      Job.countDocuments(query)
+    ]);
 
     const deliveredIds = jobs.filter(j => j.status === 'DELIVERED').map(j => j._id);
     let invoiceFinalByJob = {};
@@ -2815,8 +2920,6 @@ router.get('/jobs', async (req, res) => {
       }
       return out;
     });
-
-    const total = await Job.countDocuments(query);
 
     res.json({
       success: true,
@@ -3714,6 +3817,15 @@ async function ensureDefaultSubscriptionPlan() {
   });
 }
 
+function isFreeTrialPlan(plan) {
+  return plan?.isFreeTrial === true || (plan?.name && /free tier/i.test(plan.name));
+}
+
+async function getPlatformDefaultCurrency() {
+  const platform = await PlatformSettings.findOne({}).select('defaultCurrency').lean();
+  return platform?.defaultCurrency || 'USD';
+}
+
 // @route   GET /api/admin/my-subscription
 // @desc    Get current shop subscription
 // @access  Private (Car Wash Admin)
@@ -3758,8 +3870,9 @@ router.get('/my-subscription', async (req, res) => {
     const business = await Business.findById(req.businessId).select('freeTrialUsed').lean();
     const freeTrialUsed = business?.freeTrialUsed === true;
     const hasPendingUpgrade = await PlanUpgradeRequest.exists({ shopId: req.businessId, status: 'PENDING' });
-    const canRequestUpgrade = !freeTrialUsed && !hasPendingUpgrade;
-    res.json({ success: true, subscription: subObj, canRequestUpgrade });
+    const canRequestUpgrade = !hasPendingUpgrade;
+    const currency = await getPlatformDefaultCurrency();
+    res.json({ success: true, subscription: subObj, canRequestUpgrade, freeTrialUsed, currency });
   } catch (error) {
     console.error('Get my-subscription error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -3779,7 +3892,8 @@ router.get('/available-plans', async (req, res) => {
     const query = { isActive: true };
     if (hideFreeTier) query.isFreeTrial = { $ne: true };
     const plans = await SubscriptionPlan.find(query).sort({ validityDays: 1 });
-    res.json({ success: true, plans });
+    const currency = await getPlatformDefaultCurrency();
+    res.json({ success: true, plans, freeTrialUsed, currency });
   } catch (error) {
     console.error('Get available plans error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -3835,8 +3949,7 @@ router.post('/upgrade-request', [
       return res.status(400).json({ success: false, message: 'Invalid or inactive plan' });
     }
     const business = await Business.findById(req.businessId).select('freeTrialUsed').lean();
-    const isFreeTrialPlan = requestedPlan.isFreeTrial === true || (requestedPlan.name && /free tier/i.test(requestedPlan.name));
-    if (business?.freeTrialUsed && isFreeTrialPlan) {
+    if (business?.freeTrialUsed && isFreeTrialPlan(requestedPlan)) {
       return res.status(400).json({ success: false, message: 'Free trial is no longer available for your account.' });
     }
     const request = await PlanUpgradeRequest.create({
@@ -3866,6 +3979,337 @@ router.post('/upgrade-request', [
   } catch (error) {
     console.error('Create upgrade request error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== SETTLEMENT CHANGE REQUESTS ====================
+
+async function loadJobInvoiceForSettlementRequest(req, jobId) {
+  const jobFilter = { _id: jobId, businessId: req.businessId, status: 'DELIVERED' };
+  if (req.user.role === 'EMPLOYEE') {
+    jobFilter.assignedTo = req.user._id;
+  }
+  const job = await Job.findOne(jobFilter);
+  if (!job) return { error: { status: 404, message: 'Delivered job not found or not assigned to you' } };
+
+  const invoice = await Invoice.findOne({
+    businessId: req.businessId,
+    jobId: job._id,
+    paymentStatus: 'RECEIVED'
+  });
+  if (!invoice) {
+    return { error: { status: 400, message: 'Paid invoice required before requesting a settlement date change' } };
+  }
+  return { job, invoice };
+}
+
+// GET /api/admin/settlement-change-requests?status=PENDING|APPROVED|REJECTED|history&jobId=
+router.get('/settlement-change-requests', async (req, res) => {
+  try {
+    const { status, jobId } = req.query;
+    const query = { businessId: req.businessId };
+
+    if (req.user.role === 'EMPLOYEE') {
+      query.requestedBy = req.user._id;
+      if (jobId && mongoose.isValidObjectId(String(jobId))) {
+        query.jobId = jobId;
+      }
+    } else if (status === 'history') {
+      query.status = { $in: ['APPROVED', 'REJECTED'] };
+    } else if (status && ['PENDING', 'APPROVED', 'REJECTED'].includes(String(status))) {
+      query.status = status;
+    }
+
+    const requests = await SettlementChangeRequest.find(query)
+      .sort({ createdAt: -1 })
+      .limit(req.user.role === 'EMPLOYEE' ? 20 : 100)
+      .populate('requestedBy', 'name email employeeCode role')
+      .populate('actionedBy', 'name email')
+      .populate('jobId', 'tokenNumber status actualDelivery')
+      .populate('invoiceId', 'invoiceNumber paymentReceivedAt createdAt')
+      .lean();
+
+    const pendingCount =
+      req.user.role === 'CAR_WASH_ADMIN'
+        ? await SettlementChangeRequest.countDocuments({ businessId: req.businessId, status: 'PENDING' })
+        : 0;
+
+    res.json({ success: true, requests, pendingCount });
+  } catch (error) {
+    console.error('List settlement change requests error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/admin/settlement-change-requests
+router.post('/settlement-change-requests', [
+  body('jobId').notEmpty().isMongoId(),
+  body('proposedDeliveredAt').isISO8601().withMessage('Valid delivery date/time required'),
+  body('proposedInvoiceAt').optional({ checkFalsy: true }).isISO8601(),
+  body('reason').trim().notEmpty().isLength({ min: 3, max: 500 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    if (req.user.role === 'CAR_WASH_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Business owners can edit settlement dates directly on the job or invoice page.'
+      });
+    }
+
+    const { jobId, proposedDeliveredAt, reason } = req.body;
+    const proposedInvoiceAt = req.body.proposedInvoiceAt || proposedDeliveredAt;
+
+    const loaded = await loadJobInvoiceForSettlementRequest(req, jobId);
+    if (loaded.error) {
+      return res.status(loaded.error.status).json({ success: false, message: loaded.error.message });
+    }
+    const { job, invoice } = loaded;
+
+    const existingPending = await SettlementChangeRequest.findOne({
+      businessId: req.businessId,
+      invoiceId: invoice._id,
+      status: 'PENDING'
+    });
+    if (existingPending) {
+      return res.status(400).json({
+        success: false,
+        message: 'A pending settlement change request already exists for this invoice'
+      });
+    }
+
+    const request = await SettlementChangeRequest.create({
+      businessId: req.businessId,
+      jobId: job._id,
+      invoiceId: invoice._id,
+      requestedBy: req.user._id,
+      tokenNumber: job.tokenNumber,
+      previousDeliveredAt: job.actualDelivery || null,
+      previousInvoiceAt: invoice.paymentReceivedAt || invoice.createdAt || null,
+      proposedDeliveredAt: new Date(proposedDeliveredAt),
+      proposedInvoiceAt: new Date(proposedInvoiceAt),
+      reason,
+      status: 'PENDING'
+    });
+
+    try {
+      const ownerId =
+        req.user.role === 'CAR_WASH_ADMIN'
+          ? req.user._id
+          : (
+              await User.findOne({
+                businessId: req.businessId,
+                role: 'CAR_WASH_ADMIN',
+                status: 'ACTIVE'
+              })
+                .select('_id')
+                .lean()
+            )?._id;
+      if (ownerId && req.user.role === 'EMPLOYEE') {
+        await sendPushNotification({
+          businessOwnerId: ownerId,
+          title: 'Settlement date change request',
+          body: `${job.tokenNumber}: review in Settings`,
+          data: {
+            type: 'settlement_change_request',
+            jobId: String(job._id),
+            requestId: String(request._id),
+            url: '/admin/settings?tab=settlement-requests'
+          }
+        });
+      }
+    } catch (pushErr) {
+      console.warn('Push settlement change request error:', pushErr?.message || pushErr);
+    }
+
+    await request.populate('requestedBy', 'name email employeeCode role');
+    await request.populate('jobId', 'tokenNumber status actualDelivery');
+    await request.populate('invoiceId', 'invoiceNumber paymentReceivedAt createdAt');
+
+    res.status(201).json({ success: true, request });
+  } catch (error) {
+    console.error('Create settlement change request error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/settlement-change-requests/:id/approve
+router.patch('/settlement-change-requests/:id/approve', expenseAdminOnly, async (req, res) => {
+  try {
+    const request = await SettlementChangeRequest.findOne({
+      _id: req.params.id,
+      businessId: req.businessId
+    });
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+    if (request.status !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'Request is not pending' });
+    }
+
+    const job = await Job.findOne({ _id: request.jobId, businessId: req.businessId, status: 'DELIVERED' });
+    const invoice = await Invoice.findOne({
+      _id: request.invoiceId,
+      businessId: req.businessId,
+      jobId: request.jobId,
+      paymentStatus: 'RECEIVED'
+    });
+    if (!job || !invoice) {
+      return res.status(400).json({ success: false, message: 'Job or paid invoice no longer available' });
+    }
+
+    const { deliveredAt, invoiceAt } = await applySettlementDateChange({
+      job,
+      invoice,
+      proposedDeliveredAt: request.proposedDeliveredAt,
+      proposedInvoiceAt: request.proposedInvoiceAt
+    });
+
+    request.status = 'APPROVED';
+    request.actionedBy = req.user._id;
+    request.actionedAt = new Date();
+    request.appliedDeliveredAt = deliveredAt;
+    request.appliedInvoiceAt = invoiceAt;
+    await request.save();
+
+    await request.populate('requestedBy', 'name email employeeCode role');
+    await request.populate('actionedBy', 'name email');
+    await request.populate('jobId', 'tokenNumber status actualDelivery');
+    await request.populate('invoiceId', 'invoiceNumber paymentReceivedAt createdAt');
+
+    res.json({ success: true, request, message: 'Settlement dates updated' });
+  } catch (error) {
+    console.error('Approve settlement change request error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/settlement-change-requests/:id/reject
+router.patch('/settlement-change-requests/:id/reject', expenseAdminOnly, [
+  body('reviewNote').optional().trim().isLength({ max: 500 })
+], async (req, res) => {
+  try {
+    const request = await SettlementChangeRequest.findOne({
+      _id: req.params.id,
+      businessId: req.businessId
+    });
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+    if (request.status !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'Request is not pending' });
+    }
+
+    request.status = 'REJECTED';
+    request.actionedBy = req.user._id;
+    request.actionedAt = new Date();
+    request.reviewNote = req.body.reviewNote || undefined;
+    await request.save();
+
+    await request.populate('requestedBy', 'name email employeeCode role');
+    await request.populate('actionedBy', 'name email');
+    await request.populate('jobId', 'tokenNumber status actualDelivery');
+    await request.populate('invoiceId', 'invoiceNumber paymentReceivedAt createdAt');
+
+    res.json({ success: true, request, message: 'Request rejected' });
+  } catch (error) {
+    console.error('Reject settlement change request error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/jobs/:id/settlement-dates — business owner direct edit (no approval workflow)
+router.patch('/jobs/:id/settlement-dates', expenseAdminOnly, [
+  body('deliveredAt').isISO8601().withMessage('Valid delivery date/time required'),
+  body('invoiceAt').optional({ checkFalsy: true }).isISO8601(),
+  body('note').optional().trim().isLength({ max: 500 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const job = await Job.findOne({
+      _id: req.params.id,
+      businessId: req.businessId,
+      status: 'DELIVERED'
+    });
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Delivered job not found' });
+    }
+
+    const invoice = await Invoice.findOne({
+      businessId: req.businessId,
+      jobId: job._id,
+      paymentStatus: 'RECEIVED'
+    });
+    if (!invoice) {
+      return res.status(400).json({ success: false, message: 'Paid invoice required to edit settlement dates' });
+    }
+
+    const deliveredAtInput = new Date(req.body.deliveredAt);
+    const invoiceAtInput = new Date(req.body.invoiceAt || req.body.deliveredAt);
+    const previousDeliveredAt = job.actualDelivery || null;
+    const previousInvoiceAt = invoice.paymentReceivedAt || invoice.createdAt || null;
+
+    const { deliveredAt, invoiceAt } = await applySettlementDateChange({
+      job,
+      invoice,
+      proposedDeliveredAt: deliveredAtInput,
+      proposedInvoiceAt: invoiceAtInput
+    });
+
+    await SettlementChangeRequest.updateMany(
+      { businessId: req.businessId, invoiceId: invoice._id, status: 'PENDING' },
+      {
+        status: 'REJECTED',
+        actionedBy: req.user._id,
+        actionedAt: new Date(),
+        reviewNote: 'Superseded by owner direct edit'
+      }
+    );
+
+    const audit = await SettlementChangeRequest.create({
+      businessId: req.businessId,
+      jobId: job._id,
+      invoiceId: invoice._id,
+      requestedBy: req.user._id,
+      tokenNumber: job.tokenNumber,
+      previousDeliveredAt,
+      previousInvoiceAt,
+      proposedDeliveredAt: deliveredAt,
+      proposedInvoiceAt: invoiceAt,
+      reason: req.body.note?.trim() || 'Direct edit by business owner',
+      status: 'APPROVED',
+      actionedBy: req.user._id,
+      actionedAt: new Date(),
+      appliedDeliveredAt: deliveredAt,
+      appliedInvoiceAt: invoiceAt
+    });
+
+    res.json({
+      success: true,
+      message: 'Settlement dates updated',
+      job: {
+        _id: job._id,
+        actualDelivery: deliveredAt,
+        tokenNumber: job.tokenNumber
+      },
+      invoice: {
+        _id: invoice._id,
+        paymentReceivedAt: invoiceAt,
+        createdAt: invoiceAt
+      },
+      auditId: audit._id
+    });
+  } catch (error) {
+    console.error('Direct settlement date edit error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 });
 

@@ -53,6 +53,9 @@ invoiceSchema.index({ jobId: 1 }, { unique: true, sparse: true });
 // Unique invoice per package purchase (optional but prevents duplicates)
 invoiceSchema.index({ packageId: 1 }, { unique: true, sparse: true });
 invoiceSchema.index({ shareToken: 1 });
+invoiceSchema.index({ businessId: 1, createdAt: -1 });
+invoiceSchema.index({ businessId: 1, paymentStatus: 1, paymentReceivedAt: -1 });
+invoiceSchema.index({ businessId: 1, saleType: 1, createdAt: -1 });
 
 export function generateShareToken() {
   return crypto.randomBytes(24).toString('hex');
