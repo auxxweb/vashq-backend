@@ -106,7 +106,14 @@ const jobSchema = new mongoose.Schema({
     index: true
   },
   services: [jobServiceSchema],
-  statusHistory: [jobStatusHistorySchema]
+  statusHistory: [jobStatusHistorySchema],
+  /** Set when job is created from an online booking. */
+  sourceBookingId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Booking',
+    default: null,
+    index: true
+  }
 }, {
   timestamps: true
 });

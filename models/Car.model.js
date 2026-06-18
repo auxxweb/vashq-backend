@@ -30,6 +30,10 @@ const carSchema = new mongoose.Schema({
   },
   notes: {
     type: String
+  },
+  vehicleType: {
+    type: String,
+    trim: true
   }
 }, {
   timestamps: true

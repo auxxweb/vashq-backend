@@ -1,236 +1,376 @@
 import mongoose from 'mongoose';
-import PackageTemplate from '../models/PackageTemplate.model.js';
 import CustomerPackage from '../models/CustomerPackage.model.js';
+import PackageTemplate from '../models/PackageTemplate.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
 import Customer from '../models/Customer.model.js';
 import Car from '../models/Car.model.js';
-import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
+import Service from '../models/Service.model.js';
+import Invoice, { generateInvoiceNumber, generateShareToken } from '../models/Invoice.model.js';
 import User from '../models/User.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
-import { balanceDue, assertSettlementMatchesDue } from '../utils/invoicePayment.js';
+import { balanceDue, assertSettlementMatchesDue, roundMoney } from '../utils/invoicePayment.js';
+import { isCreditSettlementMode, closePackageOnCredit } from '../services/credit/creditInvoiceService.js';
+import { getInvoiceCompanySnapshot } from '../utils/invoiceCompany.js';
 
-function startOfToday() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
+// ==================== Helpers ====================
+
+function oid(id) {
+  if (!id) return null;
+  return mongoose.isValidObjectId(id) ? new mongoose.Types.ObjectId(id) : null;
 }
 
-function normalizeServicesIncluded(input) {
-  if (!Array.isArray(input)) return [];
-  const out = [];
-  for (const x of input) {
-    // Backward compatibility: allow array of ids -> quantity 1
-    if (typeof x === 'string' || x instanceof mongoose.Types.ObjectId) {
-      out.push({ serviceId: x, quantity: 1 });
-      continue;
-    }
-    if (x && typeof x === 'object' && x.serviceId) {
-      const qtyRaw = Number(x.quantity);
-      const qty = Number.isFinite(qtyRaw) ? Math.floor(qtyRaw) : 1;
-      // Allow 0 to exclude the service
-      if (qty > 0) out.push({ serviceId: x.serviceId, quantity: qty });
-    }
-  }
-  // Merge duplicates by summing quantities
-  const merged = new Map();
-  for (const r of out) {
-    const key = String(r.serviceId);
-    merged.set(key, (merged.get(key) || 0) + r.quantity);
-  }
-  return [...merged.entries()]
-    .map(([serviceId, quantity]) => ({ serviceId, quantity }))
-    .filter((x) => x.quantity > 0);
+async function resolveOwnerId(req) {
+  if (req.user?.role === 'CAR_WASH_ADMIN') return req.user._id;
+  const owner = await User.findOne({
+    businessId: req.businessId,
+    role: 'CAR_WASH_ADMIN',
+    status: 'ACTIVE'
+  }).select('_id').lean();
+  return owner?._id || null;
 }
 
-function sumServiceQuantities(servicesIncluded) {
-  return (Array.isArray(servicesIncluded) ? servicesIncluded : []).reduce((s, x) => s + Math.max(0, Number(x?.quantity || 0)), 0);
-}
-
-function buildServicesRemaining(servicesIncluded) {
-  const norm = normalizeServicesIncluded(servicesIncluded);
-  return norm.map((x) => ({
-    serviceId: x.serviceId,
-    total: Number(x.quantity || 0),
-    remaining: Number(x.quantity || 0)
-  }));
-}
-
-function normalizeServicesUsed(input) {
-  // Same shape as servicesIncluded, but must have quantity >= 1
-  const norm = normalizeServicesIncluded(input);
-  return norm.map((x) => ({ serviceId: x.serviceId, quantity: Math.max(1, Math.floor(Number(x.quantity || 1))) }));
-}
-
-export async function refreshExpiredPackages(businessId) {
+async function markExpiredPackages(businessId, filter = {}) {
   const now = new Date();
   await CustomerPackage.updateMany(
     {
       businessId,
+      ...filter,
       status: 'active',
-      expiryDate: { $lt: now },
-      visitsRemaining: { $gt: 0 }
+      expiryDate: { $lt: now }
     },
     { $set: { status: 'expired' } }
   );
 }
 
+function normalizeServicesUsed(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    const err = new Error('At least one service is required');
+    err.status = 400;
+    throw err;
+  }
+  const out = [];
+  for (const row of raw) {
+    const serviceId = row?.serviceId;
+    if (!serviceId || !mongoose.isValidObjectId(String(serviceId))) {
+      const err = new Error('Invalid service');
+      err.status = 400;
+      throw err;
+    }
+    const quantity = Math.max(1, Math.floor(Number(row?.quantity || 1)));
+    out.push({ serviceId, quantity });
+  }
+  return out;
+}
+
+function buildServicesRemainingFromIncluded(servicesIncluded) {
+  return (Array.isArray(servicesIncluded) ? servicesIncluded : []).map((row) => {
+    const total = Math.max(0, Math.floor(Number(row?.quantity || 0)));
+    return {
+      serviceId: row.serviceId,
+      total,
+      remaining: total
+    };
+  });
+}
+
+function assertPackageActive(pkg) {
+  if (!pkg) {
+    const err = new Error('Customer package not found');
+    err.status = 404;
+    throw err;
+  }
+  if (pkg.status !== 'active') {
+    const err = new Error(`Package is ${pkg.status}`);
+    err.status = 400;
+    throw err;
+  }
+  if (Number(pkg.visitsRemaining || 0) <= 0) {
+    const err = new Error('No visits remaining on this package');
+    err.status = 400;
+    throw err;
+  }
+  if (pkg.expiryDate && new Date(pkg.expiryDate) < new Date()) {
+    const err = new Error('Package has expired');
+    err.status = 400;
+    throw err;
+  }
+}
+
+function assertInvoicePaid(invoice) {
+  if (!invoice) {
+    const err = new Error('Invoice not found for this package');
+    err.status = 404;
+    throw err;
+  }
+  if (invoice.paymentStatus !== 'RECEIVED') {
+    const err = new Error('Payment required before package actions');
+    err.status = 402;
+    throw err;
+  }
+}
+
+function validateServiceDeductions(pkg, servicesUsed) {
+  const remainingMap = new Map(
+    (pkg.servicesRemaining || []).map((row) => [String(row.serviceId), Number(row.remaining || 0)])
+  );
+  for (const row of servicesUsed) {
+    const key = String(row.serviceId);
+    const remaining = remainingMap.get(key);
+    if (remaining == null) {
+      const err = new Error('Service is not included in this package');
+      err.status = 400;
+      throw err;
+    }
+    if (row.quantity > remaining) {
+      const err = new Error('Insufficient service quantity remaining');
+      err.status = 400;
+      throw err;
+    }
+  }
+}
+
+function applyServiceDeductions(pkg, servicesUsed) {
+  const remainingMap = new Map(
+    (pkg.servicesRemaining || []).map((row) => [String(row.serviceId), { ...row.toObject?.() || row }])
+  );
+  for (const row of servicesUsed) {
+    const key = String(row.serviceId);
+    const entry = remainingMap.get(key);
+    if (entry) {
+      entry.remaining = Math.max(0, Number(entry.remaining || 0) - row.quantity);
+      remainingMap.set(key, entry);
+    }
+  }
+  pkg.servicesRemaining = Array.from(remainingMap.values());
+}
+
+async function findPackageInvoice(businessId, customerPackageId) {
+  return Invoice.findOne({ businessId, packageId: customerPackageId });
+}
+
+async function attachInvoiceMeta(businessId, packages) {
+  const rows = Array.isArray(packages) ? packages : [];
+  if (!rows.length) return rows;
+  const ids = rows.map((p) => p._id).filter(Boolean);
+  const invoices = await Invoice.find({ businessId, packageId: { $in: ids } })
+    .select('_id packageId paymentStatus')
+    .lean();
+  const byPkg = new Map(invoices.map((inv) => [String(inv.packageId), inv]));
+  return rows.map((p) => {
+    const inv = byPkg.get(String(p._id));
+    return {
+      ...p,
+      invoiceId: inv?._id || null,
+      invoicePaymentStatus: inv?.paymentStatus || null
+    };
+  });
+}
+
+async function attachCustomerCars(businessId, packages) {
+  const rows = Array.isArray(packages) ? packages : [];
+  if (!rows.length) return rows;
+  const customerIds = [
+    ...new Set(rows.map((p) => String(p.customerId?._id || p.customerId)).filter(Boolean))
+  ].map((id) => oid(id)).filter(Boolean);
+  if (!customerIds.length) return rows.map((p) => ({ ...p, customerCars: [] }));
+
+  const cars = await Car.find({ businessId, customerId: { $in: customerIds } })
+    .select('customerId carNumber brand model color registrationNumber')
+    .lean();
+  const byCustomer = new Map();
+  for (const car of cars) {
+    const key = String(car.customerId);
+    if (!byCustomer.has(key)) byCustomer.set(key, []);
+    byCustomer.get(key).push(car);
+  }
+  return rows.map((p) => {
+    const key = String(p.customerId?._id || p.customerId || '');
+    return { ...p, customerCars: byCustomer.get(key) || [] };
+  });
+}
+
+async function validateTemplateServices(businessId, servicesIncluded) {
+  const rows = Array.isArray(servicesIncluded) ? servicesIncluded : [];
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.serviceId).filter((id) => mongoose.isValidObjectId(String(id)));
+  if (!ids.length) return [];
+  const found = await Service.find({ businessId, _id: { $in: ids }, isActive: { $ne: false } })
+    .select('_id')
+    .lean();
+  const allowed = new Set(found.map((s) => String(s._id)));
+  return rows
+    .filter((r) => allowed.has(String(r.serviceId)))
+    .map((r) => ({
+      serviceId: r.serviceId,
+      quantity: Math.max(1, Math.floor(Number(r.quantity || 1)))
+    }));
+}
+
+function visitPayloadFromBody(body) {
+  return {
+    notes: body.notes?.trim() || undefined,
+    servicesUsed: normalizeServicesUsed(body.servicesUsed),
+    assignedTo: body.assignedTo && mongoose.isValidObjectId(String(body.assignedTo)) ? body.assignedTo : null,
+    createWithoutImages: !!body.createWithoutImages,
+    beforeImages: body.createWithoutImages ? [] : (Array.isArray(body.beforeImages) ? body.beforeImages : []),
+    afterImages: body.createWithoutImages ? [] : (Array.isArray(body.afterImages) ? body.afterImages : [])
+  };
+}
+
+// ==================== Template CRUD ====================
+
+export async function listTemplates(req, res) {
+  try {
+    const templates = await PackageTemplate.find({ businessId: req.businessId })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, data: templates });
+  } catch (error) {
+    console.error('List package templates error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
 export async function createTemplate(req, res) {
   try {
     const { name, price, totalVisits, validityDays, servicesIncluded, description } = req.body;
-    const normServices = normalizeServicesIncluded(servicesIncluded);
-    const computedVisits = sumServiceQuantities(normServices);
-    const tpl = await PackageTemplate.create({
+    const normalizedServices = await validateTemplateServices(req.businessId, servicesIncluded);
+    const template = await PackageTemplate.create({
       businessId: req.businessId,
-      name: String(name || '').trim(),
-      price: Number(price),
-      totalVisits: computedVisits > 0 ? computedVisits : Number(totalVisits),
-      validityDays: Number(validityDays),
-      servicesIncluded: normServices,
-      description: description ? String(description).trim() : undefined,
+      name: String(name).trim(),
+      price: roundMoney(price),
+      totalVisits: Math.max(1, Math.floor(Number(totalVisits))),
+      validityDays: Math.max(1, Math.floor(Number(validityDays))),
+      servicesIncluded: normalizedServices,
+      description: description?.trim() || undefined,
       isActive: true
     });
-    res.status(201).json({ success: true, data: tpl, message: 'Package template created' });
-  } catch (e) {
-    console.error('Create package template error:', e);
+    res.status(201).json({ success: true, data: template });
+  } catch (error) {
+    console.error('Create package template error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
 export async function updateTemplate(req, res) {
   try {
-    const { id } = req.params;
-    const update = {};
-    const allowed = ['name', 'price', 'totalVisits', 'validityDays', 'servicesIncluded', 'description', 'isActive'];
-    for (const k of allowed) {
-      if (req.body[k] !== undefined) update[k] = req.body[k];
-    }
-    if (update.name !== undefined) update.name = String(update.name || '').trim();
-    if (update.description !== undefined) update.description = String(update.description || '').trim();
-    if (update.price !== undefined) update.price = Number(update.price);
-    if (update.totalVisits !== undefined) update.totalVisits = Number(update.totalVisits);
-    if (update.validityDays !== undefined) update.validityDays = Number(update.validityDays);
-    if (update.servicesIncluded !== undefined) {
-      update.servicesIncluded = normalizeServicesIncluded(update.servicesIncluded);
-      const computed = sumServiceQuantities(update.servicesIncluded);
-      if (computed > 0) update.totalVisits = computed;
+    const template = await PackageTemplate.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!template) {
+      return res.status(404).json({ success: false, message: 'Template not found' });
     }
 
-    const tpl = await PackageTemplate.findOneAndUpdate(
-      { _id: id, businessId: req.businessId },
-      update,
-      { new: true, runValidators: true }
-    );
-    if (!tpl) return res.status(404).json({ success: false, message: 'Template not found' });
-    res.json({ success: true, data: tpl, message: 'Template updated' });
-  } catch (e) {
-    console.error('Update package template error:', e);
+    const { name, price, totalVisits, validityDays, servicesIncluded, description, isActive } = req.body;
+    if (name !== undefined) template.name = String(name).trim();
+    if (price !== undefined) template.price = roundMoney(price);
+    if (totalVisits !== undefined) template.totalVisits = Math.max(1, Math.floor(Number(totalVisits)));
+    if (validityDays !== undefined) template.validityDays = Math.max(1, Math.floor(Number(validityDays)));
+    if (description !== undefined) template.description = description?.trim() || undefined;
+    if (isActive !== undefined) template.isActive = !!isActive;
+    if (servicesIncluded !== undefined) {
+      template.servicesIncluded = await validateTemplateServices(req.businessId, servicesIncluded);
+    }
+
+    await template.save();
+    res.json({ success: true, data: template });
+  } catch (error) {
+    console.error('Update package template error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
 export async function softDeleteTemplate(req, res) {
   try {
-    const { id } = req.params;
-    const tpl = await PackageTemplate.findOneAndUpdate(
-      { _id: id, businessId: req.businessId },
-      { $set: { isActive: false } },
-      { new: true }
-    );
-    if (!tpl) return res.status(404).json({ success: false, message: 'Template not found' });
-    res.json({ success: true, data: tpl, message: 'Template disabled' });
-  } catch (e) {
-    console.error('Delete template error:', e);
+    const template = await PackageTemplate.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!template) {
+      return res.status(404).json({ success: false, message: 'Template not found' });
+    }
+    template.isActive = false;
+    await template.save();
+    res.json({ success: true, data: template, message: 'Template disabled' });
+  } catch (error) {
+    console.error('Disable package template error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
-export async function listTemplates(req, res) {
-  try {
-    const includeInactive = String(req.query.includeInactive || '') === 'true';
-    const q = { businessId: req.businessId };
-    if (!includeInactive) q.isActive = true;
-    const templates = await PackageTemplate.find(q).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: templates });
-  } catch (e) {
-    console.error('List templates error:', e);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-}
+// ==================== Purchase ====================
 
 export async function purchasePackage(req, res) {
-  const session = await mongoose.startSession();
   try {
     const { templateId, customerId, carId } = req.body;
-    session.startTransaction();
 
-    const tpl = await PackageTemplate.findOne({ _id: templateId, businessId: req.businessId, isActive: true }).lean();
-    if (!tpl) {
-      await session.abortTransaction();
+    const template = await PackageTemplate.findOne({
+      _id: templateId,
+      businessId: req.businessId,
+      isActive: { $ne: false }
+    });
+    if (!template) {
       return res.status(404).json({ success: false, message: 'Package template not found' });
     }
-    const customer = await Customer.findOne({ _id: customerId, businessId: req.businessId }).select('_id name phone whatsappNumber email').lean();
+
+    const customer = await Customer.findOne({ _id: customerId, businessId: req.businessId });
     if (!customer) {
-      await session.abortTransaction();
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    let vehicleNumber = '';
+    let car = null;
     if (carId) {
-      const car = await Car.findOne({ _id: carId, businessId: req.businessId, customerId }).select('carNumber').lean();
+      car = await Car.findOne({ _id: carId, businessId: req.businessId, customerId: customer._id });
       if (!car) {
-        await session.abortTransaction();
-        return res.status(404).json({ success: false, message: 'Car not found for this customer' });
+        return res.status(400).json({ success: false, message: 'Car not found for this customer' });
       }
-      vehicleNumber = car.carNumber || '';
     }
 
-    const startDate = startOfToday();
+    const startDate = new Date();
     const expiryDate = new Date(startDate);
-    expiryDate.setDate(expiryDate.getDate() + Number(tpl.validityDays || 0));
-    expiryDate.setHours(23, 59, 59, 999);
+    expiryDate.setDate(expiryDate.getDate() + Number(template.validityDays || 0));
 
-    const normServices = normalizeServicesIncluded(tpl.servicesIncluded);
-    const computedVisits = sumServiceQuantities(normServices);
-    const cp = await CustomerPackage.create([{
+    const servicesIncluded = (template.servicesIncluded || []).map((row) => ({
+      serviceId: row.serviceId,
+      quantity: Math.max(1, Math.floor(Number(row.quantity || 1)))
+    }));
+
+    const customerPackage = await CustomerPackage.create({
       businessId: req.businessId,
-      customerId,
-      packageTemplateId: tpl._id,
-      name: tpl.name,
-      price: tpl.price,
-      totalVisits: computedVisits > 0 ? computedVisits : tpl.totalVisits,
-      validityDays: tpl.validityDays,
-      servicesIncluded: normServices,
-      servicesRemaining: buildServicesRemaining(normServices),
-      description: tpl.description,
+      customerId: customer._id,
+      packageTemplateId: template._id,
+      name: template.name,
+      price: template.price,
+      totalVisits: template.totalVisits,
+      validityDays: template.validityDays,
+      servicesIncluded,
+      servicesRemaining: buildServicesRemainingFromIncluded(servicesIncluded),
+      description: template.description,
       visitsUsed: 0,
-      visitsRemaining: computedVisits > 0 ? computedVisits : tpl.totalVisits,
+      visitsRemaining: template.totalVisits,
       startDate,
       expiryDate,
       status: 'active'
-    }], { session });
+    });
 
-    // Create a draft invoice (pending). Sales counting will happen when it's marked RECEIVED,
-    // similar to job invoice workflow (sale completed on delivery/close).
     let invoiceNumber = generateInvoiceNumber();
-    while (await Invoice.findOne({ businessId: req.businessId, invoiceNumber }).session(session)) {
+    while (await Invoice.findOne({ businessId: req.businessId, invoiceNumber })) {
       invoiceNumber = generateInvoiceNumber();
     }
-    const subtotal = Number(tpl.price || 0);
-    const pkgInvoice = await Invoice.create([{
+
+    const company = await getInvoiceCompanySnapshot(req.businessId);
+    const subtotal = roundMoney(template.price);
+    const invoice = await Invoice.create({
       saleType: 'PACKAGE',
-      packageId: cp[0]._id,
-      packageName: tpl.name,
+      packageId: customerPackage._id,
+      packageName: template.name,
       businessId: req.businessId,
       invoiceNumber,
-      companyName: null,
-      companyAddress: null,
-      companyPhone: null,
-      companyGst: null,
-      customerName: customer?.name ?? '',
-      customerPhone: customer?.phone || customer?.whatsappNumber || '',
-      customerGst: null,
-      vehicleNumber,
-      items: [{ serviceName: `Package: ${tpl.name}`, servicePrice: subtotal }],
+      companyName: company?.businessName || null,
+      companyOwnerName: company?.ownerName || null,
+      companyAddress: company?.address || null,
+      companyPhone: company?.phone || null,
+      companyGst: company?.gstNumber || null,
+      customerId: customer._id,
+      customerName: customer.name ?? '',
+      customerPhone: customer.phone || customer.whatsappNumber || '',
+      vehicleNumber: car?.carNumber ?? '',
+      items: [{ serviceName: template.name, servicePrice: subtotal }],
       discount: 0,
       subtotal,
       finalAmount: subtotal,
@@ -240,57 +380,203 @@ export async function purchasePackage(req, res) {
       paymentOnlineAmount: 0,
       paymentStatus: 'PENDING',
       shareToken: generateShareToken(),
-      createdBy: req.user?._id
-    }], { session });
-
-    await session.commitTransaction();
-    res.status(201).json({
-      success: true,
-      data: { customerPackage: cp[0], invoice: pkgInvoice[0] },
-      message: 'Package purchased'
+      createdBy: req.user._id
     });
 
-    // Push notification to business owner (package_purchased)
     try {
-      const ownerId = req.user?.role === 'CAR_WASH_ADMIN'
-        ? req.user._id
-        : (await User.findOne({ businessId: req.businessId, role: 'CAR_WASH_ADMIN', status: 'ACTIVE' }).select('_id').lean())?._id;
+      const ownerId = await resolveOwnerId(req);
       if (ownerId) {
-        const pushRes = await sendPushNotification({
+        await sendPushNotification({
           businessOwnerId: ownerId,
           title: 'Package purchased',
-          body: `${customer?.name || 'Customer'} purchased ${tpl?.name || 'a package'}.`,
-          data: { type: 'package_purchased', packageId: cp[0]._id, url: `/admin/packages/${cp[0]._id}` }
+          body: `${customer.name} purchased ${template.name}`,
+          data: {
+            type: 'package_purchased',
+            packageId: String(customerPackage._id),
+            url: `/admin/packages/${customerPackage._id}`
+          }
         });
-        console.log('Push package_purchased:', pushRes);
       }
     } catch (pushErr) {
       console.warn('Push notification error (package_purchased):', pushErr?.message || pushErr);
     }
-  } catch (e) {
-    console.error('Purchase package error:', e);
-    try { await session.abortTransaction(); } catch {}
+
+    res.status(201).json({
+      success: true,
+      data: { customerPackage, invoice }
+    });
+  } catch (error) {
+    console.error('Purchase package error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
-  } finally {
-    session.endSession();
+  }
+}
+
+// ==================== Customer packages ====================
+
+export async function getCustomerPackages(req, res) {
+  try {
+    const customerId = req.params.customerId;
+    if (!mongoose.isValidObjectId(String(customerId))) {
+      return res.status(400).json({ success: false, message: 'Invalid customer id' });
+    }
+
+    await markExpiredPackages(req.businessId, { customerId });
+
+    const packages = await CustomerPackage.find({
+      businessId: req.businessId,
+      customerId
+    })
+      .populate('customerId', 'name phone email whatsappNumber')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({ success: true, data: packages });
+  } catch (error) {
+    console.error('Get customer packages error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
+export async function listCustomerPackages(req, res) {
+  try {
+    const { status, remaining } = req.query;
+    const query = { businessId: req.businessId };
+    if (status && typeof status === 'string' && status.trim()) {
+      query.status = status.trim();
+    }
+    if (remaining === 'true') {
+      query.visitsRemaining = { $gt: 0 };
+    }
+
+    await markExpiredPackages(req.businessId, query);
+
+    let packages = await CustomerPackage.find(query)
+      .populate('customerId', 'name phone email whatsappNumber')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    packages = await attachInvoiceMeta(req.businessId, packages);
+    packages = await attachCustomerCars(req.businessId, packages);
+
+    res.json({ success: true, data: packages });
+  } catch (error) {
+    console.error('List customer packages error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
+export async function getCustomerPackageDetail(req, res) {
+  try {
+    const pkgId = req.params.id;
+    if (!mongoose.isValidObjectId(String(pkgId))) {
+      return res.status(400).json({ success: false, message: 'Invalid package id' });
+    }
+
+    await markExpiredPackages(req.businessId, { _id: pkgId });
+
+    const customerPackage = await CustomerPackage.findOne({
+      _id: pkgId,
+      businessId: req.businessId
+    })
+      .populate('customerId', 'name phone email whatsappNumber')
+      .lean();
+
+    if (!customerPackage) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
+    }
+
+    const [invoice, visits, customerCars] = await Promise.all([
+      Invoice.findOne({ businessId: req.businessId, packageId: pkgId }).lean(),
+      PackageVisit.find({ businessId: req.businessId, customerPackageId: pkgId })
+        .sort({ date: -1, createdAt: -1 })
+        .lean(),
+      Car.find({ businessId: req.businessId, customerId: customerPackage.customerId?._id || customerPackage.customerId })
+        .select('carNumber brand model color registrationNumber')
+        .lean()
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        customerPackage: { ...customerPackage, customerCars },
+        invoice,
+        visits
+      }
+    });
+  } catch (error) {
+    console.error('Get customer package detail error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
+export async function closeCustomerPackage(req, res) {
+  try {
+    const pkg = await CustomerPackage.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
+    }
+
+    const invoice = await findPackageInvoice(req.businessId, pkg._id);
+    try {
+      assertInvoicePaid(invoice);
+    } catch (e) {
+      return res.status(e.status || 402).json({ success: false, message: e.message });
+    }
+
+    if (pkg.status === 'cancelled') {
+      return res.json({ success: true, data: pkg, message: 'Package already cancelled' });
+    }
+
+    pkg.status = 'cancelled';
+    await pkg.save();
+
+    res.json({ success: true, data: pkg, message: 'Package cancelled' });
+  } catch (error) {
+    console.error('Close customer package error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
 export async function closePackageSale(req, res) {
   try {
-    const { id } = req.params; // customerPackageId
-    const pkg = await CustomerPackage.findOne({ _id: id, businessId: req.businessId }).lean();
-    if (!pkg) return res.status(404).json({ success: false, message: 'Customer package not found' });
+    const pkg = await CustomerPackage.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
+    }
 
-    const invoice = await Invoice.findOne({ businessId: req.businessId, saleType: 'PACKAGE', packageId: pkg._id });
-    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found for this package' });
+    const invoice = await findPackageInvoice(req.businessId, pkg._id);
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found for this package' });
+    }
 
     if (invoice.paymentStatus === 'RECEIVED') {
       return res.json({ success: true, invoice, message: 'Package already marked paid' });
     }
+    if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
+      return res.json({ success: true, invoice, message: 'Package sale already recorded on credit' });
+    }
 
+    if (!invoice.customerId) {
+      invoice.customerId = pkg.customerId;
+    }
+
+    if (isCreditSettlementMode(req.body)) {
+      try {
+        const result = await closePackageOnCredit({
+          invoice,
+          businessId: req.businessId,
+          user: req.user,
+          body: req.body,
+          customerId: pkg.customerId
+        });
+        return res.json({ success: true, invoice: result.invoice, message: result.message });
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message || 'Credit close failed' });
+      }
+    }
+
+    const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
     try {
-      const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
       assertSettlementMatchesDue(
         invoice.paymentMethod,
         due,
@@ -306,426 +592,255 @@ export async function closePackageSale(req, res) {
     await invoice.save();
 
     res.json({ success: true, invoice, message: 'Package marked paid' });
-  } catch (e) {
-    console.error('Close package sale error:', e);
+  } catch (error) {
+    console.error('Close package sale error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
-export async function getCustomerPackages(req, res) {
-  try {
-    const { customerId } = req.params;
-    await refreshExpiredPackages(req.businessId);
-
-    const q = { businessId: req.businessId, customerId };
-    const status = req.query.status ? String(req.query.status) : '';
-    if (status) q.status = status;
-    if (String(req.query.remaining || '') === 'true') q.visitsRemaining = { $gt: 0 };
-
-    const pkgs = await CustomerPackage.find(q).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: pkgs });
-  } catch (e) {
-    console.error('Get customer packages error:', e);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-}
-
-export async function listCustomerPackages(req, res) {
-  try {
-    await refreshExpiredPackages(req.businessId);
-    const q = { businessId: req.businessId };
-    if (req.query.status) q.status = String(req.query.status);
-    if (String(req.query.remaining || '') === 'true') q.visitsRemaining = { $gt: 0 };
-
-    const pkgs = await CustomerPackage.find(q)
-      .sort({ createdAt: -1 })
-      .populate('customerId', 'name phone email')
-      .lean();
-
-    const packageIds = pkgs.map((p) => p._id).filter(Boolean);
-    const invoices = await Invoice.find({ businessId: req.businessId, saleType: 'PACKAGE', packageId: { $in: packageIds } })
-      .select('packageId paymentStatus')
-      .lean();
-    const invoiceByPackageId = new Map();
-    for (const inv of invoices) {
-      invoiceByPackageId.set(String(inv.packageId), inv);
-    }
-
-    const customerIds = pkgs.map((p) => p.customerId?._id).filter(Boolean);
-    const cars = await Car.find({ customerId: { $in: customerIds } })
-      .select('customerId carNumber registrationNumber brand model')
-      .lean();
-    const carsByCustomerId = new Map();
-    for (const c of cars) {
-      const key = String(c.customerId);
-      if (!carsByCustomerId.has(key)) carsByCustomerId.set(key, []);
-      carsByCustomerId.get(key).push(c);
-    }
-    const out = pkgs.map((p) => {
-      const cid = p.customerId?._id ? String(p.customerId._id) : null;
-      const inv = invoiceByPackageId.get(String(p._id)) || null;
-      return {
-        ...p,
-        customerCars: cid ? (carsByCustomerId.get(cid) || []) : [],
-        invoiceId: inv?._id || null,
-        invoicePaymentStatus: inv?.paymentStatus || null
-      };
-    });
-
-    res.json({ success: true, data: out });
-  } catch (e) {
-    console.error('List customer packages error:', e);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-}
-
-export async function completeVisit(req, res) {
-  const session = await mongoose.startSession();
-  try {
-    const { customerPackageId, bookingId, notes, servicesUsed, assignedTo, createWithoutImages, beforeImages, afterImages } = req.body;
-    session.startTransaction();
-
-    const pkg = await CustomerPackage.findOne({ _id: customerPackageId, businessId: req.businessId }).session(session);
-    if (!pkg) {
-      await session.abortTransaction();
-      return res.status(404).json({ success: false, message: 'Customer package not found' });
-    }
-
-    await refreshExpiredPackages(req.businessId);
-    if (pkg.status !== 'active') {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, message: `Package is ${pkg.status}` });
-    }
-    if (pkg.expiryDate && new Date() > new Date(pkg.expiryDate)) {
-      pkg.status = 'expired';
-      await pkg.save({ session });
-      await session.commitTransaction();
-      return res.status(400).json({ success: false, message: 'Package expired' });
-    }
-    if (pkg.visitsRemaining <= 0) {
-      pkg.status = 'completed';
-      await pkg.save({ session });
-      await session.commitTransaction();
-      return res.status(400).json({ success: false, message: 'No visits remaining' });
-    }
-
-    const used = normalizeServicesUsed(servicesUsed);
-    if (!used.length) {
-      await session.abortTransaction();
-      return res.status(400).json({ success: false, message: 'Select at least one service for this visit' });
-    }
-
-    // If there is a scheduled visit, complete the earliest scheduled one instead of creating new.
-    const scheduled = await PackageVisit.findOne({
-      businessId: req.businessId,
-      customerPackageId: pkg._id,
-      status: 'scheduled'
-    }).sort({ date: 1, createdAt: 1 }).session(session);
-
-    let visitDoc;
-    if (scheduled) {
-      scheduled.status = 'completed';
-      scheduled.bookingId = bookingId || scheduled.bookingId;
-      scheduled.notes = notes ? String(notes).trim() : scheduled.notes;
-      scheduled.servicesUsed = used.length ? used : scheduled.servicesUsed;
-      scheduled.assignedTo = assignedTo || scheduled.assignedTo || null;
-      scheduled.createWithoutImages = !!createWithoutImages;
-      scheduled.beforeImages = Array.isArray(beforeImages) ? beforeImages : (scheduled.beforeImages || []);
-      scheduled.afterImages = Array.isArray(afterImages) ? afterImages : (scheduled.afterImages || []);
-      if (!scheduled.scheduledFor) scheduled.scheduledFor = scheduled.date; // preserve original schedule
-      scheduled.date = new Date(); // actual completion date
-      await scheduled.save({ session });
-      visitDoc = scheduled;
-    } else {
-      const created = await PackageVisit.create([{
-        businessId: req.businessId,
-        customerPackageId: pkg._id,
-        bookingId: bookingId || undefined,
-        date: new Date(),
-        status: 'completed',
-        notes: notes ? String(notes).trim() : undefined,
-        servicesUsed: used,
-        assignedTo: assignedTo || null,
-        createWithoutImages: !!createWithoutImages,
-        beforeImages: Array.isArray(beforeImages) ? beforeImages : [],
-        afterImages: Array.isArray(afterImages) ? afterImages : []
-      }], { session });
-      visitDoc = created[0];
-    }
-
-    // Decrement remaining services + recompute totals
-    const remainingMap = new Map((pkg.servicesRemaining || []).map((r) => [String(r.serviceId), r]));
-    for (const u of used) {
-      const key = String(u.serviceId);
-      const row = remainingMap.get(key);
-      if (!row) {
-        await session.abortTransaction();
-        return res.status(400).json({ success: false, message: 'Selected service is not included in this package' });
-      }
-      if (Number(row.remaining || 0) < Number(u.quantity || 0)) {
-        await session.abortTransaction();
-        return res.status(400).json({ success: false, message: 'Not enough remaining count for selected service' });
-      }
-      row.remaining = Math.max(0, Number(row.remaining || 0) - Number(u.quantity || 0));
-      remainingMap.set(key, row);
-    }
-    pkg.servicesRemaining = Array.from(remainingMap.values());
-    const totalRemaining = (pkg.servicesRemaining || []).reduce((s, r) => s + Math.max(0, Number(r.remaining || 0)), 0);
-    pkg.visitsUsed = Math.max(0, (Number(pkg.totalVisits || 0) - totalRemaining));
-    pkg.visitsRemaining = totalRemaining;
-    if (pkg.visitsRemaining === 0) pkg.status = 'completed';
-
-    await pkg.save({ session });
-
-    await session.commitTransaction();
-    res.status(201).json({ success: true, data: { visit: visitDoc, customerPackage: pkg }, message: 'Visit completed' });
-
-    // Push: owner always; employee only if visit assignedTo set
-    try {
-      const ownerId = req.user?.role === 'CAR_WASH_ADMIN'
-        ? req.user._id
-        : (await User.findOne({ businessId: req.businessId, role: 'CAR_WASH_ADMIN', status: 'ACTIVE' }).select('_id').lean())?._id;
-      if (ownerId) {
-        await sendPushNotification({
-          businessOwnerId: ownerId,
-          title: 'Visit completed',
-          body: `${pkg?.name || 'Package'} · Remaining ${pkg?.visitsRemaining ?? 0}`,
-          data: { type: 'visit_completed', packageId: pkg._id, url: `/admin/packages/${pkg._id}` }
-        });
-      }
-      const empId = visitDoc?.assignedTo || null;
-      if (empId) {
-        await sendPushNotification({
-          businessOwnerId: empId,
-          title: 'Visit completed',
-          body: `${pkg?.name || 'Package'} · Remaining ${pkg?.visitsRemaining ?? 0}`,
-          data: { type: 'visit_completed', packageId: pkg._id, url: `/employee/packages/${pkg._id}` }
-        });
-      }
-    } catch (e) {
-      console.warn('Push error (visit completed):', e?.message || e);
-    }
-  } catch (e) {
-    console.error('Complete visit error:', e);
-    try { await session.abortTransaction(); } catch {}
-    res.status(500).json({ success: false, message: 'Server error' });
-  } finally {
-    session.endSession();
-  }
-}
-
-export async function closeCustomerPackage(req, res) {
-  try {
-    const { id } = req.params;
-    const pkg = await CustomerPackage.findOneAndUpdate(
-      { _id: id, businessId: req.businessId },
-      { $set: { status: 'cancelled' } },
-      { new: true }
-    );
-    if (!pkg) return res.status(404).json({ success: false, message: 'Customer package not found' });
-    res.json({ success: true, data: pkg, message: 'Package cancelled' });
-  } catch (e) {
-    console.error('Close package error:', e);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-}
+// ==================== Visits ====================
 
 export async function listVisits(req, res) {
   try {
-    const { customerPackageId } = req.params;
-    const visits = await PackageVisit.find({ businessId: req.businessId, customerPackageId })
+    const customerPackageId = req.params.customerPackageId;
+    if (!mongoose.isValidObjectId(String(customerPackageId))) {
+      return res.status(400).json({ success: false, message: 'Invalid package id' });
+    }
+
+    const pkg = await CustomerPackage.findOne({
+      _id: customerPackageId,
+      businessId: req.businessId
+    }).select('_id').lean();
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
+    }
+
+    const visits = await PackageVisit.find({
+      businessId: req.businessId,
+      customerPackageId
+    })
       .sort({ date: -1, createdAt: -1 })
-      .limit(200)
       .lean();
+
     res.json({ success: true, data: visits });
-  } catch (e) {
-    console.error('List package visits error:', e);
+  } catch (error) {
+    console.error('List package visits error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
 export async function listScheduledVisits(req, res) {
   try {
-    const includeOverdue = String(req.query.includeOverdue || '') === 'true';
-    const days = Math.min(90, Math.max(1, Number(req.query.days || 30)));
+    const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 30));
+    const includeOverdue = req.query.includeOverdue === 'true';
     const now = new Date();
     const end = new Date(now);
     end.setDate(end.getDate() + days);
 
-    const dateQuery = includeOverdue
+    const dateFilter = includeOverdue
       ? { $lte: end }
       : { $gte: now, $lte: end };
 
-    const baseQuery = {
+    const visits = await PackageVisit.find({
       businessId: req.businessId,
       status: 'scheduled',
-      date: dateQuery
-    };
-
-    const visits = await PackageVisit.find(baseQuery)
+      date: dateFilter
+    })
       .populate({
         path: 'customerPackageId',
-        select: 'name status visitsRemaining totalVisits customerId expiryDate',
-        populate: { path: 'customerId', select: 'name phone email' }
+        select: 'name status totalVisits visitsUsed visitsRemaining customerId expiryDate',
+        populate: { path: 'customerId', select: 'name phone email whatsappNumber' }
       })
       .sort({ date: 1, createdAt: 1 })
-      .limit(500)
       .lean();
 
-    res.json({ success: true, data: visits, meta: { now, end, includeOverdue, days } });
-  } catch (e) {
-    console.error('List scheduled visits error:', e);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-}
-
-export async function getCustomerPackageDetail(req, res) {
-  try {
-    const { id } = req.params;
-    await refreshExpiredPackages(req.businessId);
-
-    const pkg = await CustomerPackage.findOne({ _id: id, businessId: req.businessId })
-      .populate('customerId', 'name phone email')
-      .lean();
-    if (!pkg) return res.status(404).json({ success: false, message: 'Customer package not found' });
-
-    const cars = await Car.find({ customerId: pkg.customerId?._id })
-      .select('customerId carNumber registrationNumber brand model')
-      .lean();
-
-    const visits = await PackageVisit.find({ businessId: req.businessId, customerPackageId: pkg._id })
-      .sort({ date: -1, createdAt: -1 })
-      .limit(500)
-      .lean();
-
-    const invoice = await Invoice.findOne({ businessId: req.businessId, saleType: 'PACKAGE', packageId: pkg._id })
-      .select('invoiceNumber paymentStatus paymentReceivedAt subtotal finalAmount createdAt')
-      .lean();
-
-    res.json({
-      success: true,
-      data: {
-        customerPackage: { ...pkg, customerCars: cars },
-        invoice: invoice || null,
-        visits
-      }
-    });
-  } catch (e) {
-    console.error('Get customer package detail error:', e);
+    res.json({ success: true, data: visits });
+  } catch (error) {
+    console.error('List scheduled visits error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
 export async function scheduleVisit(req, res) {
   try {
-    const { customerPackageId, date, notes, servicesUsed, assignedTo, createWithoutImages, beforeImages, afterImages } = req.body;
-    const when = date ? new Date(date) : null;
-    if (!when || isNaN(when.getTime())) {
-      return res.status(400).json({ success: false, message: 'Valid date/time is required' });
+    const { customerPackageId, date } = req.body;
+    const scheduledAt = new Date(date);
+    if (Number.isNaN(scheduledAt.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid date' });
     }
 
-    await refreshExpiredPackages(req.businessId);
-    const pkg = await CustomerPackage.findOne({ _id: customerPackageId, businessId: req.businessId }).lean();
-    if (!pkg) return res.status(404).json({ success: false, message: 'Customer package not found' });
-    if (pkg.status !== 'active') return res.status(400).json({ success: false, message: `Package is ${pkg.status}` });
-    if (pkg.expiryDate && new Date() > new Date(pkg.expiryDate)) return res.status(400).json({ success: false, message: 'Package expired' });
-    if (Number(pkg.visitsRemaining || 0) <= 0) return res.status(400).json({ success: false, message: 'No visits remaining' });
-
-    const used = normalizeServicesUsed(servicesUsed);
-    if (!used.length) return res.status(400).json({ success: false, message: 'Select at least one service for this visit' });
-
-    // Enforce: at a time only ONE scheduled visit per customer package.
-    // If a scheduled visit already exists, update it instead of creating a new one.
-    const existing = await PackageVisit.findOne({
-      businessId: req.businessId,
-      customerPackageId,
-      status: 'scheduled'
-    }).sort({ date: 1, createdAt: 1 });
-
-    if (existing) {
-      existing.date = when;
-      existing.scheduledFor = when;
-      existing.notes = notes ? String(notes).trim() : existing.notes;
-      existing.servicesUsed = used;
-      existing.assignedTo = assignedTo || null;
-      existing.createWithoutImages = !!createWithoutImages;
-      existing.beforeImages = Array.isArray(beforeImages) ? beforeImages : [];
-      existing.afterImages = Array.isArray(afterImages) ? afterImages : [];
-      await existing.save();
-      res.json({ success: true, data: existing, message: 'Scheduled visit updated' });
-
-      // Push: owner always; assigned employee only if set
-      try {
-        const ownerId = req.user?.role === 'CAR_WASH_ADMIN'
-          ? req.user._id
-          : (await User.findOne({ businessId: req.businessId, role: 'CAR_WASH_ADMIN', status: 'ACTIVE' }).select('_id').lean())?._id;
-        const whenText = existing?.date ? new Date(existing.date).toLocaleString() : 'scheduled';
-        if (ownerId) {
-          await sendPushNotification({
-            businessOwnerId: ownerId,
-            title: 'Visit scheduled',
-            body: `${pkg?.name || 'Package'} · ${whenText}`,
-            data: { type: 'visit_scheduled', packageId: pkg._id, url: `/admin/packages/${pkg._id}` }
-          });
-        }
-        if (existing?.assignedTo) {
-          await sendPushNotification({
-            businessOwnerId: existing.assignedTo,
-            title: 'Visit assigned',
-            body: `${pkg?.name || 'Package'} · ${whenText}`,
-            data: { type: 'visit_scheduled', packageId: pkg._id, url: `/employee/packages/${pkg._id}` }
-          });
-        }
-      } catch (e) {
-        console.warn('Push error (visit scheduled updated):', e?.message || e);
-      }
-      return;
+    const pkg = await CustomerPackage.findOne({ _id: customerPackageId, businessId: req.businessId });
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
     }
+
+    await markExpiredPackages(req.businessId, { _id: pkg._id });
+    const refreshed = await CustomerPackage.findById(pkg._id);
+    try {
+      assertPackageActive(refreshed);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
+
+    const invoice = await findPackageInvoice(req.businessId, pkg._id);
+    try {
+      assertInvoicePaid(invoice);
+    } catch (e) {
+      return res.status(e.status || 402).json({ success: false, message: e.message });
+    }
+
+    let visitFields;
+    try {
+      visitFields = visitPayloadFromBody(req.body);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
+
+    validateServiceDeductions(refreshed, visitFields.servicesUsed);
 
     const visit = await PackageVisit.create({
       businessId: req.businessId,
-      customerPackageId,
-      scheduledFor: when,
-      date: when,
+      customerPackageId: refreshed._id,
+      scheduledFor: scheduledAt,
+      date: scheduledAt,
       status: 'scheduled',
-      notes: notes ? String(notes).trim() : undefined,
-      servicesUsed: used,
-      assignedTo: assignedTo || null,
-      createWithoutImages: !!createWithoutImages,
-      beforeImages: Array.isArray(beforeImages) ? beforeImages : [],
-      afterImages: Array.isArray(afterImages) ? afterImages : []
+      ...visitFields
     });
 
-    res.status(201).json({ success: true, data: visit, message: 'Visit scheduled' });
-
-    // Push: owner always; assigned employee only if set
     try {
-      const ownerId = req.user?.role === 'CAR_WASH_ADMIN'
-        ? req.user._id
-        : (await User.findOne({ businessId: req.businessId, role: 'CAR_WASH_ADMIN', status: 'ACTIVE' }).select('_id').lean())?._id;
-      const whenText = visit?.date ? new Date(visit.date).toLocaleString() : 'scheduled';
+      const ownerId = await resolveOwnerId(req);
       if (ownerId) {
         await sendPushNotification({
           businessOwnerId: ownerId,
-          title: 'Visit scheduled',
-          body: `${pkg?.name || 'Package'} · ${whenText}`,
-          data: { type: 'visit_scheduled', packageId: pkg._id, url: `/admin/packages/${pkg._id}` }
+          title: 'Package visit scheduled',
+          body: `${refreshed.name} visit scheduled for ${scheduledAt.toLocaleString()}`,
+          data: {
+            type: 'visit_scheduled',
+            packageId: String(refreshed._id),
+            refId: String(visit._id),
+            url: `/admin/packages/${refreshed._id}`
+          }
         });
       }
-      if (visit?.assignedTo) {
-        await sendPushNotification({
-          businessOwnerId: visit.assignedTo,
-          title: 'Visit assigned',
-          body: `${pkg?.name || 'Package'} · ${whenText}`,
-          data: { type: 'visit_scheduled', packageId: pkg._id, url: `/employee/packages/${pkg._id}` }
-        });
-      }
-    } catch (e) {
-      console.warn('Push error (visit scheduled):', e?.message || e);
+    } catch (pushErr) {
+      console.warn('Push notification error (visit_scheduled):', pushErr?.message || pushErr);
     }
-  } catch (e) {
-    console.error('Schedule visit error:', e);
+
+    res.status(201).json({ success: true, data: visit });
+  } catch (error) {
+    console.error('Schedule package visit error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 }
 
+export async function completeVisit(req, res) {
+  try {
+    const { customerPackageId, bookingId } = req.body;
+
+    const pkg = await CustomerPackage.findOne({ _id: customerPackageId, businessId: req.businessId });
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
+    }
+
+    await markExpiredPackages(req.businessId, { _id: pkg._id });
+    const refreshed = await CustomerPackage.findById(pkg._id);
+    try {
+      assertPackageActive(refreshed);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
+
+    const invoice = await findPackageInvoice(req.businessId, pkg._id);
+    try {
+      assertInvoicePaid(invoice);
+    } catch (e) {
+      return res.status(e.status || 402).json({ success: false, message: e.message });
+    }
+
+    let visitFields;
+    try {
+      visitFields = visitPayloadFromBody(req.body);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
+
+    validateServiceDeductions(refreshed, visitFields.servicesUsed);
+
+    if (bookingId && mongoose.isValidObjectId(String(bookingId))) {
+      const existing = await PackageVisit.findOne({
+        businessId: req.businessId,
+        customerPackageId: refreshed._id,
+        bookingId,
+        status: 'completed'
+      }).select('_id').lean();
+      if (existing) {
+        const current = await CustomerPackage.findById(refreshed._id).lean();
+        return res.json({ success: true, data: existing, customerPackage: current, message: 'Visit already completed' });
+      }
+    }
+
+    const now = new Date();
+    let visit = await PackageVisit.findOne({
+      businessId: req.businessId,
+      customerPackageId: refreshed._id,
+      status: 'scheduled'
+    }).sort({ date: 1, createdAt: 1 });
+
+    if (visit) {
+      visit.scheduledFor = visit.scheduledFor || visit.date;
+      visit.date = now;
+      visit.status = 'completed';
+      visit.notes = visitFields.notes ?? visit.notes;
+      visit.servicesUsed = visitFields.servicesUsed;
+      visit.assignedTo = visitFields.assignedTo;
+      visit.createWithoutImages = visitFields.createWithoutImages;
+      visit.beforeImages = visitFields.beforeImages;
+      visit.afterImages = visitFields.afterImages;
+      if (bookingId && mongoose.isValidObjectId(String(bookingId))) {
+        visit.bookingId = bookingId;
+      }
+      await visit.save();
+    } else {
+      visit = await PackageVisit.create({
+        businessId: req.businessId,
+        customerPackageId: refreshed._id,
+        bookingId: bookingId && mongoose.isValidObjectId(String(bookingId)) ? bookingId : undefined,
+        date: now,
+        status: 'completed',
+        ...visitFields
+      });
+    }
+
+    applyServiceDeductions(refreshed, visitFields.servicesUsed);
+    refreshed.visitsUsed = Number(refreshed.visitsUsed || 0) + 1;
+    refreshed.visitsRemaining = Math.max(0, Number(refreshed.visitsRemaining || 0) - 1);
+    if (refreshed.visitsRemaining === 0) {
+      refreshed.status = 'completed';
+    }
+    await refreshed.save();
+
+    try {
+      const ownerId = await resolveOwnerId(req);
+      if (ownerId) {
+        await sendPushNotification({
+          businessOwnerId: ownerId,
+          title: 'Package visit completed',
+          body: `${refreshed.name} visit marked completed`,
+          data: {
+            type: 'visit_completed',
+            packageId: String(refreshed._id),
+            refId: String(visit._id),
+            url: `/admin/packages/${refreshed._id}`
+          }
+        });
+      }
+    } catch (pushErr) {
+      console.warn('Push notification error (visit_completed):', pushErr?.message || pushErr);
+    }
+
+    res.json({ success: true, data: visit, customerPackage: refreshed });
+  } catch (error) {
+    console.error('Complete package visit error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}

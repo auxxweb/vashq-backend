@@ -15,10 +15,12 @@ const invoiceSchema = new mongoose.Schema({
   invoiceNumber: { type: String, required: true, trim: true },
   // Company (for display)
   companyName: { type: String, trim: true },
+  companyOwnerName: { type: String, trim: true },
   companyAddress: { type: String, trim: true },
   companyPhone: { type: String, trim: true },
   companyGst: { type: String, trim: true },
   // Customer
+  customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', index: true },
   customerName: { type: String, trim: true },
   customerPhone: { type: String, trim: true },
   customerGst: { type: String, trim: true },
@@ -41,6 +43,17 @@ const invoiceSchema = new mongoose.Schema({
   paymentOnlineAmount: { type: Number, default: 0, min: 0 },
   paymentStatus: { type: String, enum: ['PENDING', 'RECEIVED'], default: 'PENDING' },
   paymentReceivedAt: { type: Date },
+  /** FULL = legacy full-pay close; CREDIT = optional outstanding / collect-later flow. */
+  settlementMode: { type: String, enum: ['FULL', 'CREDIT'], default: 'FULL', index: true },
+  /** When sale was confirmed (credit close or full pay). */
+  saleConfirmedAt: { type: Date },
+  /** Total collected at checkout (advance + settlement amounts) at credit close. */
+  amountCollectedAtCheckout: { type: Number, default: 0, min: 0 },
+  /** Sum of later collection payments allocated to this invoice. */
+  amountCollectedLater: { type: Number, default: 0, min: 0 },
+  /** Cached outstanding balance; recomputed on every collection write. */
+  outstandingAmount: { type: Number, default: 0, min: 0 },
+  creditDueDate: { type: Date },
   // Share (public view by token)
   shareToken: { type: String, trim: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
@@ -55,7 +68,8 @@ invoiceSchema.index({ packageId: 1 }, { unique: true, sparse: true });
 invoiceSchema.index({ shareToken: 1 });
 invoiceSchema.index({ businessId: 1, createdAt: -1 });
 invoiceSchema.index({ businessId: 1, paymentStatus: 1, paymentReceivedAt: -1 });
-invoiceSchema.index({ businessId: 1, saleType: 1, createdAt: -1 });
+invoiceSchema.index({ businessId: 1, customerId: 1, outstandingAmount: 1 });
+invoiceSchema.index({ businessId: 1, settlementMode: 1, saleConfirmedAt: -1 });
 
 export function generateShareToken() {
   return crypto.randomBytes(24).toString('hex');

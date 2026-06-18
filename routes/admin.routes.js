@@ -30,13 +30,31 @@ import CustomerPackage from '../models/CustomerPackage.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
 import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
-import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields } from '../utils/invoicePayment.js';
+import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
+import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, roundMoney } from '../utils/invoicePayment.js';
+import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
-import { invoiceSettlementAggregationStages, invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
+import { invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
+import { resolveExpensePaymentFields, sumExpenseChannelTotals } from '../utils/expensePayment.js';
 import OwnerTask from '../models/OwnerTask.model.js';
 import SettlementChangeRequest from '../models/SettlementChangeRequest.model.js';
 import { applySettlementDateChange } from '../utils/settlementChange.js';
 import { cacheGetOrSet } from '../utils/cache.js';
+import { customerSearchOrClauses, distinctCustomerIdsBySearch, escapeRegex } from '../utils/searchUtils.js';
+import {
+  assertCustomerPhoneAvailable,
+  normalizePhone,
+  isDuplicatePhoneError
+} from '../utils/customer.utils.js';
+import creditRoutes from './credit.routes.js';
+import { isCreditSettlementMode, closeJobOnCredit } from '../services/credit/creditInvoiceService.js';
+import { buildCollectionReport, buildOutstandingReport, getCreditDashboardStats, getTodayCashReceived } from '../services/credit/creditReportsService.js';
+import {
+  getInvoiceCompanySnapshot,
+  mergeInvoiceWithCompanySnapshot,
+  companyFieldsToPersist
+} from '../utils/invoiceCompany.js';
+import { DEFAULT_WHATSAPP_TEMPLATES, normalizeWhatsappTemplates } from '../utils/whatsappTemplates.js';
 import { DateTime } from 'luxon';
 
 const router = express.Router();
@@ -123,6 +141,8 @@ const requireBusiness = (req, res, next) => {
 };
 
 router.use(requireBusiness);
+
+router.use('/credit', creditRoutes);
 
 // -------------------- SUBSCRIPTION GATING --------------------
 // If subscription is expired (or pending upgrade after expiry), lock all features except plan upgrade workflow.
@@ -424,8 +444,17 @@ router.delete('/expense-types/:id', expenseAdminOnly, async (req, res) => {
 
 // ==================== EXPENSES (Car Wash Admin only) ====================
 
+async function loadBusinessDateRange(businessId, range, from = '', to = '') {
+  const settings = await BusinessSettings.findOne({ businessId }).select('timezone').lean();
+  return parseBusinessDateRange(settings?.timezone, range, from, to);
+}
+
 // GET /api/admin/expenses?range=today|weekly|monthly|yearly|custom&from=&to=
-function parseExpenseDateRange(range, from, to) {
+function parseExpenseDateRange(range, from, to, businessTz) {
+  if (businessTz !== undefined) {
+    const { startUtc, endUtc } = parseBusinessDateRange(businessTz, range, from, to);
+    return { start: startUtc, end: endUtc, exclusiveEnd: true };
+  }
   const now = new Date();
   let start, end;
   switch (range) {
@@ -460,14 +489,15 @@ function parseExpenseDateRange(range, from, to) {
       start = new Date(now); start.setHours(0, 0, 0, 0);
       end = new Date(start); end.setDate(end.getDate() + 1);
   }
-  return { start, end };
+  return { start, end, exclusiveEnd: false };
 }
 
 router.get('/expenses', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'today', from, to, search, expenseTypeId } = req.query;
-    const { start, end } = parseExpenseDateRange(range, from, to);
-    const query = { businessId: req.businessId, expenseDate: { $gte: start, $lte: end } };
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
+    const { start, end, exclusiveEnd } = parseExpenseDateRange(range, from, to, settings?.timezone);
+    const query = { businessId: req.businessId, expenseDate: dateRangeQuery(start, end, exclusiveEnd) };
     if (expenseTypeId && String(expenseTypeId).trim()) {
       query.expenseTypeId = String(expenseTypeId).trim();
     }
@@ -495,8 +525,16 @@ router.get('/expenses', expenseAdminOnly, async (req, res) => {
       .populate('createdBy', 'name email')
       .sort({ expenseDate: -1, createdAt: -1 })
       .lean();
-    const totalAmount = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
-    res.json({ success: true, expenses, totalAmount, start, end });
+    const totals = sumExpenseChannelTotals(expenses);
+    res.json({
+      success: true,
+      expenses,
+      totalAmount: totals.totalAmount,
+      totalCashAmount: totals.totalCashAmount,
+      totalOnlineAmount: totals.totalOnlineAmount,
+      start,
+      end
+    });
   } catch (error) {
     console.error('List expenses error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -508,22 +546,45 @@ router.post('/expenses', expenseAdminOnly, [
   body('expenseDate').optional().isISO8601(),
   body('entries').isArray({ min: 1 }),
   body('entries.*.expenseTypeId').notEmpty(),
-  body('entries.*.amount').isFloat({ min: 0 }),
+  body('entries.*.amount').isFloat({ min: 0.01 }),
   body('entries.*.notes').optional().trim(),
-  body('entries.*.billImage').optional().trim()
+  body('entries.*.billImage').optional().trim(),
+  body('entries.*.paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('entries.*.paymentCashAmount').optional().isFloat({ min: 0 }),
+  body('entries.*.paymentOnlineAmount').optional().isFloat({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      return res.status(400).json({
+        success: false,
+        message: errors.array()[0]?.msg || 'Validation failed',
+        errors: errors.array()
+      });
     }
     const expenseDate = req.body.expenseDate ? new Date(req.body.expenseDate) : new Date();
     expenseDate.setHours(0, 0, 0, 0);
+    const typeIds = [...new Set(req.body.entries.map((e) => String(e.expenseTypeId)))];
+    const expenseTypes = await ExpenseType.find({
+      _id: { $in: typeIds },
+      businessId: req.businessId
+    }).lean();
+    const typeById = new Map(expenseTypes.map((t) => [String(t._id), t]));
     const created = [];
     for (const entry of req.body.entries) {
-      const expenseType = await ExpenseType.findOne({ _id: entry.expenseTypeId, businessId: req.businessId });
+      const expenseType = typeById.get(String(entry.expenseTypeId));
       if (!expenseType) {
         return res.status(400).json({ success: false, message: 'Invalid expense type' });
+      }
+      let paymentFields;
+      try {
+        paymentFields = resolveExpensePaymentFields(Number(entry.amount), {
+          paymentMethod: entry.paymentMethod,
+          paymentCashAmount: entry.paymentCashAmount,
+          paymentOnlineAmount: entry.paymentOnlineAmount,
+        });
+      } catch (payErr) {
+        return res.status(payErr.status || 400).json({ success: false, message: payErr.message });
       }
       const exp = await Expense.create({
         businessId: req.businessId,
@@ -532,7 +593,8 @@ router.post('/expenses', expenseAdminOnly, [
         notes: entry.notes || '',
         billImage: entry.billImage || undefined,
         expenseDate,
-        createdBy: req.user._id
+        createdBy: req.user._id,
+        ...paymentFields,
       });
       await exp.populate('expenseTypeId', 'expenseName');
       created.push(exp);
@@ -547,15 +609,22 @@ router.post('/expenses', expenseAdminOnly, [
 // PUT /api/admin/expenses/:id
 router.put('/expenses/:id', expenseAdminOnly, [
   body('expenseTypeId').optional().notEmpty(),
-  body('amount').optional().isFloat({ min: 0 }),
+  body('amount').optional().isFloat({ min: 0.01 }),
   body('notes').optional().trim(),
   body('billImage').optional().trim(),
-  body('expenseDate').optional().isISO8601()
+  body('expenseDate').optional().isISO8601(),
+  body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('paymentCashAmount').optional().isFloat({ min: 0 }),
+  body('paymentOnlineAmount').optional().isFloat({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      return res.status(400).json({
+        success: false,
+        message: errors.array()[0]?.msg || 'Validation failed',
+        errors: errors.array()
+      });
     }
     const expense = await Expense.findOne({ _id: req.params.id, businessId: req.businessId });
     if (!expense) {
@@ -569,6 +638,27 @@ router.put('/expenses/:id', expenseAdminOnly, [
       expense.expenseTypeId = expenseType._id;
     }
     if (req.body.amount != null) expense.amount = Number(req.body.amount);
+    const paymentTouched =
+      req.body.paymentMethod !== undefined ||
+      req.body.paymentCashAmount !== undefined ||
+      req.body.paymentOnlineAmount !== undefined ||
+      req.body.amount != null;
+    if (paymentTouched) {
+      try {
+        const paymentFields = resolveExpensePaymentFields(
+          req.body.amount != null ? Number(req.body.amount) : expense.amount,
+          {
+            paymentMethod: req.body.paymentMethod,
+            paymentCashAmount: req.body.paymentCashAmount,
+            paymentOnlineAmount: req.body.paymentOnlineAmount,
+          },
+          expense
+        );
+        Object.assign(expense, paymentFields);
+      } catch (payErr) {
+        return res.status(payErr.status || 400).json({ success: false, message: payErr.message });
+      }
+    }
     if (req.body.notes !== undefined) expense.notes = req.body.notes || '';
     if (req.body.billImage !== undefined) expense.billImage = req.body.billImage || '';
     if (req.body.expenseDate != null) {
@@ -598,6 +688,20 @@ router.delete('/expenses/:id', expenseAdminOnly, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
+async function backfillCustomerInvoiceLinks(businessId, customerId) {
+  const jobIds = await Job.find({ businessId, customerId }).distinct('_id');
+  if (!jobIds.length) return;
+
+  await Invoice.updateMany(
+    {
+      businessId,
+      jobId: { $in: jobIds },
+      $or: [{ customerId: { $exists: false } }, { customerId: null }]
+    },
+    { $set: { customerId } }
+  );
+}
 
 // ==================== INVOICES ====================
 // POST /api/admin/invoices - create invoice from job (admin or employee)
@@ -630,16 +734,19 @@ router.post('/invoices', [
     }));
     const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + i.servicePrice, 0);
     const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
+    const company = await getInvoiceCompanySnapshot(req.businessId);
     const invoice = await Invoice.create({
       jobId: job._id,
       businessId: req.businessId,
       invoiceNumber,
-      companyName: null,
-      companyAddress: null,
-      companyPhone: null,
-      companyGst: null,
+      companyName: company?.businessName || null,
+      companyOwnerName: company?.ownerName || null,
+      companyAddress: company?.address || null,
+      companyPhone: company?.phone || null,
+      companyGst: company?.gstNumber || null,
       customerName: job.customerId?.name ?? '',
       customerPhone: job.customerId?.phone || job.customerId?.whatsappNumber || '',
+      customerId: job.customerId?._id || job.customerId || null,
       customerGst: null,
       vehicleNumber: job.carId?.carNumber ?? '',
       items,
@@ -729,14 +836,28 @@ router.get('/invoices', async (req, res) => {
 // GET /api/admin/invoices/:id
 router.get('/invoices/:id', async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId })
+    let invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId })
       .populate('jobId')
       .populate('packageId', 'name')
       .lean();
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    res.json({ success: true, invoice });
+    const companySnapshot = await getInvoiceCompanySnapshot(req.businessId);
+    const toPersist = companyFieldsToPersist(invoice, companySnapshot);
+    if (toPersist) {
+      await Invoice.updateOne({ _id: req.params.id, businessId: req.businessId }, { $set: toPersist });
+      invoice = { ...invoice, ...toPersist };
+    }
+    invoice = mergeInvoiceWithCompanySnapshot(invoice, companySnapshot);
+    if (!invoice.customerId) {
+      const cid = invoice.jobId?.customerId?._id || invoice.jobId?.customerId;
+      if (cid) {
+        invoice.customerId = cid;
+        await Invoice.updateOne({ _id: invoice._id }, { $set: { customerId: cid } });
+      }
+    }
+    res.json({ success: true, invoice, business: companySnapshot });
   } catch (error) {
     console.error('Get invoice error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -773,7 +894,13 @@ router.put('/invoices/:id', [
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
     if (invoice.paymentStatus === 'RECEIVED') {
-      return res.status(403).json({ success: false, message: 'Invoice is closed. No further edits allowed.' });
+      return res.status(403).json({ success: false, message: 'Invoice is paid. No further edits allowed.' });
+    }
+    if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
+      return res.status(403).json({
+        success: false,
+        message: 'Credit sale is closed. Collect remaining balance from the customer profile.'
+      });
     }
     const prevRedeemedPoints = Number(invoice.loyaltyRedeemedPoints || 0);
     const nextRedeemedPointsRaw = req.body.loyaltyRedeemedPoints !== undefined ? Number(req.body.loyaltyRedeemedPoints || 0) : prevRedeemedPoints;
@@ -818,7 +945,7 @@ router.put('/invoices/:id', [
       }
     }
 
-    const allowed = ['companyName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'customerGst', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount', 'paymentMethod', 'paymentCashAmount', 'paymentOnlineAmount'];
+    const allowed = ['companyName', 'companyOwnerName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'customerGst', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount', 'paymentMethod', 'paymentCashAmount', 'paymentOnlineAmount'];
     for (const key of allowed) {
       if (req.body[key] !== undefined) invoice[key] = req.body[key];
     }
@@ -827,7 +954,11 @@ router.put('/invoices/:id', [
     if (req.body.taxPercentage !== undefined) invoice.taxPercentage = Number(req.body.taxPercentage);
     if (req.body.gstAmount !== undefined) invoice.gstAmount = Number(req.body.gstAmount);
     try {
-      normalizeInvoicePaymentFields(invoice, req.body);
+      if (req.body.allowPartialCheckout === true) {
+        normalizeCreditCheckoutPayment(invoice, req.body);
+      } else {
+        normalizeInvoicePaymentFields(invoice, req.body);
+      }
     } catch (normErr) {
       const status = normErr.status || 500;
       return res.status(status).json({ success: false, message: normErr.message || 'Invalid payment split' });
@@ -848,25 +979,33 @@ router.get('/invoices/:id/share-url', async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    if (invoice.paymentStatus !== 'RECEIVED') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invoice can be shared only after payment is received and the job is closed'
+      });
+    }
+    if (invoice.jobId) {
+      const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId }).select('status').lean();
+      if (!job) {
+        return res.status(400).json({ success: false, message: 'Job not found for this invoice' });
+      }
+      if (job.status !== 'DELIVERED') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invoice can be shared only after payment is received and the job is closed'
+        });
+      }
+    }
     if (!invoice.shareToken) {
       invoice.shareToken = generateShareToken();
       await invoice.save();
     }
-    const envBaseUrl = (process.env.FRONTEND_URL || '').trim();
-    const originHeader = (req.get('origin') || '').trim();
-    const refererHeader = (req.get('referer') || '').trim();
-    const refererBase = refererHeader ? (() => {
-      try {
-        const u = new URL(refererHeader);
-        return u.origin;
-      } catch {
-        return '';
-      }
-    })() : '';
-    const requestBase = `${req.protocol}://${req.get('host')}`;
-    const baseUrl = (envBaseUrl || originHeader || refererBase || requestBase || 'http://localhost:3000').replace(/\/$/, '');
-    const viewUrl = `${baseUrl}/invoice/${invoice._id}/view?token=${invoice.shareToken}`;
-    res.json({ success: true, viewUrl });
+    res.json({
+      success: true,
+      shareToken: invoice.shareToken,
+      invoiceId: String(invoice._id)
+    });
   } catch (error) {
     console.error('Share URL error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -883,12 +1022,36 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     if (invoice.paymentStatus === 'RECEIVED') {
       return res.json({ success: true, message: 'Job already closed' });
     }
+    if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
+      const refreshed = await Invoice.findById(invoice._id).populate('jobId').lean();
+      return res.json({ success: true, message: 'Job already closed on credit', invoice: refreshed || invoice });
+    }
 
     const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId })
       .select('customerId services assignedTo')
       .lean();
+
+    if (!invoice.customerId && job?.customerId) {
+      invoice.customerId = job.customerId;
+    }
+
+    if (isCreditSettlementMode(req.body)) {
+      try {
+        const result = await closeJobOnCredit({
+          invoice,
+          job,
+          businessId: req.businessId,
+          user: req.user,
+          body: req.body
+        });
+        return res.json({ success: true, message: result.message, invoice: result.invoice });
+      } catch (e) {
+        return res.status(e.status || 400).json({ success: false, message: e.message || 'Credit close failed' });
+      }
+    }
+
+    const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
     try {
-      const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
       assertSettlementMatchesDue(
         invoice.paymentMethod,
         due,
@@ -896,8 +1059,9 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
         invoice.paymentOnlineAmount
       );
     } catch (e) {
-      return res.status(400).json({ success: false, message: e.message || 'Payment does not match balance due' });
+      return res.status(400).json({ success: false, message: e.message || 'Invalid payment amount' });
     }
+
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
@@ -981,7 +1145,11 @@ async function serviceObjectIdsForBusiness(businessId, idStrings) {
   return found.map((f) => f._id);
 }
 
-function parseReportDateRange(range, from, to) {
+function parseReportDateRange(range, from, to, businessTz) {
+  if (businessTz !== undefined) {
+    const { startUtc, endUtc } = parseBusinessDateRange(businessTz, range, from, to);
+    return { start: startUtc, end: endUtc, exclusiveEnd: true };
+  }
   const now = new Date();
   let start, end;
   switch (range) {
@@ -1017,7 +1185,16 @@ function parseReportDateRange(range, from, to) {
       start = new Date(now); start.setHours(0, 0, 0, 0);
       end = new Date(start); end.setDate(end.getDate() + 1);
   }
-  return { start, end };
+  return { start, end, exclusiveEnd: range === 'daily' || range === 'today' || range === 'yesterday' || !range };
+}
+
+function dateRangeQuery(start, end, exclusiveEnd) {
+  return exclusiveEnd ? { $gte: start, $lt: end } : { $gte: start, $lte: end };
+}
+
+async function loadReportDateRange(businessId, range, from, to) {
+  const settings = await BusinessSettings.findOne({ businessId }).select('timezone').lean();
+  return parseReportDateRange(range, from, to, settings?.timezone);
 }
 
 // GET /api/admin/reports/jobs?range=daily|weekly|monthly|yearly|custom&from=&to=&serviceIds=id1,id2
@@ -1025,14 +1202,14 @@ function parseReportDateRange(range, from, to) {
 router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
-    const { start, end } = parseReportDateRange(range, from, to);
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const serviceObjectIds = await serviceObjectIdsForBusiness(
       req.businessId,
       parseServiceIdsFromQuery(req.query)
     );
     const jobQuery = {
       businessId: req.businessId,
-      createdAt: { $gte: start, $lte: end }
+      createdAt: dateRangeQuery(start, end, exclusiveEnd)
     };
     if (serviceObjectIds.length) {
       jobQuery.services = { $elemMatch: { serviceId: { $in: serviceObjectIds } } };
@@ -1060,15 +1237,16 @@ router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
 router.get('/reports/employees', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
-    const { start, end } = parseReportDateRange(range, from, to);
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const employees = await User.find({ businessId: req.businessId, role: 'EMPLOYEE', status: 'ACTIVE' })
       .select('name email employeeCode')
       .lean();
+    const createdAtRange = dateRangeQuery(start, end, exclusiveEnd);
     const report = await Promise.all(employees.map(async (emp) => {
       const jobs = await Job.find({
         businessId: req.businessId,
         assignedTo: emp._id,
-        createdAt: { $gte: start, $lte: end }
+        createdAt: createdAtRange
       }).select('status _id createdAt actualDelivery').lean();
       const completed = jobs.filter(j => ['COMPLETED', 'DELIVERED'].includes(j.status));
       const completedJobIds = completed.map(j => j._id);
@@ -1104,17 +1282,31 @@ router.get('/reports/employees', expenseAdminOnly, async (req, res) => {
 router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
-    const { start, end } = parseReportDateRange(range, from, to);
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const expenses = await Expense.find({
       businessId: req.businessId,
-      expenseDate: { $gte: start, $lte: end }
+      expenseDate: dateRangeQuery(start, end, exclusiveEnd)
     })
       .populate('expenseTypeId', 'expenseName')
       .populate('createdBy', 'name email')
       .sort({ expenseDate: -1, createdAt: -1 })
       .lean();
-    const totalAmount = expenses.reduce((s, e) => s + (e.amount || 0), 0);
-    res.json({ success: true, data: expenses, totalAmount, summary: { totalExpenses: expenses.length, totalAmount }, start, end });
+    const totals = sumExpenseChannelTotals(expenses);
+    res.json({
+      success: true,
+      data: expenses,
+      totalAmount: totals.totalAmount,
+      totalCashAmount: totals.totalCashAmount,
+      totalOnlineAmount: totals.totalOnlineAmount,
+      summary: {
+        totalExpenses: expenses.length,
+        totalAmount: totals.totalAmount,
+        totalCashAmount: totals.totalCashAmount,
+        totalOnlineAmount: totals.totalOnlineAmount,
+      },
+      start,
+      end
+    });
   } catch (error) {
     console.error('Reports expenses error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -1127,7 +1319,8 @@ router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
 router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to, source = 'all' } = req.query;
-    const { start, end } = parseReportDateRange(range, from, to);
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
+    const deliveryRange = dateRangeQuery(start, end, exclusiveEnd);
     const serviceObjectIds = await serviceObjectIdsForBusiness(
       req.businessId,
       parseServiceIdsFromQuery(req.query)
@@ -1144,8 +1337,8 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
         businessId: req.businessId,
         status: 'DELIVERED',
         $or: [
-          { actualDelivery: { $gte: start, $lte: end } },
-          { updatedAt: { $gte: start, $lte: end }, actualDelivery: { $exists: false } }
+          { actualDelivery: deliveryRange },
+          { updatedAt: deliveryRange, actualDelivery: { $exists: false } }
         ],
         ...jobServiceMatch
       }).distinct('_id');
@@ -1175,8 +1368,10 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
       packageSales = await Invoice.find({
         businessId: req.businessId,
         saleType: 'PACKAGE',
-        paymentStatus: 'RECEIVED',
-        paymentReceivedAt: { $gte: start, $lte: end }
+        $or: [
+          { paymentStatus: 'RECEIVED', paymentReceivedAt: deliveryRange },
+          { settlementMode: 'CREDIT', saleConfirmedAt: deliveryRange }
+        ]
       })
         .sort({ paymentReceivedAt: -1, createdAt: -1 })
         .lean();
@@ -1186,12 +1381,14 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
       }));
     }
 
+    invoices = invoices.map((inv) => ({ ...inv, saleType: 'job' }));
+
     const data = [...invoices, ...packageSales].sort((a, b) => {
       const da = a.saleType === 'job'
-        ? (a.jobId?.actualDelivery || a.jobId?.createdAt || a.createdAt)
+        ? (a.jobId?.actualDelivery || a.paymentReceivedAt || a.jobId?.createdAt || a.createdAt)
         : (a.paymentReceivedAt || a.createdAt);
       const db = b.saleType === 'job'
-        ? (b.jobId?.actualDelivery || b.jobId?.createdAt || b.createdAt)
+        ? (b.jobId?.actualDelivery || b.paymentReceivedAt || b.jobId?.createdAt || b.createdAt)
         : (b.paymentReceivedAt || b.createdAt);
       return new Date(db).getTime() - new Date(da).getTime();
     });
@@ -1200,9 +1397,16 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     let totalCashReceived = 0;
     let totalOnlineReceived = 0;
     for (const inv of data) {
-      const ch = invoiceSettlementCashOnline(inv);
-      totalCashReceived += ch.cash;
-      totalOnlineReceived += ch.online;
+      const pc = roundMoney(Number(inv.paymentCashAmount) || 0);
+      const po = roundMoney(Number(inv.paymentOnlineAmount) || 0);
+      if (pc + po > 0.02) {
+        totalCashReceived += pc;
+        totalOnlineReceived += po;
+      } else if (inv.paymentStatus === 'RECEIVED') {
+        const ch = invoiceSettlementCashOnline(inv);
+        totalCashReceived += ch.cash;
+        totalOnlineReceived += ch.online;
+      }
     }
     const totalDiscountAmount = invoices.reduce((s, inv) => {
       const sub = inv.subtotal || 0;
@@ -1210,14 +1414,81 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
       return s + (sub * (pct / 100));
     }, 0);
     const totalGst = invoices.reduce((s, inv) => s + (inv.gstAmount || 0), 0);
+
+    const paymentAtDeliveryCash = Math.round(totalCashReceived * 100) / 100;
+    const paymentAtDeliveryOnline = Math.round(totalOnlineReceived * 100) / 100;
+    let amountDueOnDeliveredSales = 0;
+    for (const inv of data) {
+      if (inv.settlementMode === 'CREDIT') {
+        const final = roundMoney(Number(inv.finalAmount) || 0);
+        const atCheckout = roundMoney(Number(inv.amountCollectedAtCheckout) || 0);
+        amountDueOnDeliveredSales += roundMoney(Math.max(0, final - atCheckout));
+      }
+    }
+    amountDueOnDeliveredSales = Math.round(amountDueOnDeliveredSales * 100) / 100;
+
+    const endExclusive = exclusiveEnd ? end : new Date(end.getTime() + 1);
+    const advanceRows = await Job.aggregate([
+      { $match: { businessId: new mongoose.Types.ObjectId(req.businessId), createdAt: dateRangeQuery(start, end, exclusiveEnd) } },
+      {
+        $addFields: {
+          advCash: {
+            $cond: [
+              { $lte: [{ $ifNull: ['$advancePayment', 0] }, 0] },
+              0,
+              {
+                $ifNull: [
+                  '$advanceCashAmount',
+                  { $cond: [{ $eq: ['$advancePaymentMethod', 'ONLINE'] }, 0, { $ifNull: ['$advancePayment', 0] }] }
+                ]
+              }
+            ]
+          },
+          advOnline: {
+            $cond: [
+              { $lte: [{ $ifNull: ['$advancePayment', 0] }, 0] },
+              0,
+              {
+                $ifNull: [
+                  '$advanceOnlineAmount',
+                  { $cond: [{ $eq: ['$advancePaymentMethod', 'ONLINE'] }, { $ifNull: ['$advancePayment', 0] }, 0] }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      { $group: { _id: null, advCash: { $sum: '$advCash' }, advOnline: { $sum: '$advOnline' } } }
+    ]);
+    const advCash = advanceRows[0]?.advCash ?? 0;
+    const advOnline = advanceRows[0]?.advOnline ?? 0;
+    const moneyInRaw = await getTodayCashReceived(req.businessId, start, endExclusive, advCash, advOnline);
+    const collectionReport = await buildCollectionReport(req.businessId, start, end, exclusiveEnd);
+
     res.json({
       success: true,
       data,
       summary: {
         totalSales: data.length,
         totalRevenue: Math.round(totalRevenue * 100) / 100,
-        totalCashReceived: Math.round(totalCashReceived * 100) / 100,
-        totalOnlineReceived: Math.round(totalOnlineReceived * 100) / 100,
+        totalCashReceived: paymentAtDeliveryCash,
+        totalOnlineReceived: paymentAtDeliveryOnline,
+        paymentAtDelivery: {
+          cash: paymentAtDeliveryCash,
+          online: paymentAtDeliveryOnline,
+          total: Math.round((paymentAtDeliveryCash + paymentAtDeliveryOnline) * 100) / 100
+        },
+        amountDueOnDeliveredSales,
+        moneyInPeriod: {
+          total: moneyInRaw.todayCashReceived,
+          cash: moneyInRaw.todayCashReceivedCash,
+          online: moneyInRaw.todayCashReceivedOnline,
+          fullPayCheckout: moneyInRaw.todayFullPayCheckout,
+          creditCheckout: moneyInRaw.todayCreditCheckout,
+          creditRecovery: moneyInRaw.todayCreditRecovery,
+          advances: moneyInRaw.todayAdvances
+        },
+        collectionsInPeriod: collectionReport.summary,
         totalDiscountAmount: Math.round(totalDiscountAmount * 100) / 100,
         totalGst: Math.round(totalGst * 100) / 100
       },
@@ -1234,11 +1505,12 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
 router.get('/reports/visits', expenseAdminOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
-    const { start, end } = parseReportDateRange(range, from, to);
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
+    const visitRange = dateRangeQuery(start, end, exclusiveEnd);
 
     const visits = await PackageVisit.find({
       businessId: req.businessId,
-      date: { $gte: start, $lte: end }
+      date: visitRange
     })
       .populate({
         path: 'customerPackageId',
@@ -1254,7 +1526,7 @@ router.get('/reports/visits', expenseAdminOnly, async (req, res) => {
       businessId: req.businessId,
       customerPackageId: { $in: pkgIds },
       status: 'completed',
-      date: { $lte: end }
+      date: exclusiveEnd ? { $lt: end } : { $lte: end }
     }).select('customerPackageId date').sort({ date: 1, createdAt: 1 }).lean() : [];
 
     const completedDatesByPkg = new Map();
@@ -1298,6 +1570,85 @@ router.get('/reports/visits', expenseAdminOnly, async (req, res) => {
   }
 });
 
+// GET /api/admin/reports/collections?range=...&from=&to=
+router.get('/reports/collections', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
+    const report = await buildCollectionReport(req.businessId, start, end, exclusiveEnd);
+    res.json({
+      success: true,
+      data: report.data,
+      summary: report.summary,
+      totalAmount: report.summary.totalCollection,
+      start: report.start,
+      end: report.end
+    });
+  } catch (error) {
+    console.error('Reports collections error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/outstanding?customerId=&minAmount=&overdueOnly=true
+router.get('/reports/outstanding', expenseAdminOnly, async (req, res) => {
+  try {
+    const report = await buildOutstandingReport(req.businessId, {
+      customerId: req.query.customerId,
+      minAmount: req.query.minAmount,
+      overdueOnly: req.query.overdueOnly
+    });
+    res.json({
+      success: true,
+      data: report.data,
+      summary: report.summary,
+      totalAmount: report.summary.totalOutstanding
+    });
+  } catch (error) {
+    console.error('Reports outstanding error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/sales-expenses?range=today|...|custom&from=&to=
+router.get('/reports/sales-expenses', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'this_month', from, to } = req.query;
+    const { buildSalesExpensesStatement } = await import('../services/financialStatementsService.js');
+    const statement = await buildSalesExpensesStatement(req.businessId, range, from, to);
+    res.json({ success: true, statement });
+  } catch (error) {
+    console.error('Sales & expenses statement error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/trial-balance?range=...&from=&to=
+router.get('/reports/trial-balance', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'this_month', from, to } = req.query;
+    const { buildTrialBalance } = await import('../services/financialStatementsService.js');
+    const statement = await buildTrialBalance(req.businessId, range, from, to);
+    res.json({ success: true, statement });
+  } catch (error) {
+    console.error('Trial balance error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/reports/profit-loss?range=...&from=&to=
+router.get('/reports/profit-loss', expenseAdminOnly, async (req, res) => {
+  try {
+    const { range = 'this_month', from, to } = req.query;
+    const { buildProfitLossStatement } = await import('../services/financialStatementsService.js');
+    const statement = await buildProfitLossStatement(req.businessId, range, from, to);
+    res.json({ success: true, statement });
+  } catch (error) {
+    console.error('Profit & loss statement error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ==================== DASHBOARD ====================
 
 // @route   GET /api/admin/dashboard
@@ -1319,67 +1670,21 @@ router.get('/dashboard', async (req, res) => {
     const fromQ = String(req.query.from || '').trim(); // YYYY-MM-DD (custom)
     const toQ = String(req.query.to || '').trim(); // YYYY-MM-DD (custom)
 
-    const nowZ = DateTime.now().setZone(businessTz);
-    const startOfDayZ = (dt) => dt.startOf('day');
-    const endExclusiveDayZ = (dt) => dt.plus({ days: 1 }).startOf('day');
-    const weekStartMonZ = (dt) => startOfDayZ(dt.minus({ days: dt.weekday - 1 }));
-
-    let startZ;
-    let endExclusiveZ;
-    let rangeLabel = 'Today';
-
-    if (range === 'yesterday') {
-      const y = nowZ.minus({ days: 1 });
-      startZ = startOfDayZ(y);
-      endExclusiveZ = endExclusiveDayZ(startZ);
-      rangeLabel = 'Yesterday';
-    } else if (range === 'week') {
-      startZ = weekStartMonZ(nowZ);
-      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
-      rangeLabel = 'This week';
-    } else if (range === 'month') {
-      startZ = nowZ.startOf('month');
-      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
-      rangeLabel = 'This month';
-    } else if (range === 'year') {
-      startZ = nowZ.startOf('year');
-      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
-      rangeLabel = 'This year';
-    } else if (range === 'custom') {
-      const fromZ = fromQ ? DateTime.fromISO(fromQ, { zone: businessTz }).startOf('day') : null;
-      const toZ = toQ ? DateTime.fromISO(toQ, { zone: businessTz }).startOf('day') : null;
-      if (!fromZ?.isValid || !toZ?.isValid) {
-        return res.status(400).json({ success: false, message: 'Custom range requires valid from/to (YYYY-MM-DD)' });
+    let bounds;
+    try {
+      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+    } catch (boundsErr) {
+      if (boundsErr.statusCode === 400) {
+        return res.status(400).json({ success: false, message: boundsErr.message });
       }
-      startZ = fromZ;
-      endExclusiveZ = endExclusiveDayZ(toZ);
-      rangeLabel = 'Custom';
-    } else {
-      startZ = startOfDayZ(nowZ);
-      endExclusiveZ = endExclusiveDayZ(startZ);
-      rangeLabel = 'Today';
+      throw boundsErr;
     }
-
-    const startUtc = startZ.toUTC().toJSDate();
-    const endUtc = endExclusiveZ.toUTC().toJSDate();
+    const { startUtc, endUtc, rangeLabel } = bounds;
+    const nowZ = DateTime.now().setZone(businessTz);
     const startOfMonthUtc = nowZ.startOf('month').toUTC().toJSDate();
 
-    /** Paid invoices counted toward "received today" (cash register); legacy rows may lack paymentReceivedAt. */
-    const invoicePaidTodayWindow = {
-      paymentStatus: 'RECEIVED',
-      $or: [
-        { paymentReceivedAt: { $gte: startUtc, $lt: endUtc } },
-        {
-          $and: [
-            { $or: [{ paymentReceivedAt: { $exists: false } }, { paymentReceivedAt: null }] },
-            { updatedAt: { $gte: startUtc, $lt: endUtc } }
-          ]
-        }
-      ]
-    };
-
     // Single aggregation for all job stats (parallel in one pipeline)
-    const [jobStats, avgResult, todayRevResult, todayRevByMethodResult, todayPackageSettleResult, todayAdvanceCollectedResult, monthRevResult, todayExpResult] = await Promise.all([
+    const [jobStats, avgResult, todayRevResult, todayAdvanceCollectedResult, monthRevResult, todayExpResult] = await Promise.all([
       Job.aggregate([
         { $match: baseMatch },
         {
@@ -1432,47 +1737,6 @@ router.get('/dashboard', async (req, res) => {
         },
         { $match: { job: { $ne: [] } } },
         { $group: { _id: null, total: { $sum: '$finalAmount' } } }
-      ]),
-      isEmployee ? Promise.resolve([{}]) : Invoice.aggregate([
-        {
-          $match: {
-            businessId: new mongoose.Types.ObjectId(businessId),
-            jobId: { $exists: true, $ne: null },
-            saleType: { $nin: ['PACKAGE'] },
-            ...invoicePaidTodayWindow
-          }
-        },
-        {
-          $lookup: {
-            from: 'jobs',
-            let: { jid: '$jobId' },
-            pipeline: [
-              {
-                $match: {
-                  $expr: { $eq: ['$_id', '$$jid'] },
-                  businessId: new mongoose.Types.ObjectId(businessId),
-                  status: 'DELIVERED'
-                }
-              },
-              { $limit: 1 }
-            ],
-            as: 'job'
-          }
-        },
-        { $match: { job: { $ne: [] } } },
-        ...invoiceSettlementAggregationStages(),
-        { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
-      ]),
-      isEmployee ? Promise.resolve([{}]) : Invoice.aggregate([
-        {
-          $match: {
-            businessId: new mongoose.Types.ObjectId(businessId),
-            saleType: 'PACKAGE',
-            ...invoicePaidTodayWindow
-          }
-        },
-        ...invoiceSettlementAggregationStages(),
-        { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
       ]),
       isEmployee ? Promise.resolve([]) : Job.aggregate([
         { $match: { businessId: new mongoose.Types.ObjectId(businessId), createdAt: { $gte: startUtc, $lt: endUtc } } },
@@ -1583,19 +1847,31 @@ router.get('/dashboard', async (req, res) => {
     const inProgress = jobStats.inProgress?.[0]?.count ?? 0;
     const pendingDeliveries = jobStats.pendingDeliveries?.[0]?.count ?? 0;
     const avgCompletionTime = Math.round(avgResult[0]?.avgMinutes ?? 0);
-    const todayRevenue = Math.round((todayRevResult[0]?.total ?? 0) * 100) / 100;
-    const methodAgg = todayRevByMethodResult[0];
-    const packageSettleAgg = todayPackageSettleResult[0];
+    const todaySales = Math.round((todayRevResult[0]?.total ?? 0) * 100) / 100;
     const advanceAgg = todayAdvanceCollectedResult[0];
-    const settleCash = (methodAgg?.cash ?? 0) + (packageSettleAgg?.cash ?? 0);
-    const settleOnline = (methodAgg?.online ?? 0) + (packageSettleAgg?.online ?? 0);
     const advCashToday = advanceAgg?.cash ?? 0;
     const advOnlineToday = advanceAgg?.online ?? 0;
-    const todayRevenueCash = Math.round((settleCash + advCashToday) * 100) / 100;
-    const todayRevenueOnline = Math.round((settleOnline + advOnlineToday) * 100) / 100;
     const monthlyRevenue = Math.round((monthRevResult[0]?.total ?? 0) * 100) / 100;
     const todayExpenses = todayExpResult[0]?.total ?? 0;
-    const closingBalance = !isEmployee ? (todayRevenue - todayExpenses) : 0;
+
+    let cashReceived = {
+      todayCashReceived: 0,
+      todayCashReceivedCash: 0,
+      todayCashReceivedOnline: 0,
+      todayFullPayCheckout: 0,
+      todayCreditCheckout: 0,
+      todayCreditRecovery: 0,
+      todayAdvances: 0
+    };
+    if (!isEmployee) {
+      try {
+        cashReceived = await getTodayCashReceived(businessId, startUtc, endUtc, advCashToday, advOnlineToday);
+      } catch (cashErr) {
+        console.warn('Today cash received stats error:', cashErr?.message || cashErr);
+      }
+    }
+
+    const closingBalance = !isEmployee ? (cashReceived.todayCashReceived - todayExpenses) : 0;
 
     const statsPayload = {
       todayJobs,
@@ -1610,16 +1886,29 @@ router.get('/dashboard', async (req, res) => {
       businessTz
     };
     if (!isEmployee) {
-      statsPayload.todayRevenue = todayRevenue;
-      statsPayload.todayRevenueCash = todayRevenueCash;
-      statsPayload.todayRevenueOnline = todayRevenueOnline;
+      statsPayload.todaySales = todaySales;
+      statsPayload.todayRevenue = todaySales;
+      Object.assign(statsPayload, cashReceived);
       statsPayload.monthlyRevenue = monthlyRevenue;
       statsPayload.todayExpenses = todayExpenses;
       statsPayload.closingBalance = closingBalance;
+
+      try {
+        const creditStats = await getCreditDashboardStats(businessId, startUtc, endUtc);
+        Object.assign(statsPayload, creditStats);
+      } catch (creditErr) {
+        console.warn('Credit dashboard stats error:', creditErr?.message || creditErr);
+        statsPayload.totalOutstandingReceivables = 0;
+        statsPayload.overdueOutstandingAmount = 0;
+        statsPayload.overdueOutstandingCount = 0;
+        statsPayload.topOutstandingCustomers = [];
+      }
     } else {
+      statsPayload.todaySales = 0;
       statsPayload.todayRevenue = 0;
-      statsPayload.todayRevenueCash = 0;
-      statsPayload.todayRevenueOnline = 0;
+      statsPayload.todayCashReceived = 0;
+      statsPayload.todayCashReceivedCash = 0;
+      statsPayload.todayCashReceivedOnline = 0;
       statsPayload.monthlyRevenue = 0;
       statsPayload.todayExpenses = 0;
       statsPayload.closingBalance = 0;
@@ -1647,53 +1936,21 @@ router.get('/dashboard/charts', async (req, res) => {
       .lean();
     const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
 
-    const range = String(req.query.range || 'today').toLowerCase(); // today|yesterday|week|month|year|custom
-    const fromQ = String(req.query.from || '').trim(); // YYYY-MM-DD (custom)
-    const toQ = String(req.query.to || '').trim(); // YYYY-MM-DD (custom)
+    const range = String(req.query.range || 'today').toLowerCase();
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
 
-    const nowZ = DateTime.now().setZone(businessTz);
-    const startOfDayZ = (dt) => dt.startOf('day');
-    const endExclusiveDayZ = (dt) => dt.plus({ days: 1 }).startOf('day');
-    const weekStartMonZ = (dt) => startOfDayZ(dt.minus({ days: dt.weekday - 1 }));
-
-    let startZ;
-    let endExclusiveZ;
-    let rangeLabel = 'Today';
-
-    if (range === 'yesterday') {
-      const y = nowZ.minus({ days: 1 });
-      startZ = startOfDayZ(y);
-      endExclusiveZ = endExclusiveDayZ(startZ);
-      rangeLabel = 'Yesterday';
-    } else if (range === 'week') {
-      startZ = weekStartMonZ(nowZ);
-      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
-      rangeLabel = 'This week';
-    } else if (range === 'month') {
-      startZ = nowZ.startOf('month');
-      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
-      rangeLabel = 'This month';
-    } else if (range === 'year') {
-      startZ = nowZ.startOf('year');
-      endExclusiveZ = endExclusiveDayZ(startOfDayZ(nowZ));
-      rangeLabel = 'This year';
-    } else if (range === 'custom') {
-      const fromZ = fromQ ? DateTime.fromISO(fromQ, { zone: businessTz }).startOf('day') : null;
-      const toZ = toQ ? DateTime.fromISO(toQ, { zone: businessTz }).startOf('day') : null;
-      if (!fromZ?.isValid || !toZ?.isValid) {
-        return res.status(400).json({ success: false, message: 'Custom range requires valid from/to (YYYY-MM-DD)' });
+    let bounds;
+    try {
+      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+    } catch (boundsErr) {
+      if (boundsErr.statusCode === 400) {
+        return res.status(400).json({ success: false, message: boundsErr.message });
       }
-      startZ = fromZ;
-      endExclusiveZ = endExclusiveDayZ(toZ);
-      rangeLabel = 'Custom';
-    } else {
-      startZ = startOfDayZ(nowZ);
-      endExclusiveZ = endExclusiveDayZ(startZ);
-      rangeLabel = 'Today';
+      throw boundsErr;
     }
-
-    const startUtc = startZ.toUTC().toJSDate();
-    const endUtc = endExclusiveZ.toUTC().toJSDate();
+    const { startUtc, endUtc, rangeLabel } = bounds;
+    const endExclusiveZ = DateTime.fromJSDate(endUtc).setZone(businessTz);
 
     // Revenue trend: run 7 day queries in parallel
     const revenuePromises = [];
@@ -1962,6 +2219,7 @@ router.post('/employees', [
     res.status(201).json({
       success: true,
       employee: {
+        _id: user._id,
         id: user._id,
         name: user.name,
         email: user.email,
@@ -2127,6 +2385,7 @@ router.put('/employees/:id', [
     }
     await user.save();
     const out = {
+      _id: user._id,
       id: user._id,
       name: user.name,
       email: user.email,
@@ -2195,6 +2454,146 @@ router.post('/employees/:id/reset-password', async (req, res) => {
 
 // ==================== CUSTOMER MANAGEMENT ====================
 
+// @route   GET /api/admin/customers/:id
+// @desc    Customer profile with cars, visits (jobs), packages
+// @access  Private (Car Wash Admin)
+router.get('/customers/:id', async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId }).lean();
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    const customerId = customer._id;
+    const now = new Date();
+
+    await backfillCustomerInvoiceLinks(req.businessId, customerId);
+
+    const [cars, jobs, packages, bookings, totalJobs, deliveredJobs] = await Promise.all([
+      Car.find({ businessId: req.businessId, customerId }).sort({ createdAt: -1 }).lean(),
+      Job.find({ businessId: req.businessId, customerId })
+        .populate('carId', 'carNumber brand model color')
+        .populate({ path: 'services.serviceId', select: 'name' })
+        .sort({ createdAt: -1 })
+        .limit(25)
+        .lean(),
+      CustomerPackage.find({ businessId: req.businessId, customerId })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      (async () => {
+        const Booking = (await import('../models/Booking.model.js')).default;
+        return Booking.find({ businessId: req.businessId, customerId })
+          .populate('slotId', 'name startTime endTime')
+          .sort({ bookingDate: -1 })
+          .limit(20)
+          .lean();
+      })(),
+      Job.countDocuments({ businessId: req.businessId, customerId }),
+      Job.find({
+        businessId: req.businessId,
+        customerId,
+        status: 'DELIVERED'
+      })
+        .sort({ actualDelivery: -1, updatedAt: -1 })
+        .limit(1)
+        .populate('carId', 'carNumber brand model')
+        .lean()
+    ]);
+
+    const lastVisitJob = deliveredJobs[0] || jobs[0] || null;
+    const lastVisitAt = lastVisitJob
+      ? (lastVisitJob.actualDelivery || lastVisitJob.createdAt)
+      : null;
+
+    const hasActivePackage = packages.some(
+      (p) => p.status === 'active' && (p.visitsRemaining ?? 0) > 0 && new Date(p.expiryDate) >= now
+    );
+
+    res.json({
+      success: true,
+      customer,
+      cars,
+      jobs,
+      packages,
+      bookings,
+      stats: {
+        totalJobs,
+        totalCars: cars.length,
+        loyaltyPoints: customer.loyaltyPointsBalance ?? 0,
+        hasActivePackage,
+        lastVisitAt
+      }
+    });
+  } catch (error) {
+    console.error('Get customer detail error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   POST /api/admin/customers/:id/retention-message
+// @desc    Generate personalized retention WhatsApp message
+// @access  Private (Car Wash Admin)
+router.post('/customers/:id/retention-message', expenseAdminOnly, async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId }).lean();
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    const business = await Business.findById(req.businessId).select('businessName').lean();
+    const customerId = customer._id;
+    const now = new Date();
+
+    const [lastDelivered, primaryCar, activePkg] = await Promise.all([
+      Job.findOne({
+        businessId: req.businessId,
+        customerId,
+        status: 'DELIVERED'
+      })
+        .sort({ actualDelivery: -1, updatedAt: -1 })
+        .populate('carId', 'carNumber brand model')
+        .lean(),
+      Car.findOne({ businessId: req.businessId, customerId }).sort({ createdAt: -1 }).lean(),
+      CustomerPackage.findOne({
+        businessId: req.businessId,
+        customerId,
+        status: 'active',
+        visitsRemaining: { $gt: 0 },
+        expiryDate: { $gte: now }
+      }).lean()
+    ]);
+
+    const lastJob = lastDelivered || await Job.findOne({ businessId: req.businessId, customerId })
+      .sort({ createdAt: -1 })
+      .populate('carId', 'carNumber brand model')
+      .lean();
+
+    const car = lastJob?.carId || primaryCar;
+    const carLabel = car
+      ? [car.brand, car.model, car.carNumber].filter(Boolean).join(' ').trim() || car.carNumber
+      : null;
+
+    const totalVisits = await Job.countDocuments({ businessId: req.businessId, customerId });
+
+    const { generateRetentionMessage } = await import('../utils/retentionMessage.js');
+    const message = await generateRetentionMessage({
+      customerName: customer.name,
+      businessName: business?.businessName || 'Our car wash',
+      lastVisitDate: lastJob?.actualDelivery || lastJob?.createdAt || null,
+      carLabel,
+      loyaltyPoints: customer.loyaltyPointsBalance ?? 0,
+      totalVisits,
+      hasActivePackage: !!activePkg
+    });
+
+    res.json({ success: true, message });
+  } catch (error) {
+    console.error('Retention message error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   GET /api/admin/customers/:id/visits
 // @desc    Get customer visit count (jobs count)
 // @access  Private (Car Wash Admin)
@@ -2238,13 +2637,8 @@ router.get('/customers', async (req, res) => {
     const { search, page = 1, limit = 20 } = req.query;
     const query = { businessId: req.businessId };
     if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      query.$or = [
-        { name: { $regex: term, $options: 'i' } },
-        { phone: { $regex: term, $options: 'i' } },
-        { whatsappNumber: { $regex: term, $options: 'i' } },
-        { email: { $regex: term, $options: 'i' } }
-      ];
+      const orClauses = customerSearchOrClauses(search);
+      if (orClauses.length) query.$or = orClauses;
     }
 
     const total = await Customer.countDocuments(query);
@@ -2293,9 +2687,29 @@ router.get('/customers', async (req, res) => {
         }).distinct('customerId')
       : [];
     const activeSet = new Set(activePkgCustomerIds.map((id) => id.toString()));
+
+    const outstandingRows = customerIds.length
+      ? await Invoice.aggregate([
+          {
+            $match: {
+              businessId: req.businessId,
+              customerId: { $in: customerIds },
+              settlementMode: 'CREDIT',
+              saleConfirmedAt: { $ne: null },
+              outstandingAmount: { $gt: 0.01 }
+            }
+          },
+          { $group: { _id: '$customerId', totalOutstanding: { $sum: '$outstandingAmount' } } }
+        ])
+      : [];
+    const outstandingMap = new Map(
+      outstandingRows.map((r) => [String(r._id), Math.round(r.totalOutstanding * 100) / 100])
+    );
+
     const customersWithBadges = customersWithStats.map((c) => ({
       ...c,
-      hasActivePackage: activeSet.has(String(c._id))
+      hasActivePackage: activeSet.has(String(c._id)),
+      creditOutstanding: outstandingMap.get(String(c._id)) || 0
     }));
 
     res.json({
@@ -2333,21 +2747,10 @@ router.post('/customers', [
 
     const phone = String(req.body.phone || '').trim();
     const whatsappNumber = String(req.body.whatsappNumber || '').trim();
-    const normalizedPhone = phone.replace(/[^\d+]/g, '');
-    const normalizedWhatsapp = whatsappNumber.replace(/[^\d+]/g, '');
-
-    // Ensure a single mobile number per customer and prevent duplicates per business.
-    const existing = await Customer.findOne({
-      businessId: req.businessId,
-      $or: [
-        { phone: normalizedPhone },
-        { whatsappNumber: normalizedPhone },
-        ...(normalizedWhatsapp ? [{ phone: normalizedWhatsapp }, { whatsappNumber: normalizedWhatsapp }] : [])
-      ]
-    }).lean();
-    if (existing) {
-      return res.status(400).json({ success: false, message: 'Mobile number already exists' });
-    }
+    const normalizedPhone = await assertCustomerPhoneAvailable(req.businessId, phone);
+    const normalizedWhatsapp = whatsappNumber
+      ? await assertCustomerPhoneAvailable(req.businessId, whatsappNumber)
+      : normalizedPhone;
 
     const customer = await Customer.create({
       ...req.body,
@@ -2361,6 +2764,9 @@ router.post('/customers', [
       customer
     });
   } catch (error) {
+    if (isDuplicatePhoneError(error) || /already exists/i.test(error.message)) {
+      return res.status(400).json({ success: false, message: 'Mobile number already exists' });
+    }
     console.error('Create customer error:', error);
     res.status(500).json({
       success: false,
@@ -2383,14 +2789,22 @@ router.put('/customers/:id', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
     if (req.body.phone) {
-      const normalizedPhone = String(req.body.phone || '').trim().replace(/[^\d+]/g, '');
+      const normalizedPhone = await assertCustomerPhoneAvailable(
+        req.businessId,
+        req.body.phone,
+        req.params.id
+      );
       req.body.phone = normalizedPhone;
       if (!req.body.whatsappNumber) {
         req.body.whatsappNumber = normalizedPhone;
       }
     }
     if (req.body.whatsappNumber) {
-      req.body.whatsappNumber = String(req.body.whatsappNumber || '').trim().replace(/[^\d+]/g, '');
+      req.body.whatsappNumber = await assertCustomerPhoneAvailable(
+        req.businessId,
+        req.body.whatsappNumber,
+        req.params.id
+      );
     }
     const customer = await Customer.findOneAndUpdate(
       { _id: req.params.id, businessId: req.businessId },
@@ -2408,6 +2822,9 @@ router.put('/customers/:id', [
       customer
     });
   } catch (error) {
+    if (isDuplicatePhoneError(error) || /already exists/i.test(error.message)) {
+      return res.status(400).json({ success: false, message: 'Mobile number already exists' });
+    }
     console.error('Update customer error:', error);
     res.status(500).json({
       success: false,
@@ -2457,14 +2874,14 @@ router.get('/cars', async (req, res) => {
     const query = { businessId: req.businessId };
     if (customerId) query.customerId = customerId;
     if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const customerIds = await Customer.find({ businessId: req.businessId, name: { $regex: term, $options: 'i' } }).distinct('_id');
+      const term = escapeRegex(search);
+      const customerIds = await distinctCustomerIdsBySearch(Customer, req.businessId, search);
       query.$or = [
         { carNumber: { $regex: term, $options: 'i' } },
         { brand: { $regex: term, $options: 'i' } },
         { model: { $regex: term, $options: 'i' } },
         { color: { $regex: term, $options: 'i' } },
-        { customerId: { $in: customerIds } }
+        ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : [])
       ];
     }
     const total = await Car.countDocuments(query);
@@ -2822,7 +3239,7 @@ router.get('/jobs/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/jobs', async (req, res) => {
   try {
-    const { status, page = 1, limit = 20, search, from, to } = req.query;
+    const { status, page = 1, limit = 20, search, from, to, range } = req.query;
     const query = { businessId: req.businessId };
     // Employee sees only jobs assigned to them
     if (req.user.role === 'EMPLOYEE') {
@@ -2832,15 +3249,9 @@ router.get('/jobs', async (req, res) => {
       query.status = status;
     }
     if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const term = escapeRegex(search);
       const [customerIds, carIdRows] = await Promise.all([
-        Customer.find({
-          businessId: req.businessId,
-          $or: [
-            { name: { $regex: term, $options: 'i' } },
-            { phone: { $regex: term, $options: 'i' } }
-          ]
-        }).distinct('_id'),
+        distinctCustomerIdsBySearch(Customer, req.businessId, search),
         Car.aggregate([
           {
             $lookup: {
@@ -2868,23 +3279,43 @@ router.get('/jobs', async (req, res) => {
       ];
     }
 
-    // Date range filter (createdAt) - supports from/to as ISO or YYYY-MM-DD
-    if ((from && String(from).trim()) || (to && String(to).trim())) {
-      const range = {};
-      if (from && String(from).trim()) {
-        const d = new Date(String(from).trim());
-        if (!Number.isNaN(d.getTime())) range.$gte = d;
+    // Date range filter (createdAt) — prefer `range` in business timezone; legacy from/to ISO still supported
+    const rangeKey = range && String(range).trim() && String(range).toUpperCase() !== 'ALL'
+      ? String(range).trim()
+      : '';
+    if (rangeKey) {
+      const { startUtc, endUtc } = await loadBusinessDateRange(req.businessId, rangeKey, from, to);
+      applyCreatedAtRange(query, startUtc, endUtc);
+    } else if ((from && String(from).trim()) || (to && String(to).trim())) {
+      const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
+      const fromStr = from && String(from).trim();
+      const toStr = to && String(to).trim();
+      const isDateOnly = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+      if (isDateOnly(fromStr) || isDateOnly(toStr)) {
+        const bounds = parseBusinessDateRange(
+          settings?.timezone,
+          'custom',
+          fromStr || toStr,
+          toStr || fromStr
+        );
+        applyCreatedAtRange(query, fromStr ? bounds.startUtc : null, toStr ? bounds.endUtc : null);
+      } else {
+        const rangeObj = {};
+        if (fromStr) {
+          const d = new Date(fromStr);
+          if (!Number.isNaN(d.getTime())) rangeObj.$gte = d;
+        }
+        if (toStr) {
+          const d = new Date(toStr);
+          if (!Number.isNaN(d.getTime())) rangeObj.$lte = d;
+        }
+        if (Object.keys(rangeObj).length) query.createdAt = rangeObj;
       }
-      if (to && String(to).trim()) {
-        const d = new Date(String(to).trim());
-        if (!Number.isNaN(d.getTime())) range.$lte = d;
-      }
-      if (Object.keys(range).length) query.createdAt = range;
     }
 
     const [jobs, total] = await Promise.all([
       Job.find(query)
-        .select('-beforeImages -afterImages -statusHistory -notes')
+        .select('-beforeImages -afterImages -notes')
         .populate('customerId', 'name phone whatsappNumber')
         .populate('carId', 'carNumber brand model color')
         .populate('services.serviceId', 'name')
@@ -3648,15 +4079,6 @@ router.put('/business', [
 
 // ==================== SETTINGS ====================
 
-const DEFAULT_WHATSAPP_TEMPLATES = {
-  received: 'Hello {{name}}, your vehicle {{vehicleNumber}} has been received. Token: {{token}}',
-  inProgress: 'Your car {{vehicleNumber}} is now in progress.',
-  washing: 'Your car {{vehicleNumber}} is currently being washed.',
-  drying: 'Your car {{vehicleNumber}} is being dried.',
-  completed: '✅ Your car wash for {{vehicleNumber}} is completed.',
-  delivered: '🚗 Thank you! Your vehicle {{vehicleNumber}} has been delivered.'
-};
-
 // @route   GET /api/admin/settings
 // @desc    Get business settings
 // @access  Private (Car Wash Admin)
@@ -3682,11 +4104,7 @@ router.get('/settings', async (req, res) => {
       });
     }
     const settingsObj = settings.toObject ? settings.toObject() : settings;
-    if (!settingsObj.whatsappTemplates || typeof settingsObj.whatsappTemplates !== 'object') {
-      settingsObj.whatsappTemplates = { ...DEFAULT_WHATSAPP_TEMPLATES };
-    } else {
-      settingsObj.whatsappTemplates = { ...DEFAULT_WHATSAPP_TEMPLATES, ...settingsObj.whatsappTemplates };
-    }
+    settingsObj.whatsappTemplates = normalizeWhatsappTemplates(settingsObj.whatsappTemplates);
     // Currency is set only by super admin; always return platform default currency
     const platform = await PlatformSettings.findOne({}).lean();
     if (platform?.defaultCurrency) {
@@ -3724,6 +4142,7 @@ router.put('/settings', [
   body('googleReviewLink').optional().trim().isString(),
   body('whatsappTemplates').optional().isObject(),
   body('whatsappTemplates.received').optional().isString(),
+  body('whatsappTemplates.workStarted').optional().isString(),
   body('whatsappTemplates.inProgress').optional().isString(),
   body('whatsappTemplates.washing').optional().isString(),
   body('whatsappTemplates.drying').optional().isString(),
@@ -3750,7 +4169,9 @@ router.put('/settings', [
     if (req.body.notificationPreferences !== undefined) updateFields.notificationPreferences = req.body.notificationPreferences;
     if (req.body.shopWhatsappNumber !== undefined) updateFields.shopWhatsappNumber = req.body.shopWhatsappNumber?.trim() || null;
     if (req.body.googleReviewLink !== undefined) updateFields.googleReviewLink = req.body.googleReviewLink?.trim() || null;
-    if (req.body.whatsappTemplates !== undefined) updateFields.whatsappTemplates = req.body.whatsappTemplates;
+    if (req.body.whatsappTemplates !== undefined) {
+      updateFields.whatsappTemplates = normalizeWhatsappTemplates(req.body.whatsappTemplates);
+    }
     if (req.body.upiId !== undefined) updateFields.upiId = req.body.upiId?.trim() || null;
     if (req.body.qrCodeImage !== undefined) updateFields.qrCodeImage = req.body.qrCodeImage?.trim() || null;
     if (req.body.paymentMobileNumber !== undefined) updateFields.paymentMobileNumber = req.body.paymentMobileNumber?.trim() || null;
@@ -3787,6 +4208,7 @@ router.put('/settings', [
       );
     }
     const settingsObj = settings.toObject ? settings.toObject() : settings;
+    settingsObj.whatsappTemplates = normalizeWhatsappTemplates(settingsObj.whatsappTemplates);
     res.json({
       success: true,
       settings: settingsObj

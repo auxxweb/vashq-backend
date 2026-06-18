@@ -16,6 +16,14 @@ const expenseSchema = new mongoose.Schema({
     required: [true, 'Amount is required'],
     min: 0
   },
+  /** How this expense was paid: cash from hand, online from account, or split. */
+  paymentMethod: {
+    type: String,
+    enum: ['CASH', 'ONLINE', 'SPLIT'],
+    default: 'CASH'
+  },
+  paymentCashAmount: { type: Number, default: 0, min: 0 },
+  paymentOnlineAmount: { type: Number, default: 0, min: 0 },
   billImage: {
     type: String,
     trim: true

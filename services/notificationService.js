@@ -74,6 +74,10 @@ export async function sendPushNotification({ businessOwnerId, title, body, data 
     package_expiry: 'PACKAGE_EXPIRY',
     overdue_visit: 'OVERDUE_VISIT',
     subscription_expiry: 'SUBSCRIPTION_EXPIRY',
+    booking_request: 'BOOKING_REQUEST',
+    booking_confirmed: 'BOOKING_CONFIRMED',
+    booking_cancelled: 'BOOKING_CANCELLED',
+    booking_slot_full: 'BOOKING_SLOT_FULL',
   };
   const inAppType = inAppTypeMap[type] || 'SYSTEM_ALERT';
   const link = safeString(data?.url || data?.link || '');

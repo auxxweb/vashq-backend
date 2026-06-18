@@ -30,7 +30,11 @@ const notificationSchema = new mongoose.Schema({
       'VISIT_TODAY',
       'PACKAGE_EXPIRY',
       'OVERDUE_VISIT',
-      'SUBSCRIPTION_EXPIRY'
+      'SUBSCRIPTION_EXPIRY',
+      'BOOKING_REQUEST',
+      'BOOKING_CONFIRMED',
+      'BOOKING_CANCELLED',
+      'BOOKING_SLOT_FULL'
     ],
     required: true
   },

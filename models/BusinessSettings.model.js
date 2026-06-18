@@ -55,11 +55,13 @@ const businessSettingsSchema = new mongoose.Schema({
   googleReviewLink: { type: String, trim: true },
   whatsappTemplates: {
     received: { type: String, trim: true },
+    workStarted: { type: String, trim: true },
     inProgress: { type: String, trim: true },
     washing: { type: String, trim: true },
     drying: { type: String, trim: true },
     completed: { type: String, trim: true },
-    delivered: { type: String, trim: true }
+    delivered: { type: String, trim: true },
+    bookingConfirmed: { type: String, trim: true }
   },
   // Payment (Online) - for invoice & WhatsApp share
   upiId: { type: String, trim: true },
@@ -70,7 +72,12 @@ const businessSettingsSchema = new mongoose.Schema({
   taxPercentage: { type: Number, min: 0, max: 100 },
   // Loyalty program (optional)
   loyaltyPointValueInr: { type: Number, min: 0, default: 0 }, // 1 point = ₹X
-  loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 } // 0 = no redeem allowed
+  loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 }, // 0 = no redeem allowed
+  // Online booking
+  onlineBookingEnabled: { type: Boolean, default: true },
+  /** Days of week 0=Sun … 6=Sat; empty/null = all days */
+  bookingAllowedDays: [{ type: Number, min: 0, max: 6 }],
+  bookingAdvanceDays: { type: Number, min: 1, max: 365, default: 30 }
 }, {
   timestamps: true
 });

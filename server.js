@@ -20,6 +20,8 @@ import adminRoutes from './routes/admin.routes.js';
 import publicRoutes from './routes/public.routes.js';
 import packageRoutes from './routes/packages.routes.js';
 import businessRoutes from './routes/business.routes.js';
+import aiInsightsRoutes from './routes/aiInsights.routes.js';
+import bookingAdminRoutes from './routes/bookingAdmin.routes.js';
 import { initFirebaseAdmin } from './services/firebaseAdmin.js';
 import { startCronJobs } from './cronJobs.js';
 
@@ -61,6 +63,8 @@ app.use('/api/auth/employee-login', authLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/ai-insights', aiInsightsRoutes);
+app.use('/api/admin/bookings', bookingAdminRoutes);
 app.use('/api/packages', packageRoutes);
 app.use('/api/business', businessRoutes);
 app.use('/api/public', publicRoutes);

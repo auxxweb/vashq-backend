@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "create-admin": "node scripts/create-admin.js"
+    "create-admin": "node scripts/create-admin.js",
+    "test:credit": "node scripts/test-credit.mjs",
+    "test:expense-payment": "node scripts/test-expense-payment.mjs",
+    "backfill:collection-numbers": "node scripts/backfill-collection-numbers.mjs"
   },
   "keywords": [
     "saas",
