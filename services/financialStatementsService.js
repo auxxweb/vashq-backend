@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import Invoice from '../models/Invoice.model.js';
 import Expense from '../models/Expense.model.js';
+import ExpenseType from '../models/ExpenseType.model.js';
 import Job from '../models/Job.model.js';
 import Business from '../models/Business.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
@@ -136,6 +137,8 @@ async function gatherPeriodFinancials(businessId, start, end) {
 
   const collectionsReport = await buildCollectionReport(businessId, start, end, false);
   const creditRecovery = roundMoney(collectionsReport.summary?.creditRecovery ?? 0);
+  const collectionCash = roundMoney(collectionsReport.summary?.totalCash ?? 0);
+  const collectionOnline = roundMoney(collectionsReport.summary?.totalOnline ?? 0);
 
   const endExclusive = new Date(end.getTime() + 1);
   const advanceRows = await Job.aggregate([

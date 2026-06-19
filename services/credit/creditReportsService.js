@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import PaymentCollection from '../../models/PaymentCollection.model.js';
 import Invoice from '../../models/Invoice.model.js';
 import Customer from '../../models/Customer.model.js';
+import User from '../../models/User.model.js';
 import { roundMoney } from '../../utils/creditPayment.js';
 import { invoiceSettlementAggregationStages } from '../../utils/paymentChannelAmounts.js';
 import { deriveCollectionDisplayStatus, getTotalCollected } from './outstandingService.js';
