@@ -16,6 +16,7 @@ import { generateTokenNumber, calculateETA, canAcceptNewJob, isValidStatusTransi
 import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates } from '../utils/jobServiceLines.js';
 import {
   assertDirectBillEligible,
+  createInvoiceForJobRecord,
   directBillStatusHistory,
   finalizeDirectBillSale,
   WASH_JOB_FILTER,
@@ -46,6 +47,7 @@ import { sendPushNotification } from '../services/notificationService.js';
 import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
 import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
 import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, relabelLockedInvoicePaymentMethod, roundMoney } from '../utils/invoicePayment.js';
+import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
 import { invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
@@ -76,7 +78,7 @@ import { getBusinessModules, isModuleEnabled } from '../services/businessModules
 import { ensureDefaultBranchForBusiness, getBranchOverviewStats, getBranchUsageStats, isBranchOperational, submitBranchRenewalRequest, branchLicenseNeedsRenewal } from '../services/branchService.js';
 import { getBranchPlatformConfig } from '../utils/branchConfig.js';
 import { applyBranchScopeOid, applyBranchScope } from '../utils/branchQuery.js';
-import { scopedFilter, assertBranchAccess, findScoped, branchIdForCreate } from '../utils/branchAccess.js';
+import { scopedFilter, assertBranchAccess, findScoped, branchIdForCreate, jobAccessFilter } from '../utils/branchAccess.js';
 import { isAdminPanelRole, isBranchAdmin, isBusinessOwner } from '../utils/adminRoles.js';
 import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
 import { generateEmployeeCode } from '../utils/employeeAccount.js';
@@ -718,22 +720,6 @@ const INVOICE_METADATA_FIELDS = [
   'customerName', 'customerPhone', 'customerGst', 'vehicleNumber'
 ];
 
-const INVOICE_FINANCIAL_BODY_KEYS = [
-  'discount', 'finalAmount', 'taxPercentage', 'gstAmount',
-  'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount',
-  'paymentCashAmount', 'paymentOnlineAmount', 'allowPartialCheckout'
-];
-
-function rejectFinancialInvoiceBodyFields(body) {
-  for (const key of INVOICE_FINANCIAL_BODY_KEYS) {
-    if (body[key] !== undefined) {
-      const err = new Error('Discount, loyalty, line items, and payment amounts cannot be edited on the invoice');
-      err.status = 403;
-      throw err;
-    }
-  }
-}
-
 function applyInvoiceMetadataFields(invoice, body) {
   for (const key of INVOICE_METADATA_FIELDS) {
     if (body[key] !== undefined) invoice[key] = body[key];
@@ -749,56 +735,37 @@ router.post('/invoices', [
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
-    const job = await findScoped(Job, req, { _id: req.body.jobId })
+    const job = await Job.findOne(scopedFilter(req, { _id: req.body.jobId }))
       .populate('customerId', 'name phone whatsappNumber email')
       .populate('carId', 'carNumber model make color brand')
-      .populate({ path: 'services.serviceId', model: 'Service', select: 'name price' });
+      .populate({ path: 'services.serviceId', model: 'Service', select: 'name price isVariable' });
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found' });
     }
+    assertBranchAccess(req, job, { allowLegacyNull: true });
+
     const existing = await Invoice.findOne({ jobId: job._id });
     if (existing) {
       return res.json({ success: true, invoice: existing, alreadyExists: true });
     }
-    let invoiceNumber = generateInvoiceNumber();
-    while (await Invoice.findOne({ businessId: req.businessId, invoiceNumber })) {
-      invoiceNumber = generateInvoiceNumber();
-    }
-    const items = jobLinesToInvoiceItems(job.services || []);
-    const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + i.servicePrice, 0);
-    const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
-    const company = await getInvoiceCompanySnapshot(req.businessId);
-    const invoice = await Invoice.create({
-      jobId: job._id,
+
+    const invoice = await createInvoiceForJobRecord({
+      job,
       businessId: req.businessId,
-      branchId: job.branchId || req.branchId || null,
-      invoiceNumber,
-      companyName: company?.businessName || null,
-      companyOwnerName: company?.ownerName || null,
-      companyAddress: company?.address || null,
-      companyPhone: company?.phone || null,
-      companyGst: company?.gstNumber || null,
-      customerName: job.customerId?.name ?? '',
-      customerPhone: job.customerId?.phone || job.customerId?.whatsappNumber || '',
-      customerId: job.customerId?._id || job.customerId || null,
-      customerGst: null,
-      vehicleNumber: job.carId?.carNumber ?? '',
-      items,
-      discount: 0,
-      subtotal,
-      finalAmount: subtotal,
-      advancePayment: advanceFromJob,
-      paymentMethod: 'CASH',
-      paymentCashAmount: 0,
-      paymentOnlineAmount: 0,
-      paymentStatus: 'PENDING',
-      shareToken: generateShareToken(),
-      createdBy: req.user._id
+      userId: req.user._id,
+      customer: job.customerId,
+      car: job.carId,
+      catalogServices: (job.services || [])
+        .map((s) => s.serviceId)
+        .filter((s) => s && typeof s === 'object' && s.name)
     });
     res.status(201).json({ success: true, invoice });
   } catch (error) {
     console.error('Create invoice error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
   }
 });
 
@@ -880,7 +847,7 @@ router.get('/invoices/:id', async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    assertBranchAccess(req, invoice);
+    assertBranchAccess(req, invoice, { allowLegacyNull: true });
     const companySnapshot = await getInvoiceCompanySnapshot(req.businessId);
     const toPersist = companyFieldsToPersist(invoice, companySnapshot);
     if (toPersist) {
@@ -921,6 +888,7 @@ router.put('/invoices/:id', [
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
   body('paymentOnlineAmount').optional().isFloat({ min: 0 }),
+  body('allowPartialCheckout').optional().isBoolean(),
   body('items').optional().isArray({ min: 1 })
 ], async (req, res) => {
   try {
@@ -935,14 +903,23 @@ router.put('/invoices/:id', [
     if (!invoiceDoc) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    assertBranchAccess(req, invoiceDoc);
+    assertBranchAccess(req, invoiceDoc, { allowLegacyNull: true });
     const invoice = invoiceDoc;
-
-    rejectFinancialInvoiceBodyFields(req.body);
 
     const isPaid = invoice.paymentStatus === 'RECEIVED';
     const isCreditClosed = invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt;
     const isLocked = isPaid || isCreditClosed;
+
+    if (isLocked && !isBusinessOwner(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the business owner can edit a closed invoice'
+      });
+    }
+
+    if (isLocked) {
+      rejectLockedFinancialBodyFields(req.body);
+    }
 
     if (req.body.items !== undefined) {
       if (isLocked) {
@@ -963,18 +940,10 @@ router.put('/invoices/:id', [
 
     applyInvoiceMetadataFields(invoice, req.body);
 
-    if (req.body.paymentMethod !== undefined) {
-      try {
-        if (isLocked) {
-          relabelLockedInvoicePaymentMethod(invoice, req.body.paymentMethod);
-        } else {
-          invoice.paymentMethod = req.body.paymentMethod;
-          normalizeInvoicePaymentFields(invoice, { paymentMethod: req.body.paymentMethod });
-        }
-      } catch (normErr) {
-        const status = normErr.status || 500;
-        return res.status(status).json({ success: false, message: normErr.message || 'Invalid payment method' });
-      }
+    if (!isLocked) {
+      await applyOpenInvoiceFinancialFields(invoice, req.body, req.businessId);
+    } else if (req.body.paymentMethod !== undefined) {
+      relabelLockedInvoicePaymentMethod(invoice, req.body.paymentMethod);
     }
 
     await invoice.save();
@@ -1035,10 +1004,11 @@ router.get('/invoices/:id/share-url', async (req, res) => {
 // PATCH /api/admin/invoices/:id/close-job - set payment received & close job (DELIVERED)
 router.patch('/invoices/:id/close-job', adminPanelOnly, async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId });
+    const invoice = await Invoice.findOne(scopedFilter(req, { _id: req.params.id, businessId: req.businessId }));
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    assertBranchAccess(req, invoice, { allowLegacyNull: true });
     if (invoice.paymentStatus === 'RECEIVED') {
       return res.json({ success: true, message: 'Job already closed' });
     }
@@ -1144,7 +1114,10 @@ router.patch('/invoices/:id/close-job', adminPanelOnly, async (req, res) => {
     }
   } catch (error) {
     console.error('Close job error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(error?.status || 500).json({
+      success: false,
+      message: error?.message || 'Server error'
+    });
   }
 });
 
@@ -3440,10 +3413,7 @@ router.delete('/services/:id', adminPanelOnly, async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/jobs/:id', async (req, res) => {
   try {
-    const filter = { _id: req.params.id, businessId: req.businessId };
-    if (req.user.role === 'EMPLOYEE') {
-      filter.assignedTo = req.user._id;
-    }
+    const filter = jobAccessFilter(req, { _id: req.params.id });
     const job = await Job.findOne(filter)
       .populate('customerId', 'name phone whatsappNumber')
       .populate('carId', 'carNumber brand model color')
@@ -3456,6 +3426,7 @@ router.get('/jobs/:id', async (req, res) => {
         message: 'Job not found'
       });
     }
+    assertBranchAccess(req, job, { allowLegacyNull: true });
 
     const invoiceForJob = await Invoice.findOne({ businessId: req.businessId, jobId: job._id })
       .select('finalAmount advancePayment paymentMethod paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber createdAt paymentReceivedAt')
@@ -3821,7 +3792,7 @@ router.post('/jobs', [
         // Create job
         job = await Job.create({
           businessId: req.businessId,
-          branchId: req.branchId,
+          branchId: req.branchId || null,
           customerId,
           ...(car?._id ? { carId: car._id } : {}),
           tokenNumber,
@@ -4005,11 +3976,8 @@ router.patch('/jobs/:id/status', [
 
     const { status, notes, afterImages } = req.body;
 
-    const jobFilter = { _id: req.params.id, businessId: req.businessId };
-    if (req.user.role === 'EMPLOYEE') {
-      jobFilter.assignedTo = req.user._id;
-    }
-    const job = await Job.findOne(jobFilter).populate('customerId', 'name whatsappNumber').populate('carId', 'carNumber');
+    const jobFilter = jobAccessFilter(req, { _id: req.params.id });
+    const job = await Job.findOne(jobFilter).populate('customerId', 'name whatsappNumber phone').populate('carId', 'carNumber');
 
     if (!job) {
       return res.status(404).json({
@@ -4017,6 +3985,7 @@ router.patch('/jobs/:id/status', [
         message: 'Job not found'
       });
     }
+    assertBranchAccess(req, job, { allowLegacyNull: true });
 
     // Validate status transition
     if (!isValidStatusTransition(job.status, status)) {
@@ -4050,20 +4019,31 @@ router.patch('/jobs/:id/status', [
           status: 'completed'
         }).select('_id').lean();
         if (!already) {
-          const pkg = await CustomerPackage.findOne({ _id: job.customerPackageId, businessId: req.businessId });
-          if (pkg && pkg.status === 'active' && pkg.visitsRemaining > 0 && (!pkg.expiryDate || new Date() <= new Date(pkg.expiryDate))) {
+          const now = new Date();
+          const decremented = await CustomerPackage.findOneAndUpdate(
+            {
+              _id: job.customerPackageId,
+              businessId: req.businessId,
+              status: 'active',
+              visitsRemaining: { $gt: 0 },
+              expiryDate: { $gte: now }
+            },
+            { $inc: { visitsUsed: 1, visitsRemaining: -1 } },
+            { new: true }
+          );
+          if (decremented) {
+            if (decremented.visitsRemaining === 0) {
+              await CustomerPackage.updateOne({ _id: decremented._id }, { $set: { status: 'completed' } });
+            }
             await PackageVisit.create({
               businessId: req.businessId,
-              customerPackageId: pkg._id,
+              branchId: job.branchId || req.branchId || null,
+              customerPackageId: decremented._id,
               bookingId: job._id,
-              date: new Date(),
+              date: now,
               status: 'completed',
               notes: `Auto from job ${job.tokenNumber}`
             });
-            pkg.visitsUsed = Number(pkg.visitsUsed || 0) + 1;
-            pkg.visitsRemaining = Math.max(0, Number(pkg.visitsRemaining || 0) - 1);
-            if (pkg.visitsRemaining === 0) pkg.status = 'completed';
-            await pkg.save();
           }
         }
       } catch (pkgErr) {
@@ -4080,13 +4060,13 @@ router.patch('/jobs/:id/status', [
         ]
       });
 
-      if (template) {
+      if (template && job.customerId?.whatsappNumber) {
         const message = formatTemplate(template.template, {
-          customerName: job.customerId.name,
-          carNumber: job.carId.carNumber,
+          customerName: job.customerId?.name || 'Customer',
+          carNumber: job.carId?.carNumber || '—',
           tokenNumber: job.tokenNumber,
           status,
-          totalPrice: job.totalPrice.toString()
+          totalPrice: String(job.totalPrice ?? 0)
         });
 
         await sendWhatsAppMessage(
@@ -4119,9 +4099,9 @@ router.patch('/jobs/:id/status', [
     });
   } catch (error) {
     console.error('Update job status error:', error);
-    res.status(500).json({
+    res.status(error?.status || 500).json({
       success: false,
-      message: 'Server error'
+      message: error?.message || 'Server error'
     });
   }
 });
@@ -4143,15 +4123,11 @@ router.put('/jobs/:id', [
       return res.status(400).json({ success: false, message: firstMsg, errors: errList });
     }
 
-    const jobFilter = { _id: req.params.id, businessId: req.businessId };
-    if (req.user.role === 'EMPLOYEE') {
-      jobFilter.assignedTo = req.user._id;
-    }
-
-    const job = await Job.findOne(jobFilter);
+    const job = await Job.findOne(jobAccessFilter(req, { _id: req.params.id }));
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found' });
     }
+    assertBranchAccess(req, job, { allowLegacyNull: true });
 
     if (job.status === 'DELIVERED' || job.status === 'CANCELLED') {
       return res.status(400).json({
@@ -4225,7 +4201,7 @@ router.put('/jobs/:id', [
     res.json({ success: true, job });
   } catch (error) {
     console.error('Edit job error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(error?.status || 500).json({ success: false, message: error?.message || 'Server error' });
   }
 });
 
@@ -4241,10 +4217,11 @@ router.delete('/jobs/:id', async (req, res) => {
       });
     }
 
-    const job = await Job.findOne({ _id: req.params.id, businessId: req.businessId });
+    const job = await Job.findOne(jobAccessFilter(req, { _id: req.params.id }));
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found' });
     }
+    assertBranchAccess(req, job, { allowLegacyNull: true });
 
     if (job.status === 'DELIVERED') {
       return res.status(400).json({
@@ -4267,7 +4244,7 @@ router.delete('/jobs/:id', async (req, res) => {
     res.json({ success: true, message: 'Job deleted successfully' });
   } catch (error) {
     console.error('Delete job error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(error?.status || 500).json({ success: false, message: error?.message || 'Server error' });
   }
 });
 

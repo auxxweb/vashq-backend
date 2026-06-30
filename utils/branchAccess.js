@@ -7,6 +7,15 @@ export function scopedFilter(req, extra = {}) {
   return { ...branchFilter(req), ...extra };
 }
 
+/** Job lookup with branch scope + optional employee assignment filter. */
+export function jobAccessFilter(req, extra = {}) {
+  const filter = { ...scopedFilter(req, extra) };
+  if (req.user?.role === 'EMPLOYEE') {
+    filter.assignedTo = req.user._id;
+  }
+  return filter;
+}
+
 export { applyBranchScope, applyBranchScopeOid };
 
 /**
@@ -29,9 +38,14 @@ export function assertBranchAccess(req, doc, { allowLegacyNull = false } = {}) {
   }
 }
 
+/** Find one document with branch scope enforced on the query (returns a Mongoose Query for chaining). */
+export function scopedFindOne(model, req, filter = {}) {
+  return model.findOne(scopedFilter(req, filter));
+}
+
 /** Find one document with branch scope enforced on the query. */
 export async function findScoped(model, req, filter = {}) {
-  return model.findOne(scopedFilter(req, filter));
+  return scopedFindOne(model, req, filter);
 }
 
 /** Customer IDs belonging to the active branch (for indirect filters). */

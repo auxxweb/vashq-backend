@@ -154,9 +154,16 @@ export async function resolveBranchContext(req, res, next) {
   }
 }
 
-/** Mongo filter for branch-scoped queries. */
+/** Mongo filter for branch-scoped queries. Includes legacy docs without branchId when scoped to a branch. */
 export function branchFilter(req) {
   const base = { businessId: req.businessId };
   if (req.branchScope === 'all' || !req.branchId) return base;
-  return { ...base, branchId: req.branchId };
+  return {
+    ...base,
+    $or: [
+      { branchId: req.branchId },
+      { branchId: null },
+      { branchId: { $exists: false } }
+    ]
+  };
 }
