@@ -5,6 +5,8 @@ import Job from './models/Job.model.js';
 import CustomerPackage from './models/CustomerPackage.model.js';
 import PackageVisit from './models/PackageVisit.model.js';
 import ShopSubscription from './models/ShopSubscription.model.js';
+import Branch from './models/Branch.model.js';
+import BranchSubscription from './models/BranchSubscription.model.js';
 import OwnerTask from './models/OwnerTask.model.js';
 import { sendPushNotification } from './services/notificationService.js';
 
@@ -160,6 +162,25 @@ async function runOwnerTaskReminders() {
   }
 }
 
+async function runBranchSubscriptionExpiry() {
+  if (mongoose.connection.readyState !== 1) return;
+  const now = new Date();
+  const expired = await BranchSubscription.find({
+    status: 'ACTIVE',
+    expiryDate: { $lt: now }
+  }).select('branchId businessId').lean();
+  if (!expired.length) return;
+  const branchIds = expired.map((s) => s.branchId);
+  await BranchSubscription.updateMany(
+    { branchId: { $in: branchIds }, status: 'ACTIVE' },
+    { $set: { status: 'EXPIRED' } }
+  );
+  await Branch.updateMany(
+    { _id: { $in: branchIds }, isDefault: { $ne: true } },
+    { $set: { status: 'EXPIRED' } }
+  );
+}
+
 export function startCronJobs() {
   // DAILY 9 AM local business timezone (default Asia/Kolkata; override with CRON_TZ if needed)
   const tz = process.env.CRON_TZ || 'Asia/Kolkata';
@@ -170,6 +191,11 @@ export function startCronJobs() {
   // Every 5 minutes: owner task reminders (1 hour before endAt)
   cron.schedule('*/5 * * * *', () => {
     runOwnerTaskReminders().catch((e) => console.error('Task reminder cron error:', e));
+  }, { timezone: tz });
+
+  // Daily midnight: expire branch licenses past expiryDate
+  cron.schedule('0 0 * * *', () => {
+    runBranchSubscriptionExpiry().catch((e) => console.error('Branch expiry cron error:', e));
   }, { timezone: tz });
 }
 

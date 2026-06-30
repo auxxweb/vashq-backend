@@ -13,6 +13,7 @@ const serviceRemainingSchema = new mongoose.Schema({
 
 const customerPackageSchema = new mongoose.Schema({
   businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, index: true },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null, index: true },
   customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },
 
   // Template reference for traceability only (do not depend on it after purchase)

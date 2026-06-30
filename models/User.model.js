@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
+import { invalidateUserAuthCache } from '../utils/authCache.js';
 
 const userSchema = new mongoose.Schema({
   email: {
@@ -17,7 +18,7 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['SUPER_ADMIN', 'CAR_WASH_ADMIN', 'EMPLOYEE'],
+    enum: ['SUPER_ADMIN', 'CAR_WASH_ADMIN', 'BRANCH_ADMIN', 'EMPLOYEE'],
     required: true
   },
   status: {
@@ -38,6 +39,12 @@ const userSchema = new mongoose.Schema({
   // Firebase Cloud Messaging tokens for push notifications (BUSINESS OWNERS ONLY).
   // Do NOT store tokens for customers (customers do not log into the app).
   fcmTokens: { type: [String], default: [] },
+  /** Primary branch for employees / branch managers. */
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null
+  },
   lastLoginAt: {
     type: Date
   }
@@ -58,5 +65,13 @@ userSchema.pre('save', async function(next) {
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
+
+userSchema.post('save', function(doc) {
+  invalidateUserAuthCache(doc._id);
+});
+
+userSchema.post('findOneAndUpdate', function(doc) {
+  if (doc?._id) invalidateUserAuthCache(doc._id);
+});
 
 export default mongoose.model('User', userSchema);

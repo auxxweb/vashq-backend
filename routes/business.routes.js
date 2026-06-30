@@ -17,8 +17,8 @@ router.post('/save-token', [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
-    if (req.user.role !== 'CAR_WASH_ADMIN' && req.user.role !== 'EMPLOYEE') {
-      return res.status(403).json({ success: false, message: 'Only business owners and employees can register push tokens' });
+    if (!['CAR_WASH_ADMIN', 'BRANCH_ADMIN', 'EMPLOYEE'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only admins and employees can register push tokens' });
     }
 
     const token = String(req.body.fcmToken).trim();
@@ -51,8 +51,8 @@ router.post('/remove-token', [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
-    if (req.user.role !== 'CAR_WASH_ADMIN' && req.user.role !== 'EMPLOYEE') {
-      return res.status(403).json({ success: false, message: 'Only business owners and employees can manage push tokens' });
+    if (!['CAR_WASH_ADMIN', 'BRANCH_ADMIN', 'EMPLOYEE'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only admins and employees can manage push tokens' });
     }
     const token = req.body.fcmToken ? String(req.body.fcmToken).trim() : '';
     if (token) {
@@ -71,8 +71,8 @@ router.post('/remove-token', [
 // Returns: { enabled: boolean, tokenCount: number }
 router.get('/push-status', async (req, res) => {
   try {
-    if (req.user.role !== 'CAR_WASH_ADMIN' && req.user.role !== 'EMPLOYEE') {
-      return res.status(403).json({ success: false, message: 'Only business owners and employees' });
+    if (!['CAR_WASH_ADMIN', 'BRANCH_ADMIN', 'EMPLOYEE'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only admins and employees' });
     }
     const u = await User.findOne({ _id: req.user._id }).select('fcmTokens').lean();
     const count = Array.isArray(u?.fcmTokens) ? u.fcmTokens.filter(Boolean).length : 0;

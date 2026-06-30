@@ -10,15 +10,37 @@ import {
   updateBookingStatus,
   rescheduleBooking,
   convertBookingToJob,
+  getBookingConvertJobContext,
   getBookingStats,
   createAdminBooking
 } from '../services/bookingService.js';
+import { sendBookingErrorResponse } from '../utils/bookingErrors.js';
+import { resolveFrontendBaseUrl } from '../utils/frontendUrl.js';
 import {
   buildBookingWhatsAppMessage,
   parseBookingDate,
   getBookingSettings,
   getSlotAvailabilityForDate
 } from '../utils/booking.utils.js';
+import { parseBusinessDateRange } from '../utils/businessDateRange.js';
+import { bookingSearchOrClauses } from '../utils/searchUtils.js';
+
+import { resolveBranchContext, branchFilter } from '../middleware/branchContext.middleware.js';
+import { requireBusinessModule } from '../middleware/businessModules.middleware.js';
+import { scopedFilter, assertBranchAccess } from '../utils/branchAccess.js';
+import { enforceActiveSubscription } from '../middleware/subscription.middleware.js';
+import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
+
+async function findBookingScoped(req, id) {
+  const booking = await Booking.findOne(scopedFilter(req, { _id: id }))
+    .populate('slotId')
+    .populate('serviceIds', 'name price')
+    .populate('customerId', 'name phone whatsappNumber address')
+    .populate('carId', 'carNumber brand model vehicleType')
+    .populate('jobId', 'tokenNumber status');
+  if (booking) assertBranchAccess(req, booking);
+  return booking;
+}
 
 const router = express.Router();
 
@@ -30,6 +52,9 @@ router.use((req, res, next) => {
   req.businessId = req.user.businessId;
   next();
 });
+router.use(resolveBranchContext);
+router.use(requireBusinessModule('bookings'));
+router.use(enforceActiveSubscription());
 
 function validate(req, res) {
   const errors = validationResult(req);
@@ -45,11 +70,13 @@ router.get('/link-info', async (req, res) => {
   try {
     const business = await Business.findById(req.businessId).select('businessName logo').lean();
     if (!business) return res.status(404).json({ success: false, message: 'Business not found' });
+    const baseUrl = resolveFrontendBaseUrl(req, { customerFacing: true });
     res.json({
       success: true,
       businessId: String(req.businessId),
       businessName: business.businessName,
-      logo: business.logo || null
+      logo: business.logo || null,
+      bookingUrl: `${baseUrl}/book/${req.businessId}`
     });
   } catch (e) {
     console.error('Booking link info error:', e);
@@ -60,8 +87,25 @@ router.get('/link-info', async (req, res) => {
 // ---------- Stats ----------
 router.get('/stats', async (req, res) => {
   try {
-    const stats = await getBookingStats(req.businessId);
-    res.json({ success: true, stats });
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
+    const range = String(req.query.range || 'today').toLowerCase();
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
+    let bounds;
+    try {
+      bounds = parseBusinessDateRange(settings?.timezone, range, fromQ, toQ);
+    } catch (boundsErr) {
+      if (boundsErr.statusCode === 400) {
+        return res.status(400).json({ success: false, message: boundsErr.message });
+      }
+      throw boundsErr;
+    }
+    const stats = await getBookingStats(req.businessId, {
+      startUtc: bounds.startUtc,
+      endUtc: bounds.endUtc,
+      branchId: req.branchScope === 'branch' ? req.branchId : null
+    });
+    res.json({ success: true, stats, rangeLabel: bounds.rangeLabel });
   } catch (e) {
     console.error('Booking stats error:', e);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -78,7 +122,7 @@ router.get('/slots', async (req, res) => {
   }
 });
 
-router.post('/slots', [
+router.post('/slots', adminPanelOnly, [
   body('name').notEmpty().trim(),
   body('startTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
   body('endTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
@@ -102,8 +146,22 @@ router.post('/slots', [
   }
 });
 
-router.put('/slots/:id', async (req, res) => {
+router.put('/slots/:id', adminPanelOnly, [
+  body('name').optional().notEmpty().trim(),
+  body('startTime').optional().matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
+  body('endTime').optional().matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
+  body('capacity').optional().isInt({ min: 1, max: 50 }),
+  body('isEnabled').optional().isBoolean(),
+  body('sortOrder').optional().isInt({ min: 0 })
+], async (req, res) => {
   try {
+    if (!validate(req, res)) return;
+
+    const { startTime, endTime } = req.body;
+    if (startTime && endTime && startTime >= endTime) {
+      return res.status(400).json({ success: false, message: 'End time must be after start time' });
+    }
+
     const slot = await BookingSlot.findOneAndUpdate(
       { _id: req.params.id, businessId: req.businessId },
       {
@@ -123,7 +181,7 @@ router.put('/slots/:id', async (req, res) => {
   }
 });
 
-router.delete('/slots/:id', async (req, res) => {
+router.delete('/slots/:id', adminPanelOnly, async (req, res) => {
   try {
     const activeBookings = await Booking.countDocuments({
       businessId: req.businessId,
@@ -156,7 +214,7 @@ router.get('/calendar', [
       : from;
 
     const bookings = await Booking.find({
-      businessId: req.businessId,
+      ...branchFilter(req),
       bookingDate: { $gte: from, $lte: to }
     })
       .populate('slotId', 'name startTime endTime capacity')
@@ -188,7 +246,7 @@ router.get('/availability', async (req, res) => {
 });
 
 // ---------- Create booking (shop admin / walk-in) ----------
-router.post('/', [
+router.post('/', adminPanelOnly, [
   body('slotId').notEmpty().withMessage('Time slot is required'),
   body('bookingDate').notEmpty().withMessage('Booking date is required'),
   body('serviceIds').isArray({ min: 1 }).withMessage('Select at least one service'),
@@ -206,25 +264,32 @@ router.post('/', [
     if (!req.body.customerId && (!req.body.customerName || !req.body.customerPhone)) {
       return res.status(400).json({ success: false, message: 'Customer name and phone are required' });
     }
-    const booking = await createAdminBooking(req.businessId, req.body);
+    if (!req.branchId) {
+      return res.status(400).json({ success: false, message: 'Select an active branch before creating a booking' });
+    }
+    const booking = await createAdminBooking(req.businessId, req.body, req.branchId);
     const populated = await Booking.findById(booking._id)
       .populate('slotId', 'name startTime endTime')
       .populate('serviceIds', 'name price')
       .lean();
     res.status(201).json({ success: true, booking: populated });
   } catch (e) {
-    res.status(400).json({ success: false, message: e.message || 'Could not create booking' });
+    sendBookingErrorResponse(e, res, 'Could not create booking');
   }
 });
 
 // ---------- Bookings list & detail ----------
 router.get('/', async (req, res) => {
   try {
-    const filter = { businessId: req.businessId };
+    const filter = { ...branchFilter(req) };
     if (req.query.status) filter.status = String(req.query.status).toUpperCase();
     if (req.query.date) {
       const settings = await getBookingSettings(req.businessId);
       filter.bookingDate = parseBookingDate(String(req.query.date).slice(0, 10), settings.timezone);
+    }
+    if (req.query.search && typeof req.query.search === 'string' && req.query.search.trim()) {
+      const orClauses = bookingSearchOrClauses(req.query.search);
+      if (orClauses.length) filter.$or = orClauses;
     }
 
     const bookings = await Booking.find(filter)
@@ -242,24 +307,21 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const booking = await Booking.findOne({ _id: req.params.id, businessId: req.businessId })
-      .populate('slotId')
-      .populate('serviceIds', 'name price')
-      .populate('customerId', 'name phone whatsappNumber address')
-      .populate('carId', 'carNumber brand model vehicleType')
-      .populate('jobId', 'tokenNumber status')
-      .lean();
+    const booking = await findBookingScoped(req, req.params.id);
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-    res.json({ success: true, booking });
+    res.json({ success: true, booking: booking.toObject ? booking.toObject() : booking });
   } catch (e) {
+    if (e.status === 404) return res.status(404).json({ success: false, message: 'Booking not found' });
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 router.get('/:id/whatsapp-message', async (req, res) => {
   try {
+    const type = String(req.query.type || 'confirmed').toLowerCase();
     const booking = await Booking.findOne({ _id: req.params.id, businessId: req.businessId })
       .populate('slotId')
+      .populate('serviceIds', 'name')
       .lean();
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
 
@@ -272,15 +334,16 @@ router.get('/:id/whatsapp-message', async (req, res) => {
       booking,
       businessName: business?.businessName,
       slot: booking.slotId,
-      settings
+      settings,
+      type
     });
-    res.json({ success: true, message, phone: booking.customerPhone });
+    res.json({ success: true, message, phone: booking.customerPhone, type });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-router.patch('/:id/confirm', async (req, res) => {
+router.patch('/:id/confirm', adminPanelOnly, async (req, res) => {
   try {
     const booking = await updateBookingStatus(req.businessId, req.params.id, 'CONFIRMED');
     res.json({ success: true, booking });
@@ -289,7 +352,7 @@ router.patch('/:id/confirm', async (req, res) => {
   }
 });
 
-router.patch('/:id/reject', async (req, res) => {
+router.patch('/:id/reject', adminPanelOnly, async (req, res) => {
   try {
     const booking = await updateBookingStatus(req.businessId, req.params.id, 'REJECTED');
     res.json({ success: true, booking });
@@ -298,7 +361,7 @@ router.patch('/:id/reject', async (req, res) => {
   }
 });
 
-router.patch('/:id/cancel', async (req, res) => {
+router.patch('/:id/cancel', adminPanelOnly, async (req, res) => {
   try {
     const booking = await updateBookingStatus(req.businessId, req.params.id, 'CANCELLED');
     res.json({ success: true, booking });
@@ -307,7 +370,7 @@ router.patch('/:id/cancel', async (req, res) => {
   }
 });
 
-router.patch('/:id/reschedule', [
+router.patch('/:id/reschedule', adminPanelOnly, [
   body('bookingDate').isISO8601(),
   body('slotId').notEmpty()
 ], async (req, res) => {
@@ -323,17 +386,34 @@ router.patch('/:id/reschedule', [
   }
 });
 
-router.post('/:id/convert-job', async (req, res) => {
+router.post('/:id/convert-job', adminPanelOnly, [
+  body('carId').optional().isMongoId(),
+  body('vehicleNumber').optional().trim(),
+  body('vehicleBrand').optional().trim(),
+  body('vehicleModel').optional().trim(),
+  body('vehicleType').optional().trim()
+], async (req, res) => {
   try {
+    if (!validate(req, res)) return;
     const { booking, job } = await convertBookingToJob(
       req.businessId,
       req.params.id,
       req.user._id,
-      req.user.role
+      req.user.role,
+      req.body
     );
     res.status(201).json({ success: true, booking, job });
   } catch (e) {
     res.status(400).json({ success: false, message: e.message || 'Failed to create job' });
+  }
+});
+
+router.get('/:id/convert-job-context', async (req, res) => {
+  try {
+    const context = await getBookingConvertJobContext(req.businessId, req.params.id);
+    res.json({ success: true, ...context });
+  } catch (e) {
+    res.status(400).json({ success: false, message: e.message || 'Could not load job details' });
   }
 });
 

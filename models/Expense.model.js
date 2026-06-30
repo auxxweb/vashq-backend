@@ -6,6 +6,12 @@ const expenseSchema = new mongoose.Schema({
     ref: 'Business',
     required: true
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null,
+    index: true
+  },
   expenseTypeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'ExpenseType',

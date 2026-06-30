@@ -1,6 +1,10 @@
 import express from 'express';
 import { body, validationResult } from 'express-validator';
 import { authenticate } from '../middleware/auth.middleware.js';
+import { resolveBranchContext } from '../middleware/branchContext.middleware.js';
+import { requireBusinessModule } from '../middleware/businessModules.middleware.js';
+import { enforceActiveSubscription } from '../middleware/subscription.middleware.js';
+import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
 import {
   createTemplate,
   updateTemplate,
@@ -29,10 +33,13 @@ router.use((req, res, next) => {
   req.businessId = req.user.businessId;
   next();
 });
+router.use(resolveBranchContext);
+router.use(requireBusinessModule('packages'));
+router.use(enforceActiveSubscription());
 
-// Template CRUD
+// Template CRUD (admin only)
 router.get('/templates', listTemplates);
-router.post('/template', [
+router.post('/template', adminPanelOnly, [
   body('name').notEmpty().trim(),
   body('price').isFloat({ min: 0 }),
   body('totalVisits').isInt({ min: 1 }),
@@ -45,7 +52,7 @@ router.post('/template', [
   next();
 }, createTemplate);
 
-router.put('/template/:id', [
+router.put('/template/:id', adminPanelOnly, [
   body('name').optional().trim(),
   body('price').optional().isFloat({ min: 0 }),
   body('totalVisits').optional().isInt({ min: 1 }),
@@ -59,10 +66,10 @@ router.put('/template/:id', [
   next();
 }, updateTemplate);
 
-router.delete('/template/:id', softDeleteTemplate);
+router.delete('/template/:id', adminPanelOnly, softDeleteTemplate);
 
-// Purchase
-router.post('/purchase', [
+// Purchase (admin only)
+router.post('/purchase', adminPanelOnly, [
   body('templateId').notEmpty().isMongoId(),
   body('customerId').notEmpty().isMongoId(),
   body('carId').optional({ checkFalsy: true }).isMongoId()
@@ -76,10 +83,10 @@ router.post('/purchase', [
 router.get('/customer/:customerId', getCustomerPackages);
 router.get('/customer-packages', listCustomerPackages); // filters: status, remaining=true
 router.get('/customer-package/:id', getCustomerPackageDetail);
-router.put('/customer/:id/close', closeCustomerPackage);
-router.patch('/customer-package/:id/close-sale', closePackageSale);
+router.put('/customer/:id/close', adminPanelOnly, closeCustomerPackage);
+router.patch('/customer-package/:id/close-sale', adminPanelOnly, closePackageSale);
 
-// Visits
+// Visits — employees may complete/schedule operational visits
 router.get('/visits/:customerPackageId', listVisits);
 router.get('/scheduled-visits', listScheduledVisits); // query: days=30, includeOverdue=true
 router.post('/visit/schedule', [
@@ -116,4 +123,3 @@ router.post('/visit/complete', [
 }, completeVisit);
 
 export default router;
-

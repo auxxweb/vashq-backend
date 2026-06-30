@@ -6,6 +6,12 @@ const whatsAppMessageSchema = new mongoose.Schema({
     ref: 'Business',
     required: true
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null,
+    index: true
+  },
   jobId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Job',

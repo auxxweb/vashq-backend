@@ -19,7 +19,7 @@ const aiInsightSchema = new mongoose.Schema({
   },
   insightType: {
     type: String,
-    enum: ['quick', 'deep', 'consultant'],
+    enum: ['quick', 'deep', 'consultant', 'qa'],
     required: true
   },
   timeRange: { type: String, trim: true },

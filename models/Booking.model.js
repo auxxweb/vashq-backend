@@ -10,6 +10,12 @@ const bookingSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null,
+    index: true
+  },
   customerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer',
@@ -18,7 +24,7 @@ const bookingSchema = new mongoose.Schema({
   carId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Car',
-    required: true
+    default: null
   },
   serviceIds: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -55,7 +61,7 @@ const bookingSchema = new mongoose.Schema({
   pickupNotes: { type: String, trim: true },
   customerName: { type: String, required: true, trim: true },
   customerPhone: { type: String, required: true, trim: true },
-  vehicleNumber: { type: String, required: true, trim: true },
+  vehicleNumber: { type: String, trim: true },
   vehicleBrand: { type: String, trim: true },
   vehicleModel: { type: String, trim: true },
   vehicleType: { type: String, trim: true },

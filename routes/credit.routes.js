@@ -5,6 +5,7 @@ import Invoice from '../models/Invoice.model.js';
 import PaymentCollection from '../models/PaymentCollection.model.js';
 import CreditLedgerEvent from '../models/CreditLedgerEvent.model.js';
 import Customer from '../models/Customer.model.js';
+import { requireBusinessModule } from '../middleware/businessModules.middleware.js';
 import { recordCollection, sumCustomerOutstanding } from '../services/credit/collectionService.js';
 import {
   computeOutstanding,
@@ -13,6 +14,8 @@ import {
 } from '../services/credit/outstandingService.js';
 
 const router = express.Router();
+
+router.use(requireBusinessModule('credit'));
 
 const EPS = 0.02;
 

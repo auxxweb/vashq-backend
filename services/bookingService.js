@@ -9,6 +9,7 @@ import Service from '../models/Service.model.js';
 import Job from '../models/Job.model.js';
 import User from '../models/User.model.js';
 import { generateTokenNumber, calculateETA, canAcceptNewJob } from '../utils/job.utils.js';
+import { resolveJobServiceLines } from '../utils/jobServiceLines.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
 import { sendPushNotification } from './notificationService.js';
 import {
@@ -18,6 +19,7 @@ import {
   getBookingSettings,
   isDateAllowedForBooking
 } from '../utils/booking.utils.js';
+import { applyCreatedAtRange } from '../utils/businessDateRange.js';
 import { findOrCreateCustomer, normalizePhone } from '../utils/customer.utils.js';
 
 async function findOrCreateCar(businessId, customerId, vehicle) {
@@ -70,17 +72,18 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
     throw new Error('Address is required for pickup & drop');
   }
 
+  const vehicleNumber = String(payload.vehicleNumber || '').trim();
+  const hasVehicle = !!vehicleNumber;
+
   if (payload.customerId) {
     const customer = await Customer.findOne({ _id: payload.customerId, businessId });
     if (!customer) throw new Error('Customer not found');
 
-    let car;
+    let car = null;
     if (payload.carId) {
       car = await Car.findOne({ _id: payload.carId, businessId, customerId: customer._id });
       if (!car) throw new Error('Vehicle not found for this customer');
-    } else {
-      const vehicleNumber = String(payload.vehicleNumber || '').trim();
-      if (!vehicleNumber) throw new Error('Vehicle number is required');
+    } else if (hasVehicle) {
       car = await findOrCreateCar(businessId, customer._id, payload);
     }
 
@@ -96,16 +99,17 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
   if (!String(payload.customerName || '').trim() || !String(payload.customerPhone || '').trim()) {
     throw new Error('Customer name and phone are required');
   }
-  if (!String(payload.vehicleNumber || '').trim()) {
-    throw new Error('Vehicle number is required');
-  }
 
   const customer = await findOrCreateCustomer(businessId, {
     name: payload.customerName,
     phone: payload.customerPhone,
     address: pickupAddress || undefined
   });
-  const car = await findOrCreateCar(businessId, customer._id, payload);
+
+  let car = null;
+  if (hasVehicle) {
+    car = await findOrCreateCar(businessId, customer._id, payload);
+  }
 
   return {
     customer,
@@ -116,7 +120,7 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
   };
 }
 
-async function createBookingRecord(businessId, payload, { status = 'PENDING', slotOpts = {} } = {}) {
+async function createBookingRecord(businessId, payload, { status = 'PENDING', slotOpts = {}, branchId = null } = {}) {
   const { slot, bookingDate, bayNumber } = await validateSlotBooking(
     businessId,
     payload.slotId,
@@ -125,16 +129,24 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
     slotOpts
   );
 
-  const serviceIds = Array.isArray(payload.serviceIds) ? payload.serviceIds : [];
-  if (!serviceIds.length) throw new Error('Select at least one service');
+  const rawServiceIds = Array.isArray(payload.serviceIds) ? payload.serviceIds : [];
+  const uniqueServiceIds = [...new Set(rawServiceIds.map(String))];
+  if (!uniqueServiceIds.length) throw new Error('Select at least one service');
 
   const services = await Service.find({
-    _id: { $in: serviceIds },
+    _id: { $in: uniqueServiceIds },
     businessId,
     isActive: { $ne: false }
   }).lean();
-  if (services.length !== serviceIds.length) {
+  if (services.length !== uniqueServiceIds.length) {
     throw new Error('One or more selected services are not available');
+  }
+
+  const variableServices = services.filter((s) => s.isVariable);
+  if (variableServices.length) {
+    throw new Error(
+      `Variable-price services cannot be booked online (${variableServices.map((s) => s.name).join(', ')}). Add them when creating the job instead.`
+    );
   }
 
   const { customer, car, pickupAddress, customerName, customerPhone } = await resolveBookingCustomerAndCar(
@@ -142,13 +154,15 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
     payload
   );
 
+  const vehicleNumberRaw = String(payload.vehicleNumber || '').trim().toUpperCase();
   const now = new Date();
   let booking;
   try {
     booking = await Booking.create({
       businessId,
+      branchId: branchId || undefined,
       customerId: customer._id,
-      carId: car._id,
+      carId: car?._id || undefined,
       serviceIds: services.map((s) => s._id),
       bookingDate,
       slotId: slot._id,
@@ -161,10 +175,10 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
       pickupNotes: payload.pickupNotes || undefined,
       customerName,
       customerPhone,
-      vehicleNumber: String(payload.vehicleNumber || car.carNumber).trim().toUpperCase(),
-      vehicleBrand: payload.vehicleBrand || car.brand,
-      vehicleModel: payload.vehicleModel || car.model,
-      vehicleType: payload.vehicleType || car.vehicleType,
+      vehicleNumber: car?.carNumber || vehicleNumberRaw || undefined,
+      vehicleBrand: payload.vehicleBrand || car?.brand,
+      vehicleModel: payload.vehicleModel || car?.model,
+      vehicleType: payload.vehicleType || car?.vehicleType,
       notes: payload.notes || undefined
     });
   } catch (err) {
@@ -179,8 +193,12 @@ export async function createPublicBooking(businessId, payload) {
   const business = await Business.findOne({ _id: businessId, status: 'ACTIVE' }).lean();
   if (!business) throw new Error('Business not found');
 
+  const { ensureDefaultBranchForBusiness } = await import('./branchService.js');
+  const defaultBranch = await ensureDefaultBranchForBusiness(businessId);
+
   const { booking, slot, payloadDate } = await createBookingRecord(businessId, payload, {
-    status: 'PENDING'
+    status: 'PENDING',
+    branchId: defaultBranch?._id || null
   });
 
   await notifyOwner(businessId, {
@@ -210,11 +228,12 @@ export async function createPublicBooking(businessId, payload) {
   return booking;
 }
 
-export async function createAdminBooking(businessId, payload) {
+export async function createAdminBooking(businessId, payload, branchId = null) {
   const autoConfirm = payload.autoConfirm !== false;
   const { booking } = await createBookingRecord(businessId, payload, {
     status: autoConfirm ? 'CONFIRMED' : 'PENDING',
-    slotOpts: ADMIN_BOOKING_OPTS
+    slotOpts: ADMIN_BOOKING_OPTS,
+    branchId
   });
   return booking;
 }
@@ -293,27 +312,138 @@ export async function rescheduleBooking(businessId, bookingId, { bookingDate: da
   return booking;
 }
 
-export async function convertBookingToJob(businessId, bookingId, userId, userRole) {
+async function resolveCarForJobConversion(businessId, booking, payload = {}) {
+  if (payload.carId) {
+    const selected = await Car.findOne({
+      _id: payload.carId,
+      businessId,
+      customerId: booking.customerId
+    });
+    if (!selected) throw new Error('Vehicle not found for this customer');
+    booking.carId = selected._id;
+    booking.vehicleNumber = selected.carNumber;
+    if (!booking.vehicleBrand && selected.brand) booking.vehicleBrand = selected.brand;
+    if (!booking.vehicleModel && selected.model) booking.vehicleModel = selected.model;
+    if (!booking.vehicleType && selected.vehicleType) booking.vehicleType = selected.vehicleType;
+    return selected;
+  }
+
+  if (booking.carId) {
+    const existing = await Car.findOne({ _id: booking.carId, businessId, customerId: booking.customerId });
+    if (existing) return existing;
+  }
+
+  const vehicleNumber = String(
+    payload.vehicleNumber || booking.vehicleNumber || ''
+  ).trim();
+
+  if (!vehicleNumber) {
+    const err = new Error('Vehicle number is required to create a job');
+    err.code = 'VEHICLE_REQUIRED';
+    throw err;
+  }
+
+  const car = await findOrCreateCar(businessId, booking.customerId, {
+    vehicleNumber,
+    vehicleBrand: payload.vehicleBrand || booking.vehicleBrand,
+    vehicleModel: payload.vehicleModel || booking.vehicleModel,
+    vehicleType: payload.vehicleType || booking.vehicleType
+  });
+
+  booking.carId = car._id;
+  booking.vehicleNumber = car.carNumber;
+  if (!booking.vehicleBrand && car.brand) booking.vehicleBrand = car.brand;
+  if (!booking.vehicleModel && car.model) booking.vehicleModel = car.model;
+  if (!booking.vehicleType && car.vehicleType) booking.vehicleType = car.vehicleType;
+
+  return car;
+}
+
+/** Cars + auto-select hint for booking → job conversion UI. */
+export async function getBookingConvertJobContext(businessId, bookingId) {
+  const booking = await Booking.findOne({ _id: bookingId, businessId }).lean();
+  if (!booking) throw new Error('Booking not found');
+  if (booking.status !== 'CONFIRMED') throw new Error('Only confirmed bookings can be converted to a job');
+  if (booking.jobId) throw new Error('This booking already has a job');
+
+  const cars = await Car.find({ businessId, customerId: booking.customerId })
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  const bookingVehicle = String(booking.vehicleNumber || '').trim().toUpperCase();
+  const hasBookingVehicle = !!(booking.carId || bookingVehicle);
+
+  let matchedCarId = null;
+  if (booking.carId) {
+    matchedCarId = String(booking.carId);
+  } else if (bookingVehicle) {
+    const match = cars.find((c) => String(c.carNumber || '').trim().toUpperCase() === bookingVehicle);
+    if (match) matchedCarId = String(match._id);
+  } else if (cars.length === 1) {
+    matchedCarId = String(cars[0]._id);
+  }
+
+  let autoCarId = null;
+  if (booking.carId) {
+    autoCarId = String(booking.carId);
+  } else if (hasBookingVehicle) {
+    if (matchedCarId) autoCarId = matchedCarId;
+    else if (cars.length === 1) autoCarId = String(cars[0]._id);
+  }
+
+  const requireCarPicker = !autoCarId && cars.length > 0;
+
+  return {
+    customerId: booking.customerId,
+    cars,
+    matchedCarId,
+    autoCarId,
+    requireCarPicker,
+    hasBookingVehicle,
+    vehicleNumber: booking.vehicleNumber || '',
+    vehicleBrand: booking.vehicleBrand || '',
+    vehicleModel: booking.vehicleModel || '',
+    vehicleType: booking.vehicleType || ''
+  };
+}
+
+export async function convertBookingToJob(businessId, bookingId, userId, userRole, payload = {}) {
   const booking = await Booking.findOne({ _id: bookingId, businessId });
   if (!booking) throw new Error('Booking not found');
   if (booking.status !== 'CONFIRMED') throw new Error('Only confirmed bookings can be converted to a job');
-  if (booking.jobId) throw new Error('Job already created for this booking');
-
-  const capacityCheck = await canAcceptNewJob(businessId);
-  if (!capacityCheck.canAccept) throw new Error(capacityCheck.reason);
-
-  const servicesFound = await Service.find({
-    _id: { $in: booking.serviceIds },
-    businessId,
-    isActive: { $ne: false }
-  });
-  if (servicesFound.length !== booking.serviceIds.length) {
-    throw new Error('One or more services are no longer available');
+  if (booking.jobId) {
+    const existing = await Job.findOne({ _id: booking.jobId, businessId });
+    if (existing) return { booking, job: existing };
   }
 
-  const totalPrice = servicesFound.reduce((sum, s) => sum + s.price, 0);
+  const existingBySource = await Job.findOne({ businessId, sourceBookingId: booking._id });
+  if (existingBySource) {
+    booking.status = 'CONVERTED_TO_JOB';
+    booking.jobId = existingBySource._id;
+    booking.convertedAt = booking.convertedAt || new Date();
+    await booking.save();
+    return { booking, job: existingBySource };
+  }
+
+  const branchId = booking.branchId || null;
+  const capacityCheck = await canAcceptNewJob(businessId, branchId);
+  if (!capacityCheck.canAccept) throw new Error(capacityCheck.reason);
+
+  const car = await resolveCarForJobConversion(businessId, booking, payload);
+
+  let lines;
+  let totalPrice;
+  let catalogServices;
+  try {
+    ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(businessId, {
+      serviceIds: (booking.serviceIds || []).map(String)
+    }));
+  } catch (svcErr) {
+    throw new Error(svcErr.message || 'Services on this booking are no longer valid');
+  }
+
   const advanceFields = normalizeJobAdvanceForCreate({}, 0);
-  const estimatedDelivery = calculateETA(servicesFound);
+  const estimatedDelivery = calculateETA(catalogServices);
 
   const pickupNote = booking.deliveryMethod === 'PICKUP_DROP'
     ? [`Pickup & Drop`, booking.pickupAddress, booking.pickupLandmark, booking.pickupNotes].filter(Boolean).join(' · ')
@@ -324,14 +454,15 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
   let attempts = 0;
   while (attempts < 5) {
     try {
-      const tokenNumber = await generateTokenNumber(businessId);
+      const tokenNumber = await generateTokenNumber(businessId, branchId);
       let assignedTo = null;
       if (userRole === 'EMPLOYEE') assignedTo = userId;
 
       job = await Job.create({
         businessId,
+        branchId: branchId || undefined,
         customerId: booking.customerId,
-        carId: booking.carId,
+        carId: car._id,
         tokenNumber,
         totalPrice,
         ...advanceFields,
@@ -339,7 +470,7 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
         notes,
         assignedTo,
         sourceBookingId: booking._id,
-        services: servicesFound.map((s) => ({ serviceId: s._id, price: s.price })),
+        services: lines,
         statusHistory: [{ status: 'RECEIVED', changedAt: new Date() }]
       });
       break;
@@ -362,34 +493,52 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
 
   const owner = await User.findOne({ businessId, role: 'CAR_WASH_ADMIN' }).select('_id').lean();
   if (owner) {
-    await sendPushNotification({
-      businessOwnerId: owner._id,
-      title: 'Job created from booking',
-      body: `Token ${job.tokenNumber} created for ${booking.customerName}`,
-      data: { type: 'job_received', bookingId: String(job._id), url: `/admin/jobs/${job._id}` }
-    });
+    try {
+      await sendPushNotification({
+        businessOwnerId: owner._id,
+        title: 'Job created from booking',
+        body: `Token ${job.tokenNumber} created for ${booking.customerName}`,
+        data: {
+          type: 'job_received',
+          bookingId: String(booking._id),
+          jobId: String(job._id),
+          url: `/admin/jobs/${job._id}`
+        }
+      });
+    } catch (pushErr) {
+      console.error('Booking conversion push notification failed:', pushErr?.message || pushErr);
+    }
   }
 
   return { booking, job };
 }
 
-export async function getBookingStats(businessId) {
-  const [total, pending, confirmed, cancelled, rejected, converted, slots, popularSlotAgg, popularServiceAgg] = await Promise.all([
-    Booking.countDocuments({ businessId }),
-    Booking.countDocuments({ businessId, status: 'PENDING' }),
-    Booking.countDocuments({ businessId, status: 'CONFIRMED' }),
-    Booking.countDocuments({ businessId, status: 'CANCELLED' }),
-    Booking.countDocuments({ businessId, status: 'REJECTED' }),
-    Booking.countDocuments({ businessId, status: 'CONVERTED_TO_JOB' }),
+function buildBookingStatsMatch(businessId, { startUtc, endUtc, branchId = null } = {}) {
+  const match = { businessId: new mongoose.Types.ObjectId(String(businessId)) };
+  if (branchId) match.branchId = new mongoose.Types.ObjectId(String(branchId));
+  applyCreatedAtRange(match, startUtc, endUtc);
+  return match;
+}
+
+export async function getBookingStats(businessId, { startUtc, endUtc, branchId = null } = {}) {
+  const baseMatch = buildBookingStatsMatch(businessId, { startUtc, endUtc, branchId });
+  const count = (status) => Booking.countDocuments({ ...baseMatch, status });
+
+  const [pending, confirmed, cancelled, rejected, converted, slots, popularSlotAgg, popularServiceAgg] = await Promise.all([
+    count('PENDING'),
+    count('CONFIRMED'),
+    count('CANCELLED'),
+    count('REJECTED'),
+    count('CONVERTED_TO_JOB'),
     BookingSlot.countDocuments({ businessId, isEnabled: true }),
     Booking.aggregate([
-      { $match: { businessId: new mongoose.Types.ObjectId(String(businessId)), status: { $in: BOOKING_OCCUPYING_STATUSES.concat(['CANCELLED', 'REJECTED', 'CONVERTED_TO_JOB']) } } },
+      { $match: { ...baseMatch, status: { $in: BOOKING_OCCUPYING_STATUSES } } },
       { $group: { _id: '$slotId', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 1 }
     ]),
     Booking.aggregate([
-      { $match: { businessId: new mongoose.Types.ObjectId(String(businessId)) } },
+      { $match: { ...baseMatch, status: { $in: BOOKING_OCCUPYING_STATUSES } } },
       { $unwind: '$serviceIds' },
       { $group: { _id: '$serviceIds', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
@@ -397,7 +546,9 @@ export async function getBookingStats(businessId) {
     ])
   ]);
 
-  const conversionRate = total > 0 ? Math.round((converted / total) * 100) : 0;
+  const total = pending + confirmed + cancelled + rejected + converted;
+  const activeTotal = pending + confirmed + converted;
+  const conversionRate = activeTotal > 0 ? Math.round((converted / activeTotal) * 100) : 0;
 
   let mostPopularSlot = null;
   if (popularSlotAgg[0]?._id) {

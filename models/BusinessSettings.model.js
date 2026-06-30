@@ -61,7 +61,12 @@ const businessSettingsSchema = new mongoose.Schema({
     drying: { type: String, trim: true },
     completed: { type: String, trim: true },
     delivered: { type: String, trim: true },
-    bookingConfirmed: { type: String, trim: true }
+    invoiceShare: { type: String, trim: true },
+    invoicePackage: { type: String, trim: true },
+    googleReview: { type: String, trim: true },
+    bookingConfirmed: { type: String, trim: true },
+    bookingCancelled: { type: String, trim: true },
+    bookingRejected: { type: String, trim: true }
   },
   // Payment (Online) - for invoice & WhatsApp share
   upiId: { type: String, trim: true },

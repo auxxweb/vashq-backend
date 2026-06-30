@@ -35,7 +35,7 @@ export async function sendPushNotification({ businessOwnerId, title, body, data 
   if (!businessOwnerId) throw new Error('businessOwnerId is required');
   if (!type) throw new Error('data.type is required');
 
-  const owner = await User.findOne({ _id: businessOwnerId, role: { $in: ['CAR_WASH_ADMIN', 'EMPLOYEE'] } })
+  const owner = await User.findOne({ _id: businessOwnerId, role: { $in: ['CAR_WASH_ADMIN', 'BRANCH_ADMIN', 'EMPLOYEE'] } })
     .select('businessId fcmTokens status')
     .lean();
   if (!owner) return { ok: false, skipped: true, reason: 'OWNER_NOT_FOUND' };

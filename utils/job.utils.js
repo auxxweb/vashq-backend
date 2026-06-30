@@ -18,7 +18,7 @@ const generateRandomString = (length = 6) => {
  * Format: YYYYMMDD-RANDOM6 (e.g., 20260208-A3K9M2)
  * 100% random to eliminate duplicate key issues
  */
-export const generateTokenNumber = async (businessId) => {
+export const generateTokenNumber = async (businessId, branchId = null) => {
   const today = new Date();
   const dateStr = today.toISOString().split('T')[0].replace(/-/g, '');
   
@@ -31,8 +31,9 @@ export const generateTokenNumber = async (businessId) => {
     const randomSuffix = generateRandomString(6);
     const tokenNumber = `${dateStr}-${randomSuffix}`;
     
-    // Check if this token already exists for this business
-    const exists = await Job.findOne({ businessId, tokenNumber });
+    const existsQuery = { businessId, tokenNumber };
+    if (branchId) existsQuery.branchId = branchId;
+    const exists = await Job.findOne(existsQuery);
     
     if (!exists) {
       return tokenNumber;
@@ -72,30 +73,31 @@ export const calculateETA = (services) => {
 /**
  * Check if business can accept new job based on capacity
  */
-export const canAcceptNewJob = async (businessId) => {
+export const canAcceptNewJob = async (businessId, branchId = null) => {
   const business = await Business.findById(businessId);
   
   if (!business) {
     return { canAccept: false, reason: 'Business not found' };
   }
+
+  const { getEffectiveMaxConcurrentJobs } = await import('../services/branchService.js');
+  let maxConcurrent = getEffectiveMaxConcurrentJobs(business);
   
-  // Count active jobs (not completed, ready to deliver, or cancelled)
-  const activeJobsCount = await Job.countDocuments({
+  const activeJobsQuery = {
     businessId,
     status: { $nin: ['COMPLETED', 'DELIVERED', 'CANCELLED'] }
-  });
+  };
+  if (branchId) activeJobsQuery.branchId = branchId;
+
+  const activeJobsCount = await Job.countDocuments(activeJobsQuery);
   
-  if (business.carHandlingCapacity === 'SINGLE') {
-    if (activeJobsCount >= 1) {
-      return { canAccept: false, reason: 'Another job is already in progress' };
-    }
-  } else {
-    if (activeJobsCount >= business.maxConcurrentJobs) {
-      return {
-        canAccept: false,
-        reason: `Maximum capacity of ${business.maxConcurrentJobs} jobs reached`
-      };
-    }
+  if (activeJobsCount >= maxConcurrent) {
+    return {
+      canAccept: false,
+      reason: maxConcurrent === 1
+        ? 'Another job is already in progress at this branch'
+        : `Maximum capacity of ${maxConcurrent} jobs reached at this branch`
+    };
   }
   
   return { canAccept: true };

@@ -15,6 +15,12 @@ import PlatformSettings from '../models/PlatformSettings.model.js';
 import SubscriptionPlan from '../models/SubscriptionPlan.model.js';
 import ShopSubscription from '../models/ShopSubscription.model.js';
 import PlanUpgradeRequest from '../models/PlanUpgradeRequest.model.js';
+import BranchCreationRequest from '../models/BranchCreationRequest.model.js';
+import { approveBranchCreationRequest, rejectBranchCreationRequest, getBranchUsageStats, ensureDefaultBranchForBusiness } from '../services/branchService.js';
+import { getBranchPlatformConfig } from '../utils/branchConfig.js';
+import { normalizeEnabledModules } from '../constants/businessModules.js';
+import { getBusinessModules, updateBusinessModules } from '../services/businessModulesService.js';
+import { createDefaultShopSubscription, invalidateSubscriptionCache } from '../services/subscriptionService.js';
 import bcrypt from 'bcryptjs';
 
 const router = express.Router();
@@ -169,12 +175,14 @@ router.get('/businesses/:id', async (req, res) => {
     const subscription = await ShopSubscription.findOne({ shopId: business._id })
       .populate('planId', 'name validityDays');
     const plan = subscription ? { planId: subscription.planId } : null;
+    const enabledModules = await getBusinessModules(business._id);
 
     res.json({
       success: true,
       business: {
         ...business.toObject(),
-        plan
+        plan,
+        enabledModules
       }
     });
   } catch (error) {
@@ -183,6 +191,22 @@ router.get('/businesses/:id', async (req, res) => {
       success: false,
       message: 'Server error'
     });
+  }
+});
+
+// @route   PATCH /api/super-admin/businesses/:id/modules
+// @desc    Enable/disable feature modules for a business
+router.patch('/businesses/:id/modules', async (req, res) => {
+  try {
+    const business = await Business.findById(req.params.id).select('_id');
+    if (!business) {
+      return res.status(404).json({ success: false, message: 'Business not found' });
+    }
+    const enabledModules = await updateBusinessModules(req.params.id, req.body || {});
+    res.json({ success: true, enabledModules });
+  } catch (error) {
+    console.error('Update business modules error:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 });
 
@@ -286,7 +310,9 @@ router.post('/businesses', [
       currency
     });
 
-    // Subscription is assigned when shop admin first visits My Plan (ensureDefaultSubscriptionPlan + default plan)
+    await ensureDefaultBranchForBusiness(business._id);
+
+    await createDefaultShopSubscription(business._id);
 
     res.status(201).json({
       success: true,
@@ -671,6 +697,8 @@ router.patch('/upgrade-requests/:id/approve', async (req, res) => {
     request.actionedAt = new Date();
     await request.save();
 
+    invalidateSubscriptionCache(request.shopId);
+
     res.json({ success: true, request, message: 'Upgrade approved' });
   } catch (error) {
     console.error('Approve upgrade error:', error);
@@ -693,9 +721,114 @@ router.patch('/upgrade-requests/:id/reject', async (req, res) => {
     request.status = 'REJECTED';
     request.actionedAt = new Date();
     await request.save();
+
+    const otherPending = await PlanUpgradeRequest.exists({
+      shopId: request.shopId,
+      status: 'PENDING',
+      _id: { $ne: request._id }
+    });
+    if (!otherPending) {
+      const sub = await ShopSubscription.findOne({ shopId: request.shopId }).select('status').lean();
+      if (sub?.status === 'PENDING_UPGRADE') {
+        await ShopSubscription.updateOne({ shopId: request.shopId }, { status: 'EXPIRED' });
+        invalidateSubscriptionCache(request.shopId);
+      }
+    }
+
     res.json({ success: true, request, message: 'Upgrade rejected' });
   } catch (error) {
     console.error('Reject upgrade error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== BRANCH REQUESTS ====================
+
+// @route   GET /api/super-admin/branch-requests
+router.get('/branch-requests', async (req, res) => {
+  try {
+    const requests = await BranchCreationRequest.find()
+      .sort({ createdAt: -1 })
+      .populate('businessId', 'businessName ownerName phone email')
+      .populate('requestedBy', 'email name')
+      .populate('approvedBranchId', 'name code status')
+      .populate('renewBranchId', 'name code status');
+    res.json({ success: true, requests });
+  } catch (error) {
+    console.error('Get branch requests error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   PATCH /api/super-admin/branch-requests/:id/approve
+router.patch('/branch-requests/:id/approve', async (req, res) => {
+  try {
+    const request = await BranchCreationRequest.findById(req.params.id);
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+    if (request.status !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'Request already processed' });
+    }
+
+    const config = await getBranchPlatformConfig();
+    const isRenewal = request.requestType === 'RENEW';
+    const stats = await getBranchUsageStats(request.businessId);
+    const requiresPayment = isRenewal || stats.activeCount >= config.includedBranchesPerShop;
+
+    const { transactionId, method, amount, paidAt, notes } = req.body || {};
+    if (requiresPayment) {
+      if (!transactionId || !String(transactionId).trim()) {
+        return res.status(400).json({ success: false, message: 'Transaction ID is required' });
+      }
+      if (amount == null || Number.isNaN(Number(amount))) {
+        return res.status(400).json({ success: false, message: 'Amount is required' });
+      }
+    }
+
+    const { branch, request: updated } = await approveBranchCreationRequest(
+      request,
+      req.user._id,
+      requiresPayment ? { transactionId, method, amount, paidAt, notes } : {}
+    );
+
+    res.json({
+      success: true,
+      request: updated,
+      branch,
+      message: isRenewal
+        ? `Branch license renewed. ₹${config.branchAnnualFee}/year recorded.`
+        : requiresPayment
+          ? `Branch approved. ₹${config.branchAnnualFee}/year recorded.`
+          : 'Branch approved (included with shop plan).'
+    });
+  } catch (error) {
+    console.error('Approve branch request error:', error);
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   PATCH /api/super-admin/branch-requests/:id/reject
+router.patch('/branch-requests/:id/reject', async (req, res) => {
+  try {
+    const request = await BranchCreationRequest.findById(req.params.id);
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+    if (request.status !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'Request already processed' });
+    }
+    const updated = await rejectBranchCreationRequest(
+      request,
+      req.user._id,
+      req.body?.reason ? String(req.body.reason).trim() : undefined
+    );
+    res.json({ success: true, request: updated, message: 'Branch request rejected' });
+  } catch (error) {
+    console.error('Reject branch request error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -1079,7 +1212,11 @@ router.put('/settings', [
   body('defaultCurrency').optional().isString(),
   body('defaultLanguage').optional().isString(),
   body('defaultPhoneDialCode').optional().isString(),
-  body('defaultPhoneCountryIso2').optional().isString()
+  body('defaultPhoneCountryIso2').optional().isString(),
+  body('branchAnnualFee').optional().isFloat({ min: 0 }),
+  body('branchValidityDays').optional().isInt({ min: 1 }),
+  body('maxBranchesPerBusiness').optional().isInt({ min: 1 }),
+  body('includedBranchesPerShop').optional().isInt({ min: 1 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1106,8 +1243,29 @@ router.put('/settings', [
       }
       updateFields.defaultPhoneCountryIso2 = iso2 || 'US';
     }
+    if (req.body.branchAnnualFee !== undefined) {
+      updateFields.branchAnnualFee = Math.max(0, Number(req.body.branchAnnualFee) || 0);
+    }
+    if (req.body.branchValidityDays !== undefined) {
+      updateFields.branchValidityDays = Math.max(1, parseInt(req.body.branchValidityDays, 10) || 365);
+    }
+    if (req.body.maxBranchesPerBusiness !== undefined) {
+      updateFields.maxBranchesPerBusiness = Math.max(1, parseInt(req.body.maxBranchesPerBusiness, 10) || 10);
+    }
+    if (req.body.includedBranchesPerShop !== undefined) {
+      updateFields.includedBranchesPerShop = Math.max(1, parseInt(req.body.includedBranchesPerShop, 10) || 1);
+    }
 
     let settings = await PlatformSettings.findOne({});
+    const effectiveIncluded = updateFields.includedBranchesPerShop ?? settings?.includedBranchesPerShop ?? 1;
+    const effectiveMax = updateFields.maxBranchesPerBusiness ?? settings?.maxBranchesPerBusiness ?? 10;
+    if (effectiveIncluded > effectiveMax) {
+      return res.status(400).json({
+        success: false,
+        message: 'Included branches per shop cannot exceed max branches per business'
+      });
+    }
+
     if (!settings) {
       settings = await PlatformSettings.create({
         platformName: 'Vashq',

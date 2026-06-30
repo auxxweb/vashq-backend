@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import Booking, { BOOKING_OCCUPYING_STATUSES } from '../models/Booking.model.js';
 import BookingSlot from '../models/BookingSlot.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
+import { DEFAULT_WHATSAPP_TEMPLATES, normalizeWhatsappTemplates } from './whatsappTemplates.js';
 
 export { normalizePhone } from './customer.utils.js';
 
@@ -131,6 +132,9 @@ export async function validateSlotBooking(businessId, slotId, dateStr, preferred
   }
 
   const bookingDate = parseBookingDate(dateStr, bookingSettings.timezone);
+  if (!bookingDate) {
+    throw new Error('Invalid booking date');
+  }
   const occupied = await countOccupiedBays(businessId, slotId, bookingDate);
   const occupiedSet = new Set(occupied);
 
@@ -155,23 +159,57 @@ export async function validateSlotBooking(businessId, slotId, dateStr, preferred
   return { slot, bookingDate, bayNumber, bookingSettings };
 }
 
-export function buildBookingWhatsAppMessage({ booking, businessName, slot, settings }) {
+const BOOKING_WA_TEMPLATE_KEY = {
+  confirmed: 'bookingConfirmed',
+  cancelled: 'bookingCancelled',
+  rejected: 'bookingRejected'
+};
+
+function fillBookingWhatsAppTemplate(template, ctx) {
+  const {
+    booking,
+    businessName,
+    dateLabel,
+    slotLabel,
+    servicesLabel,
+    pickupNote
+  } = ctx;
+  const vehicle = [booking.vehicleBrand, booking.vehicleModel, booking.vehicleNumber].filter(Boolean).join(' ');
+  return String(template || '')
+    .replace(/\{\{name\}\}/g, booking.customerName || '')
+    .replace(/\{\{businessName\}\}/g, businessName || 'our shop')
+    .replace(/\{\{vehicleNumber\}\}/g, booking.vehicleNumber || vehicle || '')
+    .replace(/\{\{vehicle\}\}/g, vehicle || booking.vehicleNumber || '')
+    .replace(/\{\{bookingDate\}\}/g, dateLabel || '—')
+    .replace(/\{\{slotTime\}\}/g, slotLabel || '—')
+    .replace(/\{\{slot\}\}/g, slotLabel || '—')
+    .replace(/\{\{bayNumber\}\}/g, booking.bayNumber != null ? String(booking.bayNumber) : '')
+    .replace(/\{\{services\}\}/g, servicesLabel || '')
+    .replace(/\{\{pickupNote\}\}/g, pickupNote || '');
+}
+
+export function buildBookingWhatsAppMessage({ booking, businessName, slot, settings, type = 'confirmed' }) {
   const tz = settings?.timezone || 'Asia/Kolkata';
   const dateLabel = formatBookingDateLabel(booking.bookingDate, tz);
   const slotLabel = slot?.name || `${slot?.startTime || ''} - ${slot?.endTime || ''}`.trim();
-  const vehicle = [booking.vehicleBrand, booking.vehicleModel, booking.vehicleNumber].filter(Boolean).join(' ');
-  const pickup = booking.deliveryMethod === 'PICKUP_DROP' ? '\nPickup & Drop requested.' : '';
+  const pickupNote = booking.deliveryMethod === 'PICKUP_DROP' ? '\nPickup & Drop requested.' : '';
+  const servicesLabel = Array.isArray(booking.serviceIds)
+    ? booking.serviceIds.map((s) => (typeof s === 'object' ? s.name : s)).filter(Boolean).join(', ')
+    : '';
 
-  return [
-    `Hello ${booking.customerName},`,
-    '',
-    `Your appointment at ${businessName || 'our shop'} is confirmed.`,
-    '',
-    `Date: ${dateLabel}`,
-    `Time: ${slotLabel}`,
-    `Vehicle: ${vehicle || booking.vehicleNumber}`,
-    pickup,
-    '',
-    'Thank you for choosing us!'
-  ].join('\n');
+  const normalizedType = ['confirmed', 'cancelled', 'rejected'].includes(String(type).toLowerCase())
+    ? String(type).toLowerCase()
+    : 'confirmed';
+  const templateKey = BOOKING_WA_TEMPLATE_KEY[normalizedType];
+  const templates = normalizeWhatsappTemplates(settings?.whatsappTemplates);
+  const template = templates[templateKey] || DEFAULT_WHATSAPP_TEMPLATES[templateKey] || DEFAULT_WHATSAPP_TEMPLATES.bookingConfirmed;
+
+  return fillBookingWhatsAppTemplate(template, {
+    booking,
+    businessName,
+    dateLabel,
+    slotLabel,
+    servicesLabel,
+    pickupNote
+  });
 }

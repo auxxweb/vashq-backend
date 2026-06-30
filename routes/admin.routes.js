@@ -13,6 +13,17 @@ import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import Notification from '../models/Notification.model.js';
 import { generateTokenNumber, calculateETA, canAcceptNewJob, isValidStatusTransition } from '../utils/job.utils.js';
+import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates } from '../utils/jobServiceLines.js';
+import {
+  assertDirectBillEligible,
+  directBillStatusHistory,
+  finalizeDirectBillSale,
+  WASH_JOB_FILTER,
+  getProductSalesDashboardStats
+} from '../utils/directBillJob.js';
+import { getPackageSalesDashboardStats } from '../utils/packageSalesDashboard.js';
+import { getDashboardServicesDistribution } from '../utils/dashboardServicesDistribution.js';
+import { getDashboardUnclosedInvoices } from '../utils/dashboardUnclosedInvoices.js';
 import { sendWhatsAppMessage, formatTemplate } from '../utils/whatsapp.utils.js';
 import Business from '../models/Business.model.js';
 import SubscriptionPlan from '../models/SubscriptionPlan.model.js';
@@ -23,6 +34,9 @@ import Tutorial from '../models/Tutorial.model.js';
 import SupportTicket from '../models/SupportTicket.model.js';
 import PlatformSettings from '../models/PlatformSettings.model.js';
 import User from '../models/User.model.js';
+import Branch from '../models/Branch.model.js';
+import BranchSubscription from '../models/BranchSubscription.model.js';
+import BranchCreationRequest from '../models/BranchCreationRequest.model.js';
 import ExpenseType from '../models/ExpenseType.model.js';
 import Expense from '../models/Expense.model.js';
 import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
@@ -31,7 +45,7 @@ import PackageVisit from '../models/PackageVisit.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
 import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
 import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
-import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, roundMoney } from '../utils/invoicePayment.js';
+import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, relabelLockedInvoicePaymentMethod, roundMoney } from '../utils/invoicePayment.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
 import { invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
@@ -56,6 +70,22 @@ import {
 } from '../utils/invoiceCompany.js';
 import { DEFAULT_WHATSAPP_TEMPLATES, normalizeWhatsappTemplates } from '../utils/whatsappTemplates.js';
 import { DateTime } from 'luxon';
+import { resolveBranchContext, branchFilter } from '../middleware/branchContext.middleware.js';
+import { moduleDisabledResponse } from '../middleware/businessModules.middleware.js';
+import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
+import { ensureDefaultBranchForBusiness, getBranchOverviewStats, getBranchUsageStats, isBranchOperational, submitBranchRenewalRequest, branchLicenseNeedsRenewal } from '../services/branchService.js';
+import { getBranchPlatformConfig } from '../utils/branchConfig.js';
+import { applyBranchScopeOid, applyBranchScope } from '../utils/branchQuery.js';
+import { scopedFilter, assertBranchAccess, findScoped, branchIdForCreate } from '../utils/branchAccess.js';
+import { isAdminPanelRole, isBranchAdmin, isBusinessOwner } from '../utils/adminRoles.js';
+import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
+import { generateEmployeeCode } from '../utils/employeeAccount.js';
+import { enforceActiveSubscription } from '../middleware/subscription.middleware.js';
+import {
+  ensureDefaultSubscriptionPlan,
+  isFreeTrialPlan,
+  invalidateSubscriptionCache
+} from '../services/subscriptionService.js';
 
 const router = express.Router();
 
@@ -74,8 +104,8 @@ router.post('/push/fcm-token', [
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
-    if (req.user.role !== 'CAR_WASH_ADMIN') {
-      return res.status(403).json({ success: false, message: 'Only business owners can register push tokens' });
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only admin users can register push tokens' });
     }
     const token = String(req.body.token).trim();
     // Add token and cap list size to keep it sane
@@ -101,6 +131,9 @@ router.post('/push/fcm-token', [
 const allowAdminOrEmployeeForJobs = (req, res, next) => {
   if (req.user.role === 'EMPLOYEE') {
     const p = req.path;
+    if (p === '/business' && req.method === 'GET') {
+      return next();
+    }
     const allowed =
       p === '/dashboard' || p.startsWith('/dashboard/') ||
       p.startsWith('/jobs') ||
@@ -113,7 +146,6 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p.startsWith('/notifications') ||
       p.startsWith('/invoices') ||
       p.startsWith('/cars') ||
-      p === '/business' ||
       p === '/my-subscription' ||
       p === '/available-plans' ||
       p.startsWith('/upgrade-request') ||
@@ -121,7 +153,7 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
     if (!allowed) {
       return res.status(403).json({ success: false, message: 'Access denied. Insufficient permissions.' });
     }
-  } else if (req.user.role !== 'CAR_WASH_ADMIN') {
+  } else if (!isAdminPanelRole(req.user.role)) {
     return res.status(403).json({ success: false, message: 'Access denied. Insufficient permissions.' });
   }
   next();
@@ -142,57 +174,32 @@ const requireBusiness = (req, res, next) => {
 
 router.use(requireBusiness);
 
-router.use('/credit', creditRoutes);
+router.use(resolveBranchContext);
 
-// -------------------- SUBSCRIPTION GATING --------------------
-// If subscription is expired (or pending upgrade after expiry), lock all features except plan upgrade workflow.
-const allowWhenLocked = (p) => {
-  return (
-    p === '/my-subscription' ||
-    p === '/available-plans' ||
-    p === '/upgrade-request' ||
-    p === '/upgrade-requests' ||
-    p.startsWith('/settlement-change-requests') ||
-    /\/jobs\/[^/]+\/settlement-dates$/.test(p)
-  );
-};
-
-const enforceActiveSubscription = async (req, res, next) => {
+router.use(async (req, res, next) => {
+  if (!req.businessId) return next();
   try {
+    const modules = await getBusinessModules(req.businessId);
+    req.businessModules = modules;
     const p = req.path;
-    if (allowWhenLocked(p)) return next();
-
-    // Only gate business-scoped roles
-    if (!req.businessId) return next();
-
-    const sub = await cacheGetOrSet(`sub:${req.businessId}`, 60_000, () =>
-      ShopSubscription.findOne({ shopId: req.businessId }).select('status expiryDate').lean()
-    );
-    if (!sub) return next(); // fallback: let my-subscription create defaults
-
-    const now = new Date();
-    let status = sub.status;
-    if (sub.expiryDate && new Date(sub.expiryDate) < now && status === 'ACTIVE') {
-      await ShopSubscription.updateOne({ shopId: req.businessId }, { status: 'EXPIRED' }).catch(() => {});
-      status = 'EXPIRED';
+    if (/^\/reports\/(trial-balance|profit-loss|sales-expenses)/.test(p) && !isModuleEnabled(modules, 'accounting')) {
+      return moduleDisabledResponse(res, 'accounting');
     }
-
-    if (status !== 'ACTIVE') {
-      return res.status(402).json({
-        success: false,
-        code: 'SUBSCRIPTION_EXPIRED',
-        message: 'Your subscription has expired. Please request a plan upgrade.',
-        subscriptionStatus: status
-      });
+    if (/^\/reports\/(collections|outstanding)/.test(p) && !isModuleEnabled(modules, 'credit')) {
+      return moduleDisabledResponse(res, 'credit');
+    }
+    if (p.startsWith('/credit') && !isModuleEnabled(modules, 'credit')) {
+      return moduleDisabledResponse(res, 'credit');
     }
     next();
-  } catch (e) {
-    console.error('Subscription gate error:', e);
-    next();
+  } catch (err) {
+    next(err);
   }
-};
+});
 
-router.use(enforceActiveSubscription);
+router.use(enforceActiveSubscription());
+
+router.use('/credit', creditRoutes);
 
 // Multer: max 4 files, 20MB each (client compresses large images; this is a safety limit)
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -227,7 +234,12 @@ router.post('/upload/images', (req, res, next) => {
     if (!req.files?.length) {
       return res.status(400).json({ success: false, message: 'No images provided' });
     }
-    const folder = req.body.folder === 'after' ? 'washq/jobs/after' : req.body.folder === 'expenses' ? 'washq/expenses' : req.body.folder === 'payment' ? 'washq/payment' : 'washq/jobs/before';
+    const isEmployee = req.user.role === 'EMPLOYEE';
+    const folderKey = req.body.folder === 'after' ? 'after' : req.body.folder === 'expenses' ? 'expenses' : req.body.folder === 'payment' ? 'payment' : 'before';
+    if (isEmployee && (folderKey === 'expenses' || folderKey === 'payment')) {
+      return res.status(403).json({ success: false, message: 'Employees can only upload job images.' });
+    }
+    const folder = folderKey === 'after' ? 'washq/jobs/after' : folderKey === 'expenses' ? 'washq/expenses' : folderKey === 'payment' ? 'washq/payment' : 'washq/jobs/before';
     const urls = [];
     for (const file of req.files) {
       const { url } = await uploadBuffer(file.buffer, file.mimetype, folder);
@@ -249,12 +261,6 @@ router.post('/upload/images', (req, res, next) => {
 });
 
 // ==================== EXPENSE TYPES (Car Wash Admin only) ====================
-const expenseAdminOnly = (req, res, next) => {
-  if (req.user.role !== 'CAR_WASH_ADMIN') {
-    return res.status(403).json({ success: false, message: 'Access denied. Admin only.' });
-  }
-  next();
-};
 
 // ==================== OWNER TASKS (Car Wash Admin only) ====================
 function computedTaskStatus(task, now = new Date()) {
@@ -269,7 +275,7 @@ function computedTaskStatus(task, now = new Date()) {
 }
 
 // GET /api/admin/tasks?from=ISO&to=ISO
-router.get('/tasks', expenseAdminOnly, async (req, res) => {
+router.get('/tasks', adminPanelOnly, async (req, res) => {
   try {
     const from = req.query.from ? new Date(String(req.query.from)) : null;
     const to = req.query.to ? new Date(String(req.query.to)) : null;
@@ -287,7 +293,7 @@ router.get('/tasks', expenseAdminOnly, async (req, res) => {
 });
 
 // POST /api/admin/tasks
-router.post('/tasks', expenseAdminOnly, [
+router.post('/tasks', adminPanelOnly, [
   body('title').notEmpty().trim().isLength({ max: 120 }),
   body('description').optional().trim().isLength({ max: 2000 }),
   body('endAt').notEmpty().isISO8601()
@@ -326,7 +332,7 @@ router.post('/tasks', expenseAdminOnly, [
 });
 
 // PATCH /api/admin/tasks/:id - update fields (title/description/startAt/endAt) when pending
-router.patch('/tasks/:id', expenseAdminOnly, [
+router.patch('/tasks/:id', adminPanelOnly, [
   body('title').optional().trim().isLength({ min: 1, max: 120 }),
   body('description').optional().trim().isLength({ max: 2000 }),
   body('endAt').optional().isISO8601(),
@@ -376,7 +382,7 @@ router.patch('/tasks/:id', expenseAdminOnly, [
 });
 
 // GET /api/admin/expense-types
-router.get('/expense-types', expenseAdminOnly, async (req, res) => {
+router.get('/expense-types', adminPanelOnly, async (req, res) => {
   try {
     const types = await ExpenseType.find({ businessId: req.businessId }).sort({ expenseName: 1 }).lean();
     res.json({ success: true, expenseTypes: types });
@@ -387,7 +393,7 @@ router.get('/expense-types', expenseAdminOnly, async (req, res) => {
 });
 
 // POST /api/admin/expense-types
-router.post('/expense-types', expenseAdminOnly, [
+router.post('/expense-types', adminPanelOnly, [
   body('expenseName').notEmpty().trim()
 ], async (req, res) => {
   try {
@@ -407,7 +413,7 @@ router.post('/expense-types', expenseAdminOnly, [
 });
 
 // PUT /api/admin/expense-types/:id
-router.put('/expense-types/:id', expenseAdminOnly, [
+router.put('/expense-types/:id', adminPanelOnly, [
   body('expenseName').optional().notEmpty().trim()
 ], async (req, res) => {
   try {
@@ -429,7 +435,7 @@ router.put('/expense-types/:id', expenseAdminOnly, [
 });
 
 // DELETE /api/admin/expense-types/:id
-router.delete('/expense-types/:id', expenseAdminOnly, async (req, res) => {
+router.delete('/expense-types/:id', adminPanelOnly, async (req, res) => {
   try {
     const expenseType = await ExpenseType.findOneAndDelete({ _id: req.params.id, businessId: req.businessId });
     if (!expenseType) {
@@ -492,12 +498,12 @@ function parseExpenseDateRange(range, from, to, businessTz) {
   return { start, end, exclusiveEnd: false };
 }
 
-router.get('/expenses', expenseAdminOnly, async (req, res) => {
+router.get('/expenses', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'today', from, to, search, expenseTypeId } = req.query;
     const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
     const { start, end, exclusiveEnd } = parseExpenseDateRange(range, from, to, settings?.timezone);
-    const query = { businessId: req.businessId, expenseDate: dateRangeQuery(start, end, exclusiveEnd) };
+    const query = applyBranchScope({ businessId: req.businessId, expenseDate: dateRangeQuery(start, end, exclusiveEnd) }, req);
     if (expenseTypeId && String(expenseTypeId).trim()) {
       query.expenseTypeId = String(expenseTypeId).trim();
     }
@@ -542,7 +548,7 @@ router.get('/expenses', expenseAdminOnly, async (req, res) => {
 });
 
 // POST /api/admin/expenses - single or multiple entries
-router.post('/expenses', expenseAdminOnly, [
+router.post('/expenses', adminPanelOnly, [
   body('expenseDate').optional().isISO8601(),
   body('entries').isArray({ min: 1 }),
   body('entries.*.expenseTypeId').notEmpty(),
@@ -588,6 +594,7 @@ router.post('/expenses', expenseAdminOnly, [
       }
       const exp = await Expense.create({
         businessId: req.businessId,
+        branchId: req.branchId || null,
         expenseTypeId: expenseType._id,
         amount: Number(entry.amount),
         notes: entry.notes || '',
@@ -607,7 +614,7 @@ router.post('/expenses', expenseAdminOnly, [
 });
 
 // PUT /api/admin/expenses/:id
-router.put('/expenses/:id', expenseAdminOnly, [
+router.put('/expenses/:id', adminPanelOnly, [
   body('expenseTypeId').optional().notEmpty(),
   body('amount').optional().isFloat({ min: 0.01 }),
   body('notes').optional().trim(),
@@ -626,10 +633,11 @@ router.put('/expenses/:id', expenseAdminOnly, [
         errors: errors.array()
       });
     }
-    const expense = await Expense.findOne({ _id: req.params.id, businessId: req.businessId });
+    const expense = await findScoped(Expense, req, { _id: req.params.id });
     if (!expense) {
       return res.status(404).json({ success: false, message: 'Expense not found' });
     }
+    assertBranchAccess(req, expense);
     if (req.body.expenseTypeId != null) {
       const expenseType = await ExpenseType.findOne({ _id: req.body.expenseTypeId, businessId: req.businessId });
       if (!expenseType) {
@@ -676,9 +684,9 @@ router.put('/expenses/:id', expenseAdminOnly, [
 });
 
 // DELETE /api/admin/expenses/:id
-router.delete('/expenses/:id', expenseAdminOnly, async (req, res) => {
+router.delete('/expenses/:id', adminPanelOnly, async (req, res) => {
   try {
-    const expense = await Expense.findOneAndDelete({ _id: req.params.id, businessId: req.businessId });
+    const expense = await Expense.findOneAndDelete(scopedFilter(req, { _id: req.params.id }));
     if (!expense) {
       return res.status(404).json({ success: false, message: 'Expense not found' });
     }
@@ -704,6 +712,34 @@ async function backfillCustomerInvoiceLinks(businessId, customerId) {
 }
 
 // ==================== INVOICES ====================
+
+const INVOICE_METADATA_FIELDS = [
+  'companyName', 'companyOwnerName', 'companyAddress', 'companyPhone', 'companyGst',
+  'customerName', 'customerPhone', 'customerGst', 'vehicleNumber'
+];
+
+const INVOICE_FINANCIAL_BODY_KEYS = [
+  'discount', 'finalAmount', 'taxPercentage', 'gstAmount',
+  'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount',
+  'paymentCashAmount', 'paymentOnlineAmount', 'allowPartialCheckout'
+];
+
+function rejectFinancialInvoiceBodyFields(body) {
+  for (const key of INVOICE_FINANCIAL_BODY_KEYS) {
+    if (body[key] !== undefined) {
+      const err = new Error('Discount, loyalty, line items, and payment amounts cannot be edited on the invoice');
+      err.status = 403;
+      throw err;
+    }
+  }
+}
+
+function applyInvoiceMetadataFields(invoice, body) {
+  for (const key of INVOICE_METADATA_FIELDS) {
+    if (body[key] !== undefined) invoice[key] = body[key];
+  }
+}
+
 // POST /api/admin/invoices - create invoice from job (admin or employee)
 router.post('/invoices', [
   body('jobId').notEmpty().isMongoId()
@@ -713,7 +749,7 @@ router.post('/invoices', [
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
-    const job = await Job.findOne({ _id: req.body.jobId, businessId: req.businessId })
+    const job = await findScoped(Job, req, { _id: req.body.jobId })
       .populate('customerId', 'name phone whatsappNumber email')
       .populate('carId', 'carNumber model make color brand')
       .populate({ path: 'services.serviceId', model: 'Service', select: 'name price' });
@@ -728,16 +764,14 @@ router.post('/invoices', [
     while (await Invoice.findOne({ businessId: req.businessId, invoiceNumber })) {
       invoiceNumber = generateInvoiceNumber();
     }
-    const items = (job.services || []).map((s) => ({
-      serviceName: s.serviceId?.name || 'Service',
-      servicePrice: s.price ?? 0
-    }));
+    const items = jobLinesToInvoiceItems(job.services || []);
     const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + i.servicePrice, 0);
     const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
     const company = await getInvoiceCompanySnapshot(req.businessId);
     const invoice = await Invoice.create({
       jobId: job._id,
       businessId: req.businessId,
+      branchId: job.branchId || req.branchId || null,
       invoiceNumber,
       companyName: company?.businessName || null,
       companyOwnerName: company?.ownerName || null,
@@ -772,15 +806,15 @@ router.post('/invoices', [
 router.get('/invoices', async (req, res) => {
   try {
     const { search, page = 1, limit = 20, from, to, jobId } = req.query;
-    const query = { businessId: req.businessId };
+    const query = applyBranchScope({ businessId: req.businessId }, req);
     if (jobId) query.jobId = jobId;
 
     if (search && typeof search === 'string' && search.trim()) {
       const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const matchingJobIds = await Job.find({
+      const matchingJobIds = await Job.find(applyBranchScope({
         businessId: req.businessId,
         tokenNumber: { $regex: term, $options: 'i' }
-      }).distinct('_id');
+      }, req)).distinct('_id');
       query.$or = [
         { invoiceNumber: { $regex: term, $options: 'i' } },
         { customerName: { $regex: term, $options: 'i' } },
@@ -836,13 +870,17 @@ router.get('/invoices', async (req, res) => {
 // GET /api/admin/invoices/:id
 router.get('/invoices/:id', async (req, res) => {
   try {
-    let invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId })
-      .populate('jobId')
+    let invoice = await Invoice.findOne(scopedFilter(req, { _id: req.params.id }))
+      .populate({
+        path: 'jobId',
+        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+      })
       .populate('packageId', 'name')
       .lean();
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
+    assertBranchAccess(req, invoice);
     const companySnapshot = await getInvoiceCompanySnapshot(req.businessId);
     const toPersist = companyFieldsToPersist(invoice, companySnapshot);
     if (toPersist) {
@@ -882,93 +920,75 @@ router.put('/invoices/:id', [
   body('loyaltyRedeemedAmount').optional().isFloat({ min: 0 }),
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
-  body('paymentOnlineAmount').optional().isFloat({ min: 0 })
+  body('paymentOnlineAmount').optional().isFloat({ min: 0 }),
+  body('items').optional().isArray({ min: 1 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
-    const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId });
-    if (!invoice) {
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only admins can edit invoices' });
+    }
+    const invoiceDoc = await findScoped(Invoice, req, { _id: req.params.id });
+    if (!invoiceDoc) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    if (invoice.paymentStatus === 'RECEIVED') {
-      return res.status(403).json({ success: false, message: 'Invoice is paid. No further edits allowed.' });
-    }
-    if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
-      return res.status(403).json({
-        success: false,
-        message: 'Credit sale is closed. Collect remaining balance from the customer profile.'
-      });
-    }
-    const prevRedeemedPoints = Number(invoice.loyaltyRedeemedPoints || 0);
-    const nextRedeemedPointsRaw = req.body.loyaltyRedeemedPoints !== undefined ? Number(req.body.loyaltyRedeemedPoints || 0) : prevRedeemedPoints;
-    const nextRedeemedPoints = Math.max(0, Math.floor(nextRedeemedPointsRaw));
+    assertBranchAccess(req, invoiceDoc);
+    const invoice = invoiceDoc;
 
-    // If loyalty points are being updated, immediately reflect it in customer balance (reserve/release points).
-    if (req.body.loyaltyRedeemedPoints !== undefined) {
-      const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId }).select('customerId').lean();
-      if (job?.customerId) {
-        const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('loyaltyPointValueInr loyaltyMaxRedeemPointsPerJob').lean();
-        const pointValue = Math.max(0, Number(settings?.loyaltyPointValueInr || 0));
-        const maxPerJob = Math.max(0, Number(settings?.loyaltyMaxRedeemPointsPerJob || 0));
-        if (pointValue <= 0 || maxPerJob <= 0) {
-          if (nextRedeemedPoints > 0) {
-            return res.status(400).json({ success: false, message: 'Loyalty redemption is disabled in settings' });
-          }
+    rejectFinancialInvoiceBodyFields(req.body);
+
+    const isPaid = invoice.paymentStatus === 'RECEIVED';
+    const isCreditClosed = invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt;
+    const isLocked = isPaid || isCreditClosed;
+
+    if (req.body.items !== undefined) {
+      if (isLocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Line item amounts cannot be edited on a paid or credit-closed invoice'
+        });
+      }
+      try {
+        await applyInvoiceItemPriceUpdates(invoice, req.body.items, req.businessId);
+      } catch (itemErr) {
+        return res.status(itemErr.status || 400).json({
+          success: false,
+          message: itemErr.message || 'Invalid line item prices'
+        });
+      }
+    }
+
+    applyInvoiceMetadataFields(invoice, req.body);
+
+    if (req.body.paymentMethod !== undefined) {
+      try {
+        if (isLocked) {
+          relabelLockedInvoicePaymentMethod(invoice, req.body.paymentMethod);
         } else {
-          if (nextRedeemedPoints > maxPerJob) {
-            return res.status(400).json({ success: false, message: `Max redeem per job is ${maxPerJob} points` });
-          }
+          invoice.paymentMethod = req.body.paymentMethod;
+          normalizeInvoicePaymentFields(invoice, { paymentMethod: req.body.paymentMethod });
         }
-
-        const customer = await Customer.findOne({ _id: job.customerId, businessId: req.businessId }).select('loyaltyPointsBalance');
-        if (customer) {
-          const delta = nextRedeemedPoints - prevRedeemedPoints; // + means deduct more, - means refund
-          if (delta > 0) {
-            if (Number(customer.loyaltyPointsBalance || 0) < delta) {
-              return res.status(400).json({ success: false, message: 'Insufficient loyalty points' });
-            }
-            customer.loyaltyPointsBalance = Number(customer.loyaltyPointsBalance || 0) - delta;
-            await customer.save();
-          } else if (delta < 0) {
-            customer.loyaltyPointsBalance = Number(customer.loyaltyPointsBalance || 0) + Math.abs(delta);
-            await customer.save();
-          }
-        }
-
-        // Keep amount consistent with settings (server-side source of truth)
-        if (req.body.loyaltyRedeemedAmount !== undefined && pointValue > 0) {
-          req.body.loyaltyRedeemedAmount = nextRedeemedPoints * pointValue;
-        }
+      } catch (normErr) {
+        const status = normErr.status || 500;
+        return res.status(status).json({ success: false, message: normErr.message || 'Invalid payment method' });
       }
     }
 
-    const allowed = ['companyName', 'companyOwnerName', 'companyAddress', 'companyPhone', 'companyGst', 'customerName', 'customerPhone', 'customerGst', 'vehicleNumber', 'discount', 'finalAmount', 'taxPercentage', 'gstAmount', 'loyaltyRedeemedPoints', 'loyaltyRedeemedAmount', 'paymentMethod', 'paymentCashAmount', 'paymentOnlineAmount'];
-    for (const key of allowed) {
-      if (req.body[key] !== undefined) invoice[key] = req.body[key];
-    }
-    if (req.body.finalAmount !== undefined) invoice.finalAmount = Number(req.body.finalAmount);
-    if (req.body.discount !== undefined) invoice.discount = Number(req.body.discount);
-    if (req.body.taxPercentage !== undefined) invoice.taxPercentage = Number(req.body.taxPercentage);
-    if (req.body.gstAmount !== undefined) invoice.gstAmount = Number(req.body.gstAmount);
-    try {
-      if (req.body.allowPartialCheckout === true) {
-        normalizeCreditCheckoutPayment(invoice, req.body);
-      } else {
-        normalizeInvoicePaymentFields(invoice, req.body);
-      }
-    } catch (normErr) {
-      const status = normErr.status || 500;
-      return res.status(status).json({ success: false, message: normErr.message || 'Invalid payment split' });
-    }
     await invoice.save();
-    const updated = await Invoice.findById(invoice._id).populate('jobId').lean();
+    const updated = await Invoice.findById(invoice._id)
+      .populate({
+        path: 'jobId',
+        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+      })
+      .lean();
     res.json({ success: true, invoice: updated });
   } catch (error) {
     console.error('Update invoice error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
+    res.status(status).json({ success: false, message: error?.message || 'Server error' });
   }
 });
 
@@ -1013,7 +1033,7 @@ router.get('/invoices/:id/share-url', async (req, res) => {
 });
 
 // PATCH /api/admin/invoices/:id/close-job - set payment received & close job (DELIVERED)
-router.patch('/invoices/:id/close-job', async (req, res) => {
+router.patch('/invoices/:id/close-job', adminPanelOnly, async (req, res) => {
   try {
     const invoice = await Invoice.findOne({ _id: req.params.id, businessId: req.businessId });
     if (!invoice) {
@@ -1036,6 +1056,10 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     }
 
     if (isCreditSettlementMode(req.body)) {
+      const modules = req.businessModules || await getBusinessModules(req.businessId);
+      if (!isModuleEnabled(modules, 'credit')) {
+        return moduleDisabledResponse(res, 'credit');
+      }
       try {
         const result = await closeJobOnCredit({
           invoice,
@@ -1052,6 +1076,7 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
 
     const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
     try {
+      normalizeInvoicePaymentFields(invoice, { paymentMethod: invoice.paymentMethod });
       assertSettlementMatchesDue(
         invoice.paymentMethod,
         due,
@@ -1199,7 +1224,7 @@ async function loadReportDateRange(businessId, range, from, to) {
 
 // GET /api/admin/reports/jobs?range=daily|weekly|monthly|yearly|custom&from=&to=&serviceIds=id1,id2
 // serviceIds: optional; jobs that include at least one of these services (OR). Scoped to this business.
-router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
+router.get('/reports/jobs', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
@@ -1207,10 +1232,10 @@ router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
       req.businessId,
       parseServiceIdsFromQuery(req.query)
     );
-    const jobQuery = {
+    const jobQuery = applyBranchScope({
       businessId: req.businessId,
       createdAt: dateRangeQuery(start, end, exclusiveEnd)
-    };
+    }, req);
     if (serviceObjectIds.length) {
       jobQuery.services = { $elemMatch: { serviceId: { $in: serviceObjectIds } } };
     }
@@ -1234,26 +1259,29 @@ router.get('/reports/jobs', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/employees?range=...&from=&to= (revenue = sum of invoice final amount for delivered jobs)
-router.get('/reports/employees', expenseAdminOnly, async (req, res) => {
+router.get('/reports/employees', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
-    const employees = await User.find({ businessId: req.businessId, role: 'EMPLOYEE', status: 'ACTIVE' })
+    const employees = await User.find({
+      ...employeeListQuery(req),
+      status: 'ACTIVE'
+    })
       .select('name email employeeCode')
       .lean();
     const createdAtRange = dateRangeQuery(start, end, exclusiveEnd);
+    const jobQuery = applyBranchScope({ businessId: req.businessId, createdAt: createdAtRange }, req);
     const report = await Promise.all(employees.map(async (emp) => {
       const jobs = await Job.find({
-        businessId: req.businessId,
-        assignedTo: emp._id,
-        createdAt: createdAtRange
+        ...jobQuery,
+        assignedTo: emp._id
       }).select('status _id createdAt actualDelivery').lean();
       const completed = jobs.filter(j => ['COMPLETED', 'DELIVERED'].includes(j.status));
       const completedJobIds = completed.map(j => j._id);
-      const invoices = await Invoice.find({
+      const invoices = await Invoice.find(applyBranchScope({
         businessId: req.businessId,
         jobId: { $in: completedJobIds }
-      }).select('finalAmount').lean();
+      }, req)).select('finalAmount').lean();
       const totalRevenue = Math.round(invoices.reduce((s, inv) => s + (inv.finalAmount || 0), 0) * 100) / 100;
       const withDelivery = jobs.filter(j => j.actualDelivery);
       const avgCompletionMinutes = withDelivery.length > 0
@@ -1279,14 +1307,14 @@ router.get('/reports/employees', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/expenses?range=...&from=&to=
-router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
+router.get('/reports/expenses', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
-    const expenses = await Expense.find({
+    const expenses = await Expense.find(applyBranchScope({
       businessId: req.businessId,
       expenseDate: dateRangeQuery(start, end, exclusiveEnd)
-    })
+    }, req))
       .populate('expenseTypeId', 'expenseName')
       .populate('createdBy', 'name email')
       .sort({ expenseDate: -1, createdAt: -1 })
@@ -1316,7 +1344,7 @@ router.get('/reports/expenses', expenseAdminOnly, async (req, res) => {
 // GET /api/admin/reports/sales?range=...&from=&to=&source=all|jobs|packages&serviceIds=id1,id2
 // serviceIds: optional; limits job-linked invoices to jobs that include at least one selected service.
 // Package invoices are omitted when serviceIds is set (filter applies to job line items only).
-router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
+router.get('/reports/sales', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to, source = 'all' } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
@@ -1333,7 +1361,7 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     let invoices = [];
     if (source === 'all' || source === 'jobs') {
       // Job sales: invoices whose job was delivered in date range (use job.actualDelivery or job.updatedAt for "sale date")
-      const deliveredJobIds = await Job.find({
+      const deliveredJobIds = await Job.find(applyBranchScope({
         businessId: req.businessId,
         status: 'DELIVERED',
         $or: [
@@ -1341,11 +1369,11 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
           { updatedAt: deliveryRange, actualDelivery: { $exists: false } }
         ],
         ...jobServiceMatch
-      }).distinct('_id');
-      invoices = await Invoice.find({
+      }, req)).distinct('_id');
+      invoices = await Invoice.find(applyBranchScope({
         businessId: req.businessId,
         jobId: { $in: deliveredJobIds }
-      })
+      }, req))
         .populate({
           path: 'jobId',
           populate: [
@@ -1365,14 +1393,14 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
     const includePackageSales =
       source === 'packages' || (source === 'all' && !serviceObjectIds.length);
     if (includePackageSales) {
-      packageSales = await Invoice.find({
+      packageSales = await Invoice.find(applyBranchScope({
         businessId: req.businessId,
         saleType: 'PACKAGE',
         $or: [
           { paymentStatus: 'RECEIVED', paymentReceivedAt: deliveryRange },
           { settlementMode: 'CREDIT', saleConfirmedAt: deliveryRange }
         ]
-      })
+      }, req))
         .sort({ paymentReceivedAt: -1, createdAt: -1 })
         .lean();
       packageSales = packageSales.map((inv) => ({
@@ -1502,16 +1530,16 @@ router.get('/reports/sales', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/visits?range=...&from=&to=
-router.get('/reports/visits', expenseAdminOnly, async (req, res) => {
+router.get('/reports/visits', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const visitRange = dateRangeQuery(start, end, exclusiveEnd);
 
-    const visits = await PackageVisit.find({
+    const visits = await PackageVisit.find(applyBranchScope({
       businessId: req.businessId,
       date: visitRange
-    })
+    }, req))
       .populate({
         path: 'customerPackageId',
         select: 'name status totalVisits visitsUsed visitsRemaining customerId',
@@ -1571,11 +1599,12 @@ router.get('/reports/visits', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/collections?range=...&from=&to=
-router.get('/reports/collections', expenseAdminOnly, async (req, res) => {
+router.get('/reports/collections', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
-    const report = await buildCollectionReport(req.businessId, start, end, exclusiveEnd);
+    const branchId = req.branchScope === 'all' ? null : req.branchId;
+    const report = await buildCollectionReport(req.businessId, start, end, exclusiveEnd, branchId);
     res.json({
       success: true,
       data: report.data,
@@ -1591,12 +1620,14 @@ router.get('/reports/collections', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/outstanding?customerId=&minAmount=&overdueOnly=true
-router.get('/reports/outstanding', expenseAdminOnly, async (req, res) => {
+router.get('/reports/outstanding', adminPanelOnly, async (req, res) => {
   try {
+    const branchId = req.branchScope === 'all' ? null : req.branchId;
     const report = await buildOutstandingReport(req.businessId, {
       customerId: req.query.customerId,
       minAmount: req.query.minAmount,
-      overdueOnly: req.query.overdueOnly
+      overdueOnly: req.query.overdueOnly,
+      branchId
     });
     res.json({
       success: true,
@@ -1611,7 +1642,7 @@ router.get('/reports/outstanding', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/sales-expenses?range=today|...|custom&from=&to=
-router.get('/reports/sales-expenses', expenseAdminOnly, async (req, res) => {
+router.get('/reports/sales-expenses', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'this_month', from, to } = req.query;
     const { buildSalesExpensesStatement } = await import('../services/financialStatementsService.js');
@@ -1624,7 +1655,7 @@ router.get('/reports/sales-expenses', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/trial-balance?range=...&from=&to=
-router.get('/reports/trial-balance', expenseAdminOnly, async (req, res) => {
+router.get('/reports/trial-balance', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'this_month', from, to } = req.query;
     const { buildTrialBalance } = await import('../services/financialStatementsService.js');
@@ -1637,7 +1668,7 @@ router.get('/reports/trial-balance', expenseAdminOnly, async (req, res) => {
 });
 
 // GET /api/admin/reports/profit-loss?range=...&from=&to=
-router.get('/reports/profit-loss', expenseAdminOnly, async (req, res) => {
+router.get('/reports/profit-loss', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'this_month', from, to } = req.query;
     const { buildProfitLossStatement } = await import('../services/financialStatementsService.js');
@@ -1651,6 +1682,39 @@ router.get('/reports/profit-loss', expenseAdminOnly, async (req, res) => {
 
 // ==================== DASHBOARD ====================
 
+// @route   GET /api/admin/dashboard/branch-overview
+// @desc    Per-branch KPIs when viewing all branches (owner)
+router.get('/dashboard/branch-overview', async (req, res) => {
+  try {
+    if (req.user.role !== 'CAR_WASH_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Owner access only' });
+    }
+    if (req.branchScope !== 'all') {
+      return res.status(400).json({ success: false, message: 'Switch to All branches to view branch overview' });
+    }
+    const businessId = req.businessId;
+    const settingsLean = await BusinessSettings.findOne({ businessId }).select('timezone').lean();
+    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const range = String(req.query.range || 'today').toLowerCase();
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
+    let bounds;
+    try {
+      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+    } catch (boundsErr) {
+      if (boundsErr.statusCode === 400) {
+        return res.status(400).json({ success: false, message: boundsErr.message });
+      }
+      throw boundsErr;
+    }
+    const branches = await getBranchOverviewStats(businessId, bounds.startUtc, bounds.endUtc);
+    res.json({ success: true, branches, rangeLabel: bounds.rangeLabel });
+  } catch (error) {
+    console.error('Branch overview error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   GET /api/admin/dashboard
 // @desc    Fast dashboard stats only (KPIs). Use /admin/dashboard/charts for lazy-loaded charts.
 // @access  Private (Car Wash Admin, Employee)
@@ -1658,8 +1722,12 @@ router.get('/dashboard', async (req, res) => {
   try {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
-    const baseMatch = { businessId: new mongoose.Types.ObjectId(businessId) };
+    const baseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
     if (isEmployee) baseMatch.assignedTo = req.user._id;
+
+    const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
+    const invoiceMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
+    const expenseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
 
     const settingsLean = await BusinessSettings.findOne({ businessId })
       .select('timezone')
@@ -1682,11 +1750,12 @@ router.get('/dashboard', async (req, res) => {
     const { startUtc, endUtc, rangeLabel } = bounds;
     const nowZ = DateTime.now().setZone(businessTz);
     const startOfMonthUtc = nowZ.startOf('month').toUTC().toJSDate();
+    const washJobMatch = { ...baseMatch, ...WASH_JOB_FILTER };
 
-    // Single aggregation for all job stats (parallel in one pipeline)
+    // Single aggregation for wash job stats (excludes direct-bill product sales)
     const [jobStats, avgResult, todayRevResult, todayAdvanceCollectedResult, monthRevResult, todayExpResult] = await Promise.all([
       Job.aggregate([
-        { $match: baseMatch },
+        { $match: washJobMatch },
         {
           $facet: {
             todayJobs: [
@@ -1705,7 +1774,7 @@ router.get('/dashboard', async (req, res) => {
         }
       ]).then((r) => r[0] || {}),
       Job.aggregate([
-        { $match: { ...baseMatch, status: 'DELIVERED', actualDelivery: { $gte: startUtc, $lt: endUtc } } },
+        { $match: { ...washJobMatch, status: 'DELIVERED', actualDelivery: { $gte: startUtc, $lt: endUtc } } },
         {
           $group: {
             _id: null,
@@ -1714,7 +1783,7 @@ router.get('/dashboard', async (req, res) => {
         }
       ]),
       Invoice.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+        { $match: invoiceMatch },
         {
           $lookup: {
             from: 'jobs',
@@ -1723,6 +1792,7 @@ router.get('/dashboard', async (req, res) => {
               {
                 $match: {
                   $expr: { $eq: ['$_id', '$$jid'] },
+                  directBill: { $ne: true },
                   status: 'DELIVERED',
                   $or: [
                     { actualDelivery: { $gte: startUtc, $lt: endUtc } },
@@ -1739,7 +1809,7 @@ router.get('/dashboard', async (req, res) => {
         { $group: { _id: null, total: { $sum: '$finalAmount' } } }
       ]),
       isEmployee ? Promise.resolve([]) : Job.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId), createdAt: { $gte: startUtc, $lt: endUtc } } },
+        { $match: { ...washJobMatch, createdAt: { $gte: startUtc, $lt: endUtc } } },
         {
           $addFields: {
             advCash: {
@@ -1813,7 +1883,7 @@ router.get('/dashboard', async (req, res) => {
         { $group: { _id: null, cash: { $sum: '$advCashFinal' }, online: { $sum: '$advOnlineFinal' } } }
       ]),
       Invoice.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+        { $match: invoiceMatch },
         {
           $lookup: {
             from: 'jobs',
@@ -1822,6 +1892,7 @@ router.get('/dashboard', async (req, res) => {
               {
                 $match: {
                   $expr: { $eq: ['$_id', '$$jid'] },
+                  directBill: { $ne: true },
                   status: 'DELIVERED',
                   $or: [
                     { actualDelivery: { $gte: startOfMonthUtc } },
@@ -1838,7 +1909,7 @@ router.get('/dashboard', async (req, res) => {
         { $group: { _id: null, total: { $sum: '$finalAmount' } } }
       ]),
       isEmployee ? Promise.resolve([]) : Expense.aggregate([
-        { $match: { businessId: new mongoose.Types.ObjectId(businessId), expenseDate: { $gte: startUtc, $lt: endUtc } } },
+        { $match: { ...expenseMatch, expenseDate: { $gte: startUtc, $lt: endUtc } } },
         { $group: { _id: null, total: { $sum: '$amount' } } }
       ])
     ]);
@@ -1865,7 +1936,7 @@ router.get('/dashboard', async (req, res) => {
     };
     if (!isEmployee) {
       try {
-        cashReceived = await getTodayCashReceived(businessId, startUtc, endUtc, advCashToday, advOnlineToday);
+        cashReceived = await getTodayCashReceived(businessId, startUtc, endUtc, advCashToday, advOnlineToday, scopedBranchId);
       } catch (cashErr) {
         console.warn('Today cash received stats error:', cashErr?.message || cashErr);
       }
@@ -1894,14 +1965,48 @@ router.get('/dashboard', async (req, res) => {
       statsPayload.closingBalance = closingBalance;
 
       try {
-        const creditStats = await getCreditDashboardStats(businessId, startUtc, endUtc);
-        Object.assign(statsPayload, creditStats);
+        const modules = req.businessModules || await getBusinessModules(req.businessId);
+        if (isModuleEnabled(modules, 'credit')) {
+          const creditStats = await getCreditDashboardStats(businessId, startUtc, endUtc, scopedBranchId);
+          Object.assign(statsPayload, creditStats);
+        } else {
+          statsPayload.totalOutstandingReceivables = 0;
+          statsPayload.periodOutstandingAmount = 0;
+          statsPayload.periodOutstandingCount = 0;
+          statsPayload.overdueOutstandingAmount = 0;
+          statsPayload.overdueOutstandingCount = 0;
+          statsPayload.topOutstandingCustomers = [];
+        }
       } catch (creditErr) {
         console.warn('Credit dashboard stats error:', creditErr?.message || creditErr);
         statsPayload.totalOutstandingReceivables = 0;
+        statsPayload.periodOutstandingAmount = 0;
+        statsPayload.periodOutstandingCount = 0;
         statsPayload.overdueOutstandingAmount = 0;
         statsPayload.overdueOutstandingCount = 0;
         statsPayload.topOutstandingCustomers = [];
+      }
+
+      try {
+        const productStats = await getProductSalesDashboardStats(businessId, startUtc, endUtc, scopedBranchId);
+        Object.assign(statsPayload, productStats);
+      } catch (productErr) {
+        console.warn('Product sales dashboard stats error:', productErr?.message || productErr);
+        statsPayload.productSalesCount = 0;
+        statsPayload.productSalesRevenue = 0;
+        statsPayload.productSalesCollected = 0;
+        statsPayload.productSalesPending = 0;
+      }
+
+      try {
+        const packageStats = await getPackageSalesDashboardStats(businessId, startUtc, endUtc, scopedBranchId);
+        Object.assign(statsPayload, packageStats);
+      } catch (packageErr) {
+        console.warn('Package sales dashboard stats error:', packageErr?.message || packageErr);
+        statsPayload.packageSalesCount = 0;
+        statsPayload.packageSalesRevenue = 0;
+        statsPayload.packageSalesCollected = 0;
+        statsPayload.packageSalesPending = 0;
       }
     } else {
       statsPayload.todaySales = 0;
@@ -1921,6 +2026,42 @@ router.get('/dashboard', async (req, res) => {
   }
 });
 
+// @route   GET /api/admin/dashboard/unclosed-invoices
+// @desc    Unclosed invoices in selected dashboard period (owner)
+// @access  Private (Car Wash Admin)
+router.get('/dashboard/unclosed-invoices', async (req, res) => {
+  try {
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Admin access only' });
+    }
+    const businessId = req.businessId;
+    const settingsLean = await BusinessSettings.findOne({ businessId })
+      .select('timezone')
+      .lean();
+    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const range = String(req.query.range || 'today').toLowerCase();
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
+    let bounds;
+    try {
+      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+    } catch (boundsErr) {
+      if (boundsErr.statusCode === 400) {
+        return res.status(400).json({ success: false, message: boundsErr.message });
+      }
+      throw boundsErr;
+    }
+    const { startUtc, endUtc, rangeLabel } = bounds;
+    const limit = Math.min(Number(req.query.limit) || 10, 25);
+    const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
+    const invoices = await getDashboardUnclosedInvoices(businessId, startUtc, endUtc, limit, scopedBranchId);
+    res.json({ success: true, invoices, rangeLabel });
+  } catch (error) {
+    console.error('Dashboard unclosed invoices error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   GET /api/admin/dashboard/charts
 // @desc    Lazy-loaded charts: revenue trend + services distribution
 // @access  Private (Car Wash Admin, Employee)
@@ -1928,8 +2069,11 @@ router.get('/dashboard/charts', async (req, res) => {
   try {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
-    const baseMatch = { businessId: new mongoose.Types.ObjectId(businessId) };
+    const baseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
     if (isEmployee) baseMatch.assignedTo = req.user._id;
+
+    const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
+    const invoiceMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
 
     const settingsLean = await BusinessSettings.findOne({ businessId })
       .select('timezone')
@@ -1951,6 +2095,7 @@ router.get('/dashboard/charts', async (req, res) => {
     }
     const { startUtc, endUtc, rangeLabel } = bounds;
     const endExclusiveZ = DateTime.fromJSDate(endUtc).setZone(businessTz);
+    const washJobMatch = { ...baseMatch, ...WASH_JOB_FILTER };
 
     // Revenue trend: run 7 day queries in parallel
     const revenuePromises = [];
@@ -1961,7 +2106,7 @@ router.get('/dashboard/charts', async (req, res) => {
       const next = dayZ.plus({ days: 1 }).toUTC().toJSDate();
       revenuePromises.push(
         Invoice.aggregate([
-          { $match: { businessId: new mongoose.Types.ObjectId(businessId) } },
+          { $match: invoiceMatch },
           {
             $lookup: {
               from: 'jobs',
@@ -1970,6 +2115,7 @@ router.get('/dashboard/charts', async (req, res) => {
                 {
                   $match: {
                     $expr: { $eq: ['$_id', '$$jid'] },
+                    directBill: { $ne: true },
                     status: 'DELIVERED',
                     $or: [
                       { actualDelivery: { $gte: d, $lt: next } },
@@ -1993,41 +2139,7 @@ router.get('/dashboard/charts', async (req, res) => {
       revenue: Math.round(total * 100) / 100
     }));
 
-    const deliveredInRangeMatch = {
-      ...baseMatch,
-      status: 'DELIVERED',
-      $or: [
-        { actualDelivery: { $gte: startUtc, $lt: endUtc } },
-        { actualDelivery: { $exists: false }, updatedAt: { $gte: startUtc, $lt: endUtc } }
-      ]
-    };
-
-    // Service mix for selected range: line-item count + revenue (sum of per-job line prices)
-    const servicesDist = await Job.aggregate([
-      { $match: deliveredInRangeMatch },
-      { $unwind: '$services' },
-      {
-        $group: {
-          _id: '$services.serviceId',
-          count: { $sum: 1 },
-          revenue: { $sum: { $ifNull: ['$services.price', 0] } }
-        }
-      },
-      { $lookup: { from: 'services', localField: '_id', foreignField: '_id', as: 'svc' } },
-      { $unwind: { path: '$svc', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          _id: 0,
-          name: { $ifNull: ['$svc.name', 'Other'] },
-          count: 1,
-          revenue: { $round: [{ $ifNull: ['$revenue', 0] }, 2] },
-          value: '$count'
-        }
-      },
-      { $sort: { revenue: -1, count: -1, name: 1 } }
-    ]);
-
-    const servicesDistribution = servicesDist;
+    const servicesDistribution = await getDashboardServicesDistribution(businessId, startUtc, endUtc, scopedBranchId);
 
     // Job trend for employees: jobs completed per day (last 7 days)
     let jobTrend = [];
@@ -2043,6 +2155,7 @@ router.get('/dashboard/charts', async (req, res) => {
             {
               $match: {
                 ...baseMatch,
+                ...WASH_JOB_FILTER,
                 status: 'DELIVERED',
                 $or: [
                   { actualDelivery: { $gte: d, $lt: next } },
@@ -2086,12 +2199,43 @@ router.get('/dashboard/charts', async (req, res) => {
 router.get('/leaderboard', async (req, res) => {
   try {
     const businessId = req.businessId;
+    const settingsLean = await BusinessSettings.findOne({ businessId })
+      .select('timezone')
+      .lean();
+    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const range = String(req.query.range || 'today').toLowerCase();
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
+    let bounds;
+    try {
+      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+    } catch (boundsErr) {
+      if (boundsErr.statusCode === 400) {
+        return res.status(400).json({ success: false, message: boundsErr.message });
+      }
+      throw boundsErr;
+    }
+    const { startUtc, endUtc, rangeLabel } = bounds;
+
+    const deliveredInRange = {
+      status: 'DELIVERED',
+      $or: [
+        { actualDelivery: { $gte: startUtc, $lt: endUtc } },
+        { actualDelivery: { $exists: false }, updatedAt: { $gte: startUtc, $lt: endUtc } }
+      ]
+    };
+
+    const branchMatch = req.branchScope !== 'all' && req.branchId
+      ? { branchId: new mongoose.Types.ObjectId(String(req.branchId)) }
+      : {};
+
     const leaderboard = await Job.aggregate([
       {
         $match: {
           businessId: new mongoose.Types.ObjectId(businessId),
-          status: 'DELIVERED',
-          actualDelivery: { $exists: true },
+          ...branchMatch,
+          ...WASH_JOB_FILTER,
+          ...deliveredInRange,
           assignedTo: { $exists: true, $ne: null }
         }
       },
@@ -2138,7 +2282,7 @@ router.get('/leaderboard', async (req, res) => {
         avgCompletionMinutes: 0
       }));
     const combined = [...leaderboard, ...zeroEmps].sort((a, b) => b.completedCount - a.completedCount);
-    res.json({ success: true, leaderboard: combined });
+    res.json({ success: true, leaderboard: combined, rangeLabel });
   } catch (error) {
     console.error('Leaderboard error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -2147,16 +2291,6 @@ router.get('/leaderboard', async (req, res) => {
 
 // ==================== EMPLOYEE MANAGEMENT (Car Wash Admin only) ====================
 
-async function generateEmployeeCode(businessId) {
-  const last = await User.findOne({ businessId, role: 'EMPLOYEE' })
-    .sort({ employeeCode: -1 })
-    .select('employeeCode')
-    .lean();
-  const num = last?.employeeCode?.replace(/^EMP/i, '') || '0';
-  const next = String(parseInt(num, 10) + 1).padStart(3, '0');
-  return `EMP${next}`;
-}
-
 function randomPassword(length = 10) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
   let s = '';
@@ -2164,13 +2298,37 @@ function randomPassword(length = 10) {
   return s;
 }
 
+function employeeListQuery(req) {
+  const q = { businessId: req.businessId, role: 'EMPLOYEE' };
+  if (isBranchAdmin(req.user.role)) {
+    q.branchId = req.user.branchId;
+  } else if (req.branchScope !== 'all' && req.branchId) {
+    q.branchId = req.branchId;
+  }
+  return q;
+}
+
+async function findManagedEmployee(req, employeeId, asQuery = false) {
+  const q = { _id: employeeId, businessId: req.businessId, role: 'EMPLOYEE' };
+  if (isBranchAdmin(req.user.role)) {
+    q.branchId = req.user.branchId;
+  } else if (req.branchScope !== 'all' && req.branchId) {
+    q.branchId = req.branchId;
+  }
+  return asQuery ? q : User.findOne(q);
+}
+
 // @route   GET /api/admin/employees
 // @desc    List employees (business owner only)
 // @access  Private (Car Wash Admin)
 router.get('/employees', async (req, res) => {
   try {
-    const employees = await User.find({ businessId: req.businessId, role: 'EMPLOYEE' })
-      .select('name email phone address employeeCode status createdAt')
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const employees = await User.find(employeeListQuery(req))
+      .select('name email phone address employeeCode status branchId createdAt')
+      .populate('branchId', 'name code')
       .sort({ employeeCode: 1 })
       .lean();
     res.json({ success: true, employees });
@@ -2188,9 +2346,13 @@ router.post('/employees', [
   body('email').isEmail().normalizeEmail(),
   body('password').optional().isLength({ min: 6 }),
   body('phone').optional().trim(),
-  body('address').optional().trim()
+  body('address').optional().trim(),
+  body('branchId').optional().isMongoId()
 ], async (req, res) => {
   try {
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
@@ -2204,17 +2366,42 @@ router.post('/employees', [
       return res.status(400).json({ success: false, message: 'Email already in use' });
     }
 
-    const employeeCode = await generateEmployeeCode(req.businessId);
-    const user = await User.create({
-      name,
-      email,
-      password,
-      role: 'EMPLOYEE',
-      businessId: req.businessId,
-      phone: phone || '',
-      address: address || '',
-      employeeCode
-    });
+    let branchId = isBranchAdmin(req.user.role)
+      ? req.user.branchId
+      : (req.body.branchId || req.branchId || null);
+    if (branchId) {
+      const branch = await Branch.findOne({ _id: branchId, businessId: req.businessId, status: 'ACTIVE' });
+      if (!branch) {
+        return res.status(400).json({ success: false, message: 'Invalid branch selected' });
+      }
+    }
+
+    let user;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const employeeCode = await generateEmployeeCode(req.businessId);
+      try {
+        user = await User.create({
+          name,
+          email,
+          password,
+          role: 'EMPLOYEE',
+          businessId: req.businessId,
+          branchId: branchId || undefined,
+          phone: phone || '',
+          address: address || '',
+          employeeCode
+        });
+        break;
+      } catch (err) {
+        if (err?.code === 11000 && /employeeCode/i.test(String(err?.message || '')) && attempt < 4) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!user) {
+      return res.status(500).json({ success: false, message: 'Could not assign employee code' });
+    }
 
     res.status(201).json({
       success: true,
@@ -2226,7 +2413,8 @@ router.post('/employees', [
         phone: user.phone,
         address: user.address,
         employeeCode: user.employeeCode,
-        status: user.status
+        status: user.status,
+        branchId: user.branchId || null
       },
       temporaryPassword: password,
       message: 'Copy the password now; it will not be shown again.'
@@ -2242,16 +2430,15 @@ router.post('/employees', [
 // @access  Private (Car Wash Admin)
 router.get('/employees/:id', async (req, res) => {
   try {
-    const user = await User.findOne({
-      _id: req.params.id,
-      businessId: req.businessId,
-      role: 'EMPLOYEE'
-    }).select('-password').lean();
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const user = await findManagedEmployee(req, req.params.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
-
-    const employeeId = user._id;
+    const employee = await User.findById(user._id).select('-password').lean();
+    const employeeId = employee._id;
     const businessId = req.businessId;
 
     const deliveredJobs = await Job.find({
@@ -2327,7 +2514,7 @@ router.get('/employees/:id', async (req, res) => {
 
     res.json({
       success: true,
-      employee: user,
+      employee,
       performance: {
         completedCount,
         avgCompletionMinutes,
@@ -2354,18 +2541,18 @@ router.put('/employees/:id', [
   body('password').optional().isLength({ min: 6 }),
   body('phone').optional().trim(),
   body('address').optional().trim(),
-  body('status').optional().isIn(['ACTIVE', 'SUSPENDED', 'INACTIVE'])
+  body('status').optional().isIn(['ACTIVE', 'SUSPENDED', 'INACTIVE']),
+  body('branchId').optional({ nullable: true }).isMongoId()
 ], async (req, res) => {
   try {
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
-    const user = await User.findOne({
-      _id: req.params.id,
-      businessId: req.businessId,
-      role: 'EMPLOYEE'
-    });
+    const user = await findManagedEmployee(req, req.params.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
@@ -2373,6 +2560,17 @@ router.put('/employees/:id', [
     if (req.body.phone != null) user.phone = req.body.phone;
     if (req.body.address != null) user.address = req.body.address;
     if (req.body.status != null) user.status = req.body.status;
+    if (req.body.branchId !== undefined && !isBranchAdmin(req.user.role)) {
+      if (req.body.branchId === null || req.body.branchId === '') {
+        user.branchId = undefined;
+      } else {
+        const branch = await Branch.findOne({ _id: req.body.branchId, businessId: req.businessId, status: 'ACTIVE' });
+        if (!branch) {
+          return res.status(400).json({ success: false, message: 'Invalid branch selected' });
+        }
+        user.branchId = branch._id;
+      }
+    }
     if (req.body.email != null) {
       const existing = await User.findOne({ email: req.body.email, _id: { $ne: user._id } });
       if (existing) return res.status(400).json({ success: false, message: 'Email already in use' });
@@ -2392,7 +2590,8 @@ router.put('/employees/:id', [
       phone: user.phone,
       address: user.address,
       employeeCode: user.employeeCode,
-      status: user.status
+      status: user.status,
+      branchId: user.branchId || null
     };
     if (temporaryPassword) {
       res.json({ success: true, employee: out, temporaryPassword, message: 'Copy the new password if needed.' });
@@ -2410,11 +2609,10 @@ router.put('/employees/:id', [
 // @access  Private (Car Wash Admin)
 router.delete('/employees/:id', async (req, res) => {
   try {
-    const user = await User.findOneAndDelete({
-      _id: req.params.id,
-      businessId: req.businessId,
-      role: 'EMPLOYEE'
-    });
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const user = await User.findOneAndDelete(findManagedEmployee(req, req.params.id, true));
     if (!user) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
@@ -2430,11 +2628,10 @@ router.delete('/employees/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.post('/employees/:id/reset-password', async (req, res) => {
   try {
-    const user = await User.findOne({
-      _id: req.params.id,
-      businessId: req.businessId,
-      role: 'EMPLOYEE'
-    });
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const user = await findManagedEmployee(req, req.params.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
@@ -2459,41 +2656,46 @@ router.post('/employees/:id/reset-password', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/customers/:id', async (req, res) => {
   try {
-    const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId }).lean();
+    const customer = await findScoped(Customer, req, { _id: req.params.id });
     if (!customer) {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
+    assertBranchAccess(req, customer);
 
     const customerId = customer._id;
     const now = new Date();
+    const branchJobFilter = applyBranchScope({ businessId: req.businessId, customerId }, req);
+    const branchCarFilter = applyBranchScope({ businessId: req.businessId, customerId }, req);
+    const branchPkgFilter = applyBranchScope({ businessId: req.businessId, customerId }, req);
 
     await backfillCustomerInvoiceLinks(req.businessId, customerId);
 
-    const [cars, jobs, packages, bookings, totalJobs, deliveredJobs] = await Promise.all([
-      Car.find({ businessId: req.businessId, customerId }).sort({ createdAt: -1 }).lean(),
-      Job.find({ businessId: req.businessId, customerId })
+    const [cars, jobs, packages, bookings, totalVisits, totalProductSales, deliveredJobs] = await Promise.all([
+      Car.find(branchCarFilter).sort({ createdAt: -1 }).lean(),
+      Job.find(branchJobFilter)
         .populate('carId', 'carNumber brand model color')
-        .populate({ path: 'services.serviceId', select: 'name' })
+        .populate({ path: 'services.serviceId', select: 'name isVariable skipWorkProcess' })
         .sort({ createdAt: -1 })
-        .limit(25)
+        .limit(50)
         .lean(),
-      CustomerPackage.find({ businessId: req.businessId, customerId })
+      CustomerPackage.find(branchPkgFilter)
         .sort({ createdAt: -1 })
         .limit(10)
         .lean(),
       (async () => {
         const Booking = (await import('../models/Booking.model.js')).default;
-        return Booking.find({ businessId: req.businessId, customerId })
+        return Booking.find(applyBranchScope({ businessId: req.businessId, customerId }, req))
           .populate('slotId', 'name startTime endTime')
           .sort({ bookingDate: -1 })
           .limit(20)
           .lean();
       })(),
-      Job.countDocuments({ businessId: req.businessId, customerId }),
+      Job.countDocuments({ ...branchJobFilter, directBill: { $ne: true } }),
+      Job.countDocuments({ ...branchJobFilter, directBill: true }),
       Job.find({
-        businessId: req.businessId,
-        customerId,
-        status: 'DELIVERED'
+        ...branchJobFilter,
+        status: 'DELIVERED',
+        directBill: { $ne: true }
       })
         .sort({ actualDelivery: -1, updatedAt: -1 })
         .limit(1)
@@ -2501,7 +2703,9 @@ router.get('/customers/:id', async (req, res) => {
         .lean()
     ]);
 
-    const lastVisitJob = deliveredJobs[0] || jobs[0] || null;
+    const visitJobs = jobs.filter((j) => !j.directBill).slice(0, 25);
+    const productSales = jobs.filter((j) => j.directBill).slice(0, 25);
+    const lastVisitJob = deliveredJobs[0] || visitJobs[0] || null;
     const lastVisitAt = lastVisitJob
       ? (lastVisitJob.actualDelivery || lastVisitJob.createdAt)
       : null;
@@ -2514,11 +2718,14 @@ router.get('/customers/:id', async (req, res) => {
       success: true,
       customer,
       cars,
-      jobs,
+      jobs: visitJobs,
+      productSales,
       packages,
       bookings,
       stats: {
-        totalJobs,
+        totalJobs: totalVisits + totalProductSales,
+        totalVisits,
+        totalProductSales,
         totalCars: cars.length,
         loyaltyPoints: customer.loyaltyPointsBalance ?? 0,
         hasActivePackage,
@@ -2534,7 +2741,7 @@ router.get('/customers/:id', async (req, res) => {
 // @route   POST /api/admin/customers/:id/retention-message
 // @desc    Generate personalized retention WhatsApp message
 // @access  Private (Car Wash Admin)
-router.post('/customers/:id/retention-message', expenseAdminOnly, async (req, res) => {
+router.post('/customers/:id/retention-message', adminPanelOnly, async (req, res) => {
   try {
     const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId }).lean();
     if (!customer) {
@@ -2635,7 +2842,7 @@ router.get('/customers/:id/loyalty', async (req, res) => {
 router.get('/customers', async (req, res) => {
   try {
     const { search, page = 1, limit = 20 } = req.query;
-    const query = { businessId: req.businessId };
+    const query = applyBranchScope({ businessId: req.businessId }, req);
     if (search && typeof search === 'string' && search.trim()) {
       const orClauses = customerSearchOrClauses(search);
       if (orClauses.length) query.$or = orClauses;
@@ -2649,14 +2856,15 @@ router.get('/customers', async (req, res) => {
       .lean();
 
     const customerIds = customers.map((c) => c._id);
+    const branchStatsMatch = applyBranchScopeOid({ businessId: req.businessId, customerId: { $in: customerIds } }, req);
     const [carCounts, jobCounts] = customerIds.length
       ? await Promise.all([
           Car.aggregate([
-            { $match: { customerId: { $in: customerIds } } },
+            { $match: branchStatsMatch },
             { $group: { _id: '$customerId', count: { $sum: 1 } } }
           ]),
           Job.aggregate([
-            { $match: { customerId: { $in: customerIds } } },
+            { $match: branchStatsMatch },
             { $group: { _id: '$customerId', count: { $sum: 1 } } }
           ])
         ])
@@ -2679,8 +2887,7 @@ router.get('/customers', async (req, res) => {
     const now = new Date();
     const activePkgCustomerIds = customerIds.length
       ? await CustomerPackage.find({
-          businessId: req.businessId,
-          customerId: { $in: customerIds },
+          ...applyBranchScope({ businessId: req.businessId, customerId: { $in: customerIds } }, req),
           status: 'active',
           visitsRemaining: { $gt: 0 },
           expiryDate: { $gte: now }
@@ -2688,16 +2895,16 @@ router.get('/customers', async (req, res) => {
       : [];
     const activeSet = new Set(activePkgCustomerIds.map((id) => id.toString()));
 
-    const outstandingRows = customerIds.length
+    const outstandingRows = customerIds.length && isModuleEnabled(req.businessModules, 'credit')
       ? await Invoice.aggregate([
           {
-            $match: {
+            $match: applyBranchScopeOid({
               businessId: req.businessId,
               customerId: { $in: customerIds },
               settlementMode: 'CREDIT',
               saleConfirmedAt: { $ne: null },
               outstandingAmount: { $gt: 0.01 }
-            }
+            }, req)
           },
           { $group: { _id: '$customerId', totalOutstanding: { $sum: '$outstandingAmount' } } }
         ])
@@ -2745,18 +2952,20 @@ router.post('/customers', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
+    const branchId = branchIdForCreate(req);
     const phone = String(req.body.phone || '').trim();
     const whatsappNumber = String(req.body.whatsappNumber || '').trim();
-    const normalizedPhone = await assertCustomerPhoneAvailable(req.businessId, phone);
+    const normalizedPhone = await assertCustomerPhoneAvailable(req.businessId, phone, null, branchId);
     const normalizedWhatsapp = whatsappNumber
-      ? await assertCustomerPhoneAvailable(req.businessId, whatsappNumber)
+      ? await assertCustomerPhoneAvailable(req.businessId, whatsappNumber, null, branchId)
       : normalizedPhone;
 
     const customer = await Customer.create({
       ...req.body,
       phone: normalizedPhone,
       whatsappNumber: normalizedWhatsapp || normalizedPhone,
-      businessId: req.businessId
+      businessId: req.businessId,
+      branchId
     });
 
     res.status(201).json({
@@ -2788,11 +2997,18 @@ router.put('/customers/:id', [
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
+    const existing = await findScoped(Customer, req, { _id: req.params.id });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+    assertBranchAccess(req, existing);
+    const branchId = existing.branchId || req.branchId;
     if (req.body.phone) {
       const normalizedPhone = await assertCustomerPhoneAvailable(
         req.businessId,
         req.body.phone,
-        req.params.id
+        req.params.id,
+        branchId
       );
       req.body.phone = normalizedPhone;
       if (!req.body.whatsappNumber) {
@@ -2803,11 +3019,12 @@ router.put('/customers/:id', [
       req.body.whatsappNumber = await assertCustomerPhoneAvailable(
         req.businessId,
         req.body.whatsappNumber,
-        req.params.id
+        req.params.id,
+        branchId
       );
     }
     const customer = await Customer.findOneAndUpdate(
-      { _id: req.params.id, businessId: req.businessId },
+      scopedFilter(req, { _id: req.params.id }),
       req.body,
       { new: true, runValidators: true }
     );
@@ -2836,7 +3053,7 @@ router.put('/customers/:id', [
 // @route   DELETE /api/admin/customers/:id
 // @desc    Delete customer
 // @access  Private (Car Wash Admin)
-router.delete('/customers/:id', async (req, res) => {
+router.delete('/customers/:id', adminPanelOnly, async (req, res) => {
   try {
     const customer = await Customer.findOneAndDelete({
       _id: req.params.id,
@@ -2871,7 +3088,7 @@ router.delete('/customers/:id', async (req, res) => {
 router.get('/cars', async (req, res) => {
   try {
     const { customerId, search, page = 1, limit = 20 } = req.query;
-    const query = { businessId: req.businessId };
+    const query = applyBranchScope({ businessId: req.businessId }, req);
     if (customerId) query.customerId = customerId;
     if (search && typeof search === 'string' && search.trim()) {
       const term = escapeRegex(search);
@@ -2918,22 +3135,19 @@ router.post('/cars', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    // Verify customer belongs to business
-    const customer = await Customer.findOne({
-      _id: req.body.customerId,
-      businessId: req.businessId
-    });
-
+    const customer = await findScoped(Customer, req, { _id: req.body.customerId });
     if (!customer) {
       return res.status(404).json({
         success: false,
         message: 'Customer not found'
       });
     }
+    assertBranchAccess(req, customer);
 
     const car = await Car.create({
       ...req.body,
-      businessId: req.businessId
+      businessId: req.businessId,
+      branchId: customer.branchId || req.branchId || branchIdForCreate(req)
     });
 
     res.status(201).json({
@@ -2962,23 +3176,29 @@ router.put('/cars/:id', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
     if (req.body.customerId) {
-      const customer = await Customer.findOne({
-        _id: req.body.customerId,
-        businessId: req.businessId
-      });
+      const customer = await findScoped(Customer, req, { _id: req.body.customerId });
       if (!customer) {
         return res.status(404).json({
           success: false,
           message: 'Customer not found'
         });
       }
+      assertBranchAccess(req, customer);
     }
-    const car = await Car.findOneAndUpdate(
-      { _id: req.params.id, businessId: req.businessId },
+    const car = await Car.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!car) {
+      return res.status(404).json({
+        success: false,
+        message: 'Car not found'
+      });
+    }
+    assertBranchAccess(req, car);
+    const updated = await Car.findOneAndUpdate(
+      scopedFilter(req, { _id: req.params.id }),
       req.body,
       { new: true, runValidators: true }
     );
-    if (!car) {
+    if (!updated) {
       return res.status(404).json({
         success: false,
         message: 'Car not found'
@@ -2986,7 +3206,7 @@ router.put('/cars/:id', [
     }
     res.json({
       success: true,
-      car
+      car: updated
     });
   } catch (error) {
     console.error('Update car error:', error);
@@ -3002,10 +3222,7 @@ router.put('/cars/:id', [
 // @access  Private (Car Wash Admin)
 router.delete('/cars/:id', async (req, res) => {
   try {
-    const car = await Car.findOneAndDelete({
-      _id: req.params.id,
-      businessId: req.businessId
-    });
+    const car = await Car.findOneAndDelete(scopedFilter(req, { _id: req.params.id }));
 
     if (!car) {
       return res.status(404).json({
@@ -3035,7 +3252,7 @@ router.delete('/cars/:id', async (req, res) => {
 router.get('/services', async (req, res) => {
   try {
     const { search, page = 1, limit = 20, all } = req.query;
-    const query = { businessId: req.businessId };
+    const query = applyBranchScope({ businessId: req.businessId }, req);
     if (search && typeof search === 'string' && search.trim()) {
       const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
@@ -3047,7 +3264,7 @@ router.get('/services', async (req, res) => {
     if (returnAll) {
       const services = await Service.find(query)
         .sort({ name: 1 })
-        .select('name price minTime maxTime description loyaltyPointsEarned isActive createdAt')
+        .select('name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess isActive createdAt')
         .lean();
       const total = services.length;
       return res.json({
@@ -3079,9 +3296,11 @@ router.get('/services', async (req, res) => {
 // @route   POST /api/admin/services
 // @desc    Create new service
 // @access  Private (Car Wash Admin)
-router.post('/services', [
+router.post('/services', adminPanelOnly, [
   body('name').notEmpty().trim(),
-  body('price').isFloat({ min: 0 }),
+  body('price').optional().isFloat({ min: 0 }),
+  body('isVariable').optional().isBoolean(),
+  body('skipWorkProcess').optional().isBoolean(),
   body('minTime').optional().isInt({ min: 0 }),
   body('maxTime').optional().isInt({ min: 0 }),
   body('loyaltyPointsEarned').optional().isInt({ min: 0 })
@@ -3092,9 +3311,23 @@ router.post('/services', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
+    const isVariable = !!req.body.isVariable;
+    const skipWorkProcess = isVariable && !!req.body.skipWorkProcess;
+    if (isVariable && !isModuleEnabled(req.businessModules || await getBusinessModules(req.businessId), 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+    const price = req.body.price != null && req.body.price !== '' ? Number(req.body.price) : 0;
+    if (!isVariable && price <= 0) {
+      return res.status(400).json({ success: false, message: 'Fixed services require a price greater than zero' });
+    }
+
     const service = await Service.create({
       ...req.body,
-      businessId: req.businessId
+      isVariable,
+      skipWorkProcess,
+      price: isVariable ? Math.max(0, price) : price,
+      businessId: req.businessId,
+      branchId: branchIdForCreate(req)
     });
 
     res.status(201).json({
@@ -3113,9 +3346,11 @@ router.post('/services', [
 // @route   PUT /api/admin/services/:id
 // @desc    Update service
 // @access  Private (Car Wash Admin)
-router.put('/services/:id', [
+router.put('/services/:id', adminPanelOnly, [
   body('name').optional().notEmpty().trim(),
   body('price').optional().isFloat({ min: 0 }),
+  body('isVariable').optional().isBoolean(),
+  body('skipWorkProcess').optional().isBoolean(),
   body('minTime').optional().isInt({ min: 0 }),
   body('maxTime').optional().isInt({ min: 0 }),
   body('loyaltyPointsEarned').optional().isInt({ min: 0 })
@@ -3125,9 +3360,31 @@ router.put('/services/:id', [
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
+
+    const existing = await findScoped(Service, req, { _id: req.params.id });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Service not found' });
+    }
+    assertBranchAccess(req, existing);
+
+    const isVariable = req.body.isVariable !== undefined ? !!req.body.isVariable : !!existing.isVariable;
+    if (isVariable && !existing.isVariable && !isModuleEnabled(req.businessModules, 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+    const skipWorkProcess = isVariable
+      ? (req.body.skipWorkProcess !== undefined ? !!req.body.skipWorkProcess : !!existing.skipWorkProcess)
+      : false;
+    const price = req.body.price !== undefined
+      ? (req.body.price != null && req.body.price !== '' ? Number(req.body.price) : 0)
+      : Number(existing.price) || 0;
+    if (!isVariable && price <= 0) {
+      return res.status(400).json({ success: false, message: 'Fixed services require a price greater than zero' });
+    }
+
+    const update = { ...req.body, isVariable, skipWorkProcess, price: isVariable ? Math.max(0, price) : price };
     const service = await Service.findOneAndUpdate(
-      { _id: req.params.id, businessId: req.businessId },
-      req.body,
+      scopedFilter(req, { _id: req.params.id }),
+      update,
       { new: true, runValidators: true }
     );
     if (!service) {
@@ -3152,12 +3409,9 @@ router.put('/services/:id', [
 // @route   DELETE /api/admin/services/:id
 // @desc    Delete service
 // @access  Private (Car Wash Admin)
-router.delete('/services/:id', async (req, res) => {
+router.delete('/services/:id', adminPanelOnly, async (req, res) => {
   try {
-    const service = await Service.findOneAndDelete({
-      _id: req.params.id,
-      businessId: req.businessId
-    });
+    const service = await Service.findOneAndDelete(scopedFilter(req, { _id: req.params.id }));
 
     if (!service) {
       return res.status(404).json({
@@ -3240,13 +3494,21 @@ router.get('/jobs/:id', async (req, res) => {
 router.get('/jobs', async (req, res) => {
   try {
     const { status, page = 1, limit = 20, search, from, to, range } = req.query;
-    const query = { businessId: req.businessId };
+    const query = { ...branchFilter(req) };
     // Employee sees only jobs assigned to them
     if (req.user.role === 'EMPLOYEE') {
       query.assignedTo = req.user._id;
     }
     if (status && status !== 'ALL') {
       query.status = status;
+    }
+    const directBillParam = String(req.query.directBill || req.query.productSales || '').toLowerCase();
+    if (directBillParam === '1' || directBillParam === 'true') {
+      query.directBill = true;
+    } else if (directBillParam === 'all') {
+      // include wash jobs and product sales
+    } else {
+      query.directBill = { $ne: true };
     }
     if (search && typeof search === 'string' && search.trim()) {
       const term = escapeRegex(search);
@@ -3335,6 +3597,7 @@ router.get('/jobs', async (req, res) => {
         .lean();
       invoices.forEach(inv => {
         invoiceFinalByJob[inv.jobId?.toString()] = {
+          invoiceId: inv._id,
           finalAmount: inv.finalAmount,
           paymentMethod: inv.paymentMethod,
           paymentStatus: inv.paymentStatus
@@ -3345,6 +3608,7 @@ router.get('/jobs', async (req, res) => {
       const out = { ...j };
       const inv = invoiceFinalByJob[j._id.toString()];
       if (j.status === 'DELIVERED' && inv != null) {
+        out.invoiceId = inv.invoiceId;
         out.invoiceFinalAmount = inv.finalAmount;
         out.invoicePaymentMethod = inv.paymentMethod;
         out.invoicePaymentStatus = inv.paymentStatus;
@@ -3376,8 +3640,9 @@ router.get('/jobs', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.post('/jobs', [
   body('customerId').notEmpty().withMessage('Customer is required'),
-  body('carId').notEmpty().withMessage('Car is required'),
-  body('serviceIds').isArray({ min: 1 }).withMessage('At least one service is required'),
+  body('carId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid car'),
+  body('serviceIds').optional().isArray({ min: 1 }),
+  body('services').optional().isArray({ min: 1 }),
   body('createWithoutImages').optional().toBoolean(),
   body('beforeImages').optional().isArray(),
   body('notes').optional().trim(),
@@ -3387,7 +3652,12 @@ router.post('/jobs', [
   body('advancePayment').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('Advance must be a non-negative number'),
   body('advancePaymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('advanceCashAmount').optional().isFloat({ min: 0 }),
-  body('advanceOnlineAmount').optional().isFloat({ min: 0 })
+  body('advanceOnlineAmount').optional().isFloat({ min: 0 }),
+  body('directBill').optional().toBoolean(),
+  body('collectPaymentNow').optional().toBoolean(),
+  body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('paymentCashAmount').optional().isFloat({ min: 0 }),
+  body('paymentOnlineAmount').optional().isFloat({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -3401,15 +3671,39 @@ router.post('/jobs', [
       });
     }
 
-    const { customerId, carId, serviceIds, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId, advancePayment: advanceBody } = req.body;
+    const { customerId, carId, serviceIds, services: servicesBody, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId, advancePayment: advanceBody } = req.body;
+    const directBill = !!req.body.directBill;
+    const collectPaymentNow = req.body.collectPaymentNow === true;
 
-    // Check capacity
-    const capacityCheck = await canAcceptNewJob(req.businessId);
-    if (!capacityCheck.canAccept) {
+    if (directBill && !isModuleEnabled(req.businessModules, 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+
+    const hasServicesArray = Array.isArray(servicesBody) && servicesBody.length > 0;
+    const hasServiceIds = Array.isArray(serviceIds) && serviceIds.length > 0;
+    if (!hasServicesArray && !hasServiceIds) {
       return res.status(400).json({
         success: false,
-        message: capacityCheck.reason
+        message: 'At least one service is required'
       });
+    }
+
+    if (!req.branchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Select an active branch before creating a job or sale'
+      });
+    }
+
+    // Check capacity (direct bill skips bay — job is created as DELIVERED)
+    if (!directBill) {
+      const capacityCheck = await canAcceptNewJob(req.businessId, req.branchId);
+      if (!capacityCheck.canAccept) {
+        return res.status(400).json({
+          success: false,
+          message: capacityCheck.reason
+        });
+      }
     }
 
     // Verify customer and car belong to business
@@ -3418,63 +3712,71 @@ router.post('/jobs', [
       businessId: req.businessId
     });
 
-    const car = await Car.findOne({
-      _id: carId,
-      businessId: req.businessId,
-      customerId: customerId
-    });
+    const car = carId
+      ? await Car.findOne({
+        _id: carId,
+        businessId: req.businessId,
+        customerId: customerId
+      })
+      : null;
 
-    if (!customer || !car) {
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+
+    if (!directBill && !car) {
       return res.status(404).json({
         success: false,
         message: 'Customer or car not found'
       });
     }
 
-    // Fetch services - convert IDs for reliable $in match, accept active or unset isActive
-    const serviceIdsObj = serviceIds.map((id) => {
+    if (directBill && carId && !car) {
+      return res.status(404).json({
+        success: false,
+        message: 'Car not found for this customer'
+      });
+    }
+
+    // Fetch and validate services (supports variable pricing via services[] body)
+    let lines;
+    let catalogServices;
+    let totalPrice;
+    try {
+      ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(req.businessId, {
+        serviceIds: hasServiceIds ? serviceIds : undefined,
+        services: hasServicesArray ? servicesBody : undefined
+      }));
+    } catch (svcErr) {
+      return res.status(svcErr.status || 400).json({
+        success: false,
+        message: svcErr.message || 'Invalid services',
+        ...(svcErr.missingServiceIds ? { missingServiceIds: svcErr.missingServiceIds } : {})
+      });
+    }
+
+    if (directBill) {
       try {
-        return new mongoose.Types.ObjectId(id);
-      } catch {
-        return null;
+        assertDirectBillEligible(catalogServices);
+      } catch (billErr) {
+        return res.status(billErr.status || 400).json({ success: false, message: billErr.message });
       }
-    }).filter(Boolean);
-
-    if (serviceIdsObj.length !== serviceIds.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid service ID format'
-      });
+    } else {
+      const productSalesOnJob = catalogServices.filter((s) => s.isVariable && s.skipWorkProcess);
+      if (productSalesOnJob.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Product sale services (skip work process) must be sold as direct sales from the Variable Service tab'
+        });
+      }
     }
 
-    const businessIdObj = typeof req.businessId === 'string'
-      ? new mongoose.Types.ObjectId(req.businessId)
-      : req.businessId;
-
-    // Use unique IDs for lookup (handles duplicates); build job services from original order
-    const uniqueIds = [...new Set(serviceIdsObj.map((id) => id.toString()))].map((id) => new mongoose.Types.ObjectId(id));
-    const servicesFound = await Service.find({
-      _id: { $in: uniqueIds },
-      businessId: businessIdObj,
-      isActive: { $ne: false }
-    });
-
-    if (servicesFound.length !== uniqueIds.length) {
-      const foundIds = new Set(servicesFound.map((s) => s._id.toString()));
-      const missingIds = uniqueIds.filter((id) => !foundIds.has(id.toString()));
-      return res.status(400).json({
-        success: false,
-        message: 'One or more services not found. Ensure services exist, are active, and belong to your business.',
-        missingServiceIds: missingIds.map((id) => id.toString())
-      });
-    }
-
-    const serviceMap = new Map(servicesFound.map((s) => [s._id.toString(), s]));
-    const services = serviceIdsObj.map((id) => serviceMap.get(id.toString())).filter(Boolean);
-
-    // Calculate total price and ETA (use body value if provided and valid, else calculate from services)
-    const totalPrice = services.reduce((sum, s) => sum + s.price, 0);
-    const advancePayment = advanceBody != null && advanceBody !== '' ? Math.max(0, Number(advanceBody)) : 0;
+    const advancePayment = directBill
+      ? 0
+      : (advanceBody != null && advanceBody !== '' ? Math.max(0, Number(advanceBody)) : 0);
     if (advancePayment > totalPrice + 1e-6) {
       return res.status(400).json({
         success: false,
@@ -3483,13 +3785,18 @@ router.post('/jobs', [
     }
     let advanceFields;
     try {
-      advanceFields = normalizeJobAdvanceForCreate(req.body, advancePayment);
+      advanceFields = directBill
+        ? normalizeJobAdvanceForCreate({ ...req.body, advancePayment: 0 }, 0)
+        : normalizeJobAdvanceForCreate(req.body, advancePayment);
     } catch (advErr) {
       return res.status(advErr.status || 400).json({ success: false, message: advErr.message || 'Invalid advance split' });
     }
-    const estimatedDelivery = (estimatedDeliveryBody && !isNaN(Date.parse(estimatedDeliveryBody)))
-      ? new Date(estimatedDeliveryBody)
-      : calculateETA(services);
+    const now = new Date();
+    const estimatedDelivery = directBill
+      ? now
+      : ((estimatedDeliveryBody && !isNaN(Date.parse(estimatedDeliveryBody)))
+        ? new Date(estimatedDeliveryBody)
+        : calculateETA(catalogServices));
 
     // Create job with retry logic for duplicate token numbers
     let job;
@@ -3499,7 +3806,7 @@ router.post('/jobs', [
     while (attempts < maxAttempts) {
       try {
         // Generate token number
-        const tokenNumber = await generateTokenNumber(req.businessId);
+        const tokenNumber = await generateTokenNumber(req.businessId, req.branchId);
 
         // assignedTo: optional; if employee creates without specifying, can assign to self
         let assignedTo = assignedToBody || null;
@@ -3514,24 +3821,28 @@ router.post('/jobs', [
         // Create job
         job = await Job.create({
           businessId: req.businessId,
+          branchId: req.branchId,
           customerId,
-          carId,
+          ...(car?._id ? { carId: car._id } : {}),
           tokenNumber,
           totalPrice,
           ...advanceFields,
           estimatedDelivery,
-          beforeImages: Array.isArray(beforeImages) ? beforeImages : [],
+          beforeImages: directBill ? [] : (Array.isArray(beforeImages) ? beforeImages : []),
           notes,
           assignedTo,
           customerPackageId: customerPackageId || null,
-          services: services.map(s => ({
-            serviceId: s._id,
-            price: s.price
-          })),
-          statusHistory: [{
-            status: 'RECEIVED',
-            changedAt: new Date()
-          }]
+          services: lines,
+          ...(directBill
+            ? {
+              status: 'DELIVERED',
+              actualDelivery: now,
+              directBill: true,
+              statusHistory: directBillStatusHistory(now)
+            }
+            : {
+              statusHistory: [{ status: 'RECEIVED', changedAt: now }]
+            })
         });
         
         // Success - break out of retry loop
@@ -3553,10 +3864,50 @@ router.post('/jobs', [
       throw new Error('Failed to create job after multiple attempts');
     }
 
+    if (directBill) {
+      let invoice;
+      let paid = false;
+      let settlementWarning = null;
+      try {
+        ({ invoice, paid, settlementWarning } = await finalizeDirectBillSale({
+          job,
+          businessId: req.businessId,
+          userId: req.user._id,
+          customer,
+          car,
+          catalogServices,
+          collectPaymentNow,
+          paymentBody: {
+            paymentMethod: req.body.paymentMethod,
+            paymentCashAmount: req.body.paymentCashAmount,
+            paymentOnlineAmount: req.body.paymentOnlineAmount
+          }
+        }));
+      } catch (billErr) {
+        return res.status(billErr.status || 400).json({
+          success: false,
+          message: billErr.message || 'Failed to create invoice for direct sale'
+        });
+      }
+
+      await job.populate('customerId', 'name phone whatsappNumber');
+      await job.populate('carId', 'carNumber brand model color');
+      await job.populate('services.serviceId', 'name isVariable');
+
+      return res.status(201).json({
+        success: true,
+        job,
+        invoice,
+        directBill: true,
+        paid,
+        ...(settlementWarning ? { settlementWarning } : {})
+      });
+    }
+
     // Populate for response
     await job.populate('customerId', 'name phone whatsappNumber');
     await job.populate('carId', 'carNumber brand model color');
-    await job.populate('services.serviceId', 'name');
+    await job.populate('services.serviceId', 'name isVariable');
 
     // Send WhatsApp notification
     try {
@@ -3760,7 +4111,7 @@ router.patch('/jobs/:id/status', [
 
     await job.populate('customerId', 'name phone whatsappNumber');
     await job.populate('carId', 'carNumber brand model color');
-    await job.populate('services.serviceId', 'name');
+    await job.populate('services.serviceId', 'name isVariable');
 
     res.json({
       success: true,
@@ -3779,7 +4130,8 @@ router.patch('/jobs/:id/status', [
 // @desc    Edit job (services/notes/ETA) while not delivered
 // @access  Private (Car Wash Admin, Employee on assigned job)
 router.put('/jobs/:id', [
-  body('serviceIds').optional().isArray({ min: 1 }).withMessage('At least one service is required'),
+  body('serviceIds').optional().isArray({ min: 1 }),
+  body('services').optional().isArray({ min: 1 }),
   body('notes').optional().isString(),
   body('estimatedDelivery').optional().isISO8601()
 ], async (req, res) => {
@@ -3808,54 +4160,56 @@ router.put('/jobs/:id', [
       });
     }
 
-    const { serviceIds, notes, estimatedDelivery } = req.body;
+    const { serviceIds, services: servicesBody, notes, estimatedDelivery } = req.body;
 
     if (typeof notes === 'string') {
       job.notes = notes.trim();
     }
 
+    const hasServicesArray = Array.isArray(servicesBody) && servicesBody.length > 0;
+    const hasServiceIds = Array.isArray(serviceIds) && serviceIds.length > 0;
+
     // Update services (and total/ETA) if provided
-    if (Array.isArray(serviceIds)) {
-      const serviceIdsObj = serviceIds.map((id) => {
-        try {
-          return new mongoose.Types.ObjectId(id);
-        } catch {
-          return null;
-        }
-      }).filter(Boolean);
-
-      if (serviceIdsObj.length !== serviceIds.length) {
-        return res.status(400).json({ success: false, message: 'Invalid service ID format' });
-      }
-
-      const businessIdObj = typeof req.businessId === 'string'
-        ? new mongoose.Types.ObjectId(req.businessId)
-        : req.businessId;
-
-      const uniqueIds = [...new Set(serviceIdsObj.map((id) => id.toString()))].map((id) => new mongoose.Types.ObjectId(id));
-      const servicesFound = await Service.find({
-        _id: { $in: uniqueIds },
-        businessId: businessIdObj,
-        isActive: { $ne: false }
-      });
-
-      if (servicesFound.length !== uniqueIds.length) {
-        return res.status(400).json({
+    if (hasServicesArray || hasServiceIds) {
+      let lines;
+      let catalogServices;
+      let totalPrice;
+      try {
+        ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(req.businessId, {
+          serviceIds: hasServiceIds ? serviceIds : undefined,
+          services: hasServicesArray ? servicesBody : undefined
+        }));
+      } catch (svcErr) {
+        return res.status(svcErr.status || 400).json({
           success: false,
-          message: 'One or more services not found. Ensure services exist, are active, and belong to your business.'
+          message: svcErr.message || 'Invalid services'
         });
       }
 
-      const serviceMap = new Map(servicesFound.map((s) => [s._id.toString(), s]));
-      const orderedServices = serviceIdsObj.map((id) => serviceMap.get(id.toString())).filter(Boolean);
+      job.services = lines;
+      job.totalPrice = totalPrice;
 
-      job.services = orderedServices.map((s) => ({ serviceId: s._id, price: s.price }));
-      job.totalPrice = orderedServices.reduce((sum, s) => sum + s.price, 0);
+      const advanceOnJob = Math.max(0, Number(job.advancePayment) || 0);
+      if (advanceOnJob > totalPrice + 1e-6) {
+        return res.status(400).json({
+          success: false,
+          message: 'Job advance payment exceeds the new services total. Adjust advance before removing or changing services.'
+        });
+      }
 
-      // ETA: use body if provided and valid, else recalc from services
       job.estimatedDelivery = (estimatedDelivery && !isNaN(Date.parse(estimatedDelivery)))
         ? new Date(estimatedDelivery)
-        : calculateETA(orderedServices);
+        : calculateETA(catalogServices);
+
+      const draftInvoice = await Invoice.findOne({
+        businessId: req.businessId,
+        jobId: job._id,
+        paymentStatus: { $ne: 'RECEIVED' }
+      });
+      if (draftInvoice) {
+        await job.populate('services.serviceId', 'name');
+        await syncDraftInvoiceFromJob(draftInvoice, job);
+      }
     } else if (estimatedDelivery && !isNaN(Date.parse(estimatedDelivery))) {
       // Allow ETA-only edit without touching services
       job.estimatedDelivery = new Date(estimatedDelivery);
@@ -3865,7 +4219,7 @@ router.put('/jobs/:id', [
 
     await job.populate('customerId', 'name phone whatsappNumber');
     await job.populate('carId', 'carNumber brand model color');
-    await job.populate('services.serviceId', 'name');
+    await job.populate('services.serviceId', 'name isVariable');
     await job.populate('assignedTo', 'name employeeCode email');
 
     res.json({ success: true, job });
@@ -3880,10 +4234,10 @@ router.put('/jobs/:id', [
 // @access  Private — CAR_WASH_ADMIN only
 router.delete('/jobs/:id', async (req, res) => {
   try {
-    if (req.user.role !== 'CAR_WASH_ADMIN') {
+    if (!isAdminPanelRole(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Only the business owner can delete jobs.'
+        message: 'Only admins can delete jobs.'
       });
     }
 
@@ -4046,14 +4400,27 @@ router.put('/business', [
   body('maxConcurrentJobs').optional().isInt({ min: 1 })
 ], async (req, res) => {
   try {
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only the business owner can update business profile.' });
+    }
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
+    const allowedFields = [
+      'businessName', 'ownerName', 'email', 'phone', 'whatsappNumber', 'address', 'location',
+      'workingHoursStart', 'workingHoursEnd', 'carHandlingCapacity', 'maxConcurrentJobs',
+      'defaultCurrency', 'defaultLanguage', 'logo', 'googleReviewLink'
+    ];
+    const update = {};
+    for (const key of allowedFields) {
+      if (req.body[key] !== undefined) update[key] = req.body[key];
+    }
+
     const business = await Business.findByIdAndUpdate(
       req.businessId,
-      req.body,
+      update,
       { new: true, runValidators: true }
     );
 
@@ -4062,6 +4429,11 @@ router.put('/business', [
         success: false,
         message: 'Business not found'
       });
+    }
+
+    if (req.body.maxConcurrentJobs != null || req.body.carHandlingCapacity != null) {
+      const { syncMaxConcurrentJobsForBusiness } = await import('../services/branchService.js');
+      await syncMaxConcurrentJobsForBusiness(req.businessId, { business });
     }
 
     res.json({
@@ -4148,6 +4520,9 @@ router.put('/settings', [
   body('whatsappTemplates.drying').optional().isString(),
   body('whatsappTemplates.completed').optional().isString(),
   body('whatsappTemplates.delivered').optional().isString(),
+  body('whatsappTemplates.invoiceShare').optional().isString(),
+  body('whatsappTemplates.invoicePackage').optional().isString(),
+  body('whatsappTemplates.googleReview').optional().isString(),
   body('upiId').optional().trim().isString(),
   body('qrCodeImage').optional().trim().isString(),
   body('paymentMobileNumber').optional().trim().isString(),
@@ -4157,10 +4532,16 @@ router.put('/settings', [
   body('loyaltyMaxRedeemPointsPerJob').optional({ nullable: true }).isInt({ min: 0 })
 ], async (req, res) => {
   try {
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only the business owner can change shop settings.' });
+    }
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
+
+    let settings = await BusinessSettings.findOne({ businessId: req.businessId });
+
     const updateFields = {};
     if (req.body.capacity !== undefined) updateFields.capacity = req.body.capacity;
     if (req.body.timezone !== undefined) updateFields.timezone = req.body.timezone;
@@ -4170,7 +4551,11 @@ router.put('/settings', [
     if (req.body.shopWhatsappNumber !== undefined) updateFields.shopWhatsappNumber = req.body.shopWhatsappNumber?.trim() || null;
     if (req.body.googleReviewLink !== undefined) updateFields.googleReviewLink = req.body.googleReviewLink?.trim() || null;
     if (req.body.whatsappTemplates !== undefined) {
-      updateFields.whatsappTemplates = normalizeWhatsappTemplates(req.body.whatsappTemplates);
+      const existing = normalizeWhatsappTemplates(settings?.whatsappTemplates);
+      updateFields.whatsappTemplates = normalizeWhatsappTemplates({
+        ...existing,
+        ...req.body.whatsappTemplates
+      });
     }
     if (req.body.upiId !== undefined) updateFields.upiId = req.body.upiId?.trim() || null;
     if (req.body.qrCodeImage !== undefined) updateFields.qrCodeImage = req.body.qrCodeImage?.trim() || null;
@@ -4183,7 +4568,6 @@ router.put('/settings', [
     if (req.body.loyaltyPointValueInr !== undefined) updateFields.loyaltyPointValueInr = req.body.loyaltyPointValueInr === '' ? 0 : Number(req.body.loyaltyPointValueInr);
     if (req.body.loyaltyMaxRedeemPointsPerJob !== undefined) updateFields.loyaltyMaxRedeemPointsPerJob = req.body.loyaltyMaxRedeemPointsPerJob === '' ? 0 : Number(req.body.loyaltyMaxRedeemPointsPerJob);
 
-    let settings = await BusinessSettings.findOne({ businessId: req.businessId });
     if (!settings) {
       settings = await BusinessSettings.create({
         businessId: req.businessId,
@@ -4224,25 +4608,6 @@ router.put('/settings', [
 
 // ==================== MANUAL SUBSCRIPTION ====================
 
-// Ensure at least one active SubscriptionPlan exists (default "Free Tier")
-// so Car Wash Admin "My Plan" shows plans even if Super Admin only added plans in "Plans & Pricing".
-async function ensureDefaultSubscriptionPlan() {
-  const count = await SubscriptionPlan.countDocuments();
-  if (count > 0) return;
-  await SubscriptionPlan.create({
-    name: 'Free Tier',
-    description: 'Default free plan for new shops',
-    validityDays: 14,
-    features: ['Basic access'],
-    isActive: true,
-    isFreeTrial: true
-  });
-}
-
-function isFreeTrialPlan(plan) {
-  return plan?.isFreeTrial === true || (plan?.name && /free tier/i.test(plan.name));
-}
-
 async function getPlatformDefaultCurrency() {
   const platform = await PlatformSettings.findOne({}).select('defaultCurrency').lean();
   return platform?.defaultCurrency || 'USD';
@@ -4279,6 +4644,7 @@ router.get('/my-subscription', async (req, res) => {
         expiryDate,
         status: 'ACTIVE'
       });
+      invalidateSubscriptionCache(req.businessId);
       await subscription.populate('planId', 'name description validityDays features isActive isFreeTrial price');
     }
     const subObj = subscription.toObject ? subscription.toObject() : subscription;
@@ -4287,6 +4653,7 @@ router.get('/my-subscription', async (req, res) => {
         { _id: subscription._id },
         { status: 'EXPIRED' }
       );
+      invalidateSubscriptionCache(req.businessId);
       subObj.status = 'EXPIRED';
     }
     const business = await Business.findById(req.businessId).select('freeTrialUsed').lean();
@@ -4294,10 +4661,145 @@ router.get('/my-subscription', async (req, res) => {
     const hasPendingUpgrade = await PlanUpgradeRequest.exists({ shopId: req.businessId, status: 'PENDING' });
     const canRequestUpgrade = !hasPendingUpgrade;
     const currency = await getPlatformDefaultCurrency();
-    res.json({ success: true, subscription: subObj, canRequestUpgrade, freeTrialUsed, currency });
+    const enabledModules = await getBusinessModules(req.businessId);
+    res.json({ success: true, subscription: subObj, canRequestUpgrade, freeTrialUsed, currency, enabledModules });
   } catch (error) {
     console.error('Get my-subscription error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/admin/branch-licenses
+// @desc    Branch subscription licenses for business owner (My Plan)
+// @access  Private (Car Wash Admin / business owner only)
+router.get('/branch-licenses', async (req, res) => {
+  try {
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const modules = await getBusinessModules(req.businessId);
+    if (!isModuleEnabled(modules, 'branches')) {
+      return res.json({
+        success: true,
+        branchesEnabled: false,
+        config: null,
+        branches: [],
+        requests: [],
+        pendingCreate: false
+      });
+    }
+    await ensureDefaultBranchForBusiness(req.businessId);
+    const config = await getBranchUsageStats(req.businessId);
+    const branches = await Branch.find({
+      businessId: req.businessId,
+      status: { $in: ['ACTIVE', 'EXPIRED', 'INACTIVE'] }
+    })
+      .sort({ isDefault: -1, name: 1 })
+      .lean();
+    const subs = await BranchSubscription.find({ businessId: req.businessId }).lean();
+    const subByBranch = new Map(subs.map((s) => [String(s.branchId), s]));
+    const requests = await BranchCreationRequest.find({ businessId: req.businessId })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+    const pendingRenewalBranchIds = new Set(
+      requests
+        .filter((r) => r.status === 'PENDING' && r.requestType === 'RENEW')
+        .map((r) => String(r.renewBranchId))
+    );
+    const pendingCreate = requests.some((r) => r.status === 'PENDING' && r.requestType === 'CREATE');
+    const pendingRenewals = requests.filter((r) => r.status === 'PENDING' && r.requestType === 'RENEW');
+
+    const enriched = await Promise.all(branches.map(async (b) => ({
+      _id: b._id,
+      name: b.name,
+      code: b.code,
+      isDefault: b.isDefault,
+      status: b.status,
+      moduleSuspended: b.status === 'INACTIVE',
+      subscription: b.isDefault ? null : (subByBranch.get(String(b._id)) || null),
+      operational: await isBranchOperational(b),
+      pendingRenewal: pendingRenewalBranchIds.has(String(b._id)),
+      canRequestRenewal: !b.isDefault
+        && !!subByBranch.get(String(b._id))
+        && !pendingRenewalBranchIds.has(String(b._id))
+        && !pendingCreate
+        && branchLicenseNeedsRenewal(b, subByBranch.get(String(b._id)))
+    })));
+
+    res.json({
+      success: true,
+      branchesEnabled: true,
+      config,
+      branches: enriched,
+      requests,
+      pendingCreate,
+      pendingRenewals
+    });
+  } catch (error) {
+    console.error('Get branch-licenses error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/admin/branch-renewal-requests
+// @desc    Branch license renewal requests for business owner
+// @access  Private (Car Wash Admin / business owner only)
+router.get('/branch-renewal-requests', async (req, res) => {
+  try {
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const requests = await BranchCreationRequest.find({
+      businessId: req.businessId,
+      requestType: 'RENEW'
+    })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .populate('renewBranchId', 'name code');
+    res.json({ success: true, requests });
+  } catch (error) {
+    console.error('Get branch-renewal-requests error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   POST /api/admin/branch-renewal-request
+// @desc    Submit branch license renewal request (like plan upgrade)
+// @access  Private (Car Wash Admin / business owner only)
+router.post('/branch-renewal-request', [
+  body('branchId').notEmpty(),
+  body('message').optional().trim()
+], async (req, res) => {
+  try {
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const modules = await getBusinessModules(req.businessId);
+    if (!isModuleEnabled(modules, 'branches')) {
+      return moduleDisabledResponse(res, 'branches');
+    }
+    const config = await getBranchPlatformConfig();
+    const request = await submitBranchRenewalRequest(
+      req.businessId,
+      req.user._id,
+      req.body.branchId,
+      req.body.message
+    );
+    res.status(201).json({
+      success: true,
+      request,
+      expectedFee: config.branchAnnualFee,
+      validityDays: config.branchValidityDays,
+      message: `Renewal request submitted. ₹${config.branchAnnualFee}/year applies after Super Admin verifies payment.`
+    });
+  } catch (error) {
+    console.error('Branch renewal request error:', error);
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Server error' });
   }
 });
 
@@ -4392,6 +4894,7 @@ router.post('/upgrade-request', [
           { shopId: req.businessId },
           { status: 'PENDING_UPGRADE' }
         );
+        invalidateSubscriptionCache(req.businessId);
       }
     } catch (_) {}
 
@@ -4452,7 +4955,7 @@ router.get('/settlement-change-requests', async (req, res) => {
       .lean();
 
     const pendingCount =
-      req.user.role === 'CAR_WASH_ADMIN'
+      isAdminPanelRole(req.user.role)
         ? await SettlementChangeRequest.countDocuments({ businessId: req.businessId, status: 'PENDING' })
         : 0;
 
@@ -4476,10 +4979,10 @@ router.post('/settlement-change-requests', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    if (req.user.role === 'CAR_WASH_ADMIN') {
+    if (isAdminPanelRole(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'Business owners can edit settlement dates directly on the job or invoice page.'
+        message: 'Admins can edit settlement dates directly on the job or invoice page.'
       });
     }
 
@@ -4560,7 +5063,7 @@ router.post('/settlement-change-requests', [
 });
 
 // PATCH /api/admin/settlement-change-requests/:id/approve
-router.patch('/settlement-change-requests/:id/approve', expenseAdminOnly, async (req, res) => {
+router.patch('/settlement-change-requests/:id/approve', adminPanelOnly, async (req, res) => {
   try {
     const request = await SettlementChangeRequest.findOne({
       _id: req.params.id,
@@ -4611,7 +5114,7 @@ router.patch('/settlement-change-requests/:id/approve', expenseAdminOnly, async 
 });
 
 // PATCH /api/admin/settlement-change-requests/:id/reject
-router.patch('/settlement-change-requests/:id/reject', expenseAdminOnly, [
+router.patch('/settlement-change-requests/:id/reject', adminPanelOnly, [
   body('reviewNote').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
   try {
@@ -4645,7 +5148,7 @@ router.patch('/settlement-change-requests/:id/reject', expenseAdminOnly, [
 });
 
 // PATCH /api/admin/jobs/:id/settlement-dates — business owner direct edit (no approval workflow)
-router.patch('/jobs/:id/settlement-dates', expenseAdminOnly, [
+router.patch('/jobs/:id/settlement-dates', adminPanelOnly, [
   body('deliveredAt').isISO8601().withMessage('Valid delivery date/time required'),
   body('invoiceAt').optional({ checkFalsy: true }).isISO8601(),
   body('note').optional().trim().isLength({ max: 500 })

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { invalidateBusinessAuthCache } from '../utils/authCache.js';
 
 const businessSchema = new mongoose.Schema({
   businessName: {
@@ -76,12 +77,36 @@ const businessSchema = new mongoose.Schema({
   freeTrialUsed: {
     type: Boolean,
     default: false
-  }
+  },
+  /** Super-admin module toggles — when false, feature hidden and API blocked. */
+  enabledModules: {
+    bookings: { type: Boolean, default: true },
+    packages: { type: Boolean, default: true },
+    variableServices: { type: Boolean, default: true },
+    accounting: { type: Boolean, default: true },
+    aiInsights: { type: Boolean, default: true },
+    branches: { type: Boolean, default: true },
+    printer: { type: Boolean, default: true },
+    credit: { type: Boolean, default: true }
+  },
+  /** Saved branch statuses when multi-branch module is turned off (for restore). */
+  branchModuleSuspendSnapshot: [{
+    branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch' },
+    status: { type: String, enum: ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'EXPIRED'] }
+  }]
 }, {
   timestamps: true
 });
 
 // Indexes
 businessSchema.index({ status: 1 });
+
+businessSchema.post('save', function(doc) {
+  invalidateBusinessAuthCache(doc._id);
+});
+
+businessSchema.post('findOneAndUpdate', function(doc) {
+  if (doc?._id) invalidateBusinessAuthCache(doc._id);
+});
 
 export default mongoose.model('Business', businessSchema);

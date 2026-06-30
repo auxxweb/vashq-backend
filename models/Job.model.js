@@ -23,7 +23,14 @@ const jobServiceSchema = new mongoose.Schema({
   },
   price: {
     type: Number,
-    required: true
+    required: true,
+    min: 0
+  },
+  /** Optional label override (e.g. custom variable service description on this job). */
+  customName: {
+    type: String,
+    trim: true,
+    default: ''
   }
 }, { _id: false });
 
@@ -33,6 +40,12 @@ const jobSchema = new mongoose.Schema({
     ref: 'Business',
     required: true
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null,
+    index: true
+  },
   customerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer',
@@ -41,7 +54,7 @@ const jobSchema = new mongoose.Schema({
   carId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Car',
-    required: true
+    default: null
   },
   tokenNumber: {
     type: String,
@@ -113,19 +126,25 @@ const jobSchema = new mongoose.Schema({
     ref: 'Booking',
     default: null,
     index: true
+  },
+  /** Counter / variable sale billed immediately without wash workflow. */
+  directBill: {
+    type: Boolean,
+    default: false,
+    index: true
   }
 }, {
   timestamps: true
 });
 
 // Indexes
-jobSchema.index({ businessId: 1 });
+jobSchema.index({ businessId: 1, branchId: 1 });
 jobSchema.index({ assignedTo: 1 });
 jobSchema.index({ customerId: 1 });
 jobSchema.index({ carId: 1 });
 jobSchema.index({ status: 1 });
-// Compound unique index: tokenNumber must be unique per business
-jobSchema.index({ businessId: 1, tokenNumber: 1 }, { unique: true });
+// Compound unique index: tokenNumber must be unique per business + branch
+jobSchema.index({ businessId: 1, branchId: 1, tokenNumber: 1 }, { unique: true });
 jobSchema.index({ createdAt: -1 });
 jobSchema.index({ businessId: 1, status: 1, createdAt: -1 });
 jobSchema.index({ businessId: 1, assignedTo: 1, status: 1, createdAt: -1 });

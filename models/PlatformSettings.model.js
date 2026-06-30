@@ -35,6 +35,27 @@ const platformSettingsSchema = new mongoose.Schema({
     default: 'US',
     trim: true,
     uppercase: true
+  },
+  /** Annual fee per additional branch (INR). First branch is included with shop plan. */
+  branchAnnualFee: {
+    type: Number,
+    default: 2000,
+    min: 0
+  },
+  branchValidityDays: {
+    type: Number,
+    default: 365,
+    min: 1
+  },
+  maxBranchesPerBusiness: {
+    type: Number,
+    default: 10,
+    min: 1
+  },
+  includedBranchesPerShop: {
+    type: Number,
+    default: 1,
+    min: 1
   }
 }, {
   timestamps: true

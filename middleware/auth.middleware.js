@@ -3,7 +3,7 @@ import User from '../models/User.model.js';
 import Business from '../models/Business.model.js';
 import { cacheGetOrSet } from '../utils/cache.js';
 
-const AUTH_CACHE_TTL = 60_000;
+const AUTH_CACHE_TTL = 10_000;
 
 export const authenticate = async (req, res, next) => {
   try {
@@ -35,8 +35,8 @@ export const authenticate = async (req, res, next) => {
       });
     }
 
-    // Check business status for car wash admins and employees
-    if ((user.role === 'CAR_WASH_ADMIN' || user.role === 'EMPLOYEE') && user.businessId) {
+    // Check business status for car wash admins, branch admins, and employees
+    if ((user.role === 'CAR_WASH_ADMIN' || user.role === 'BRANCH_ADMIN' || user.role === 'EMPLOYEE') && user.businessId) {
       const business = await cacheGetOrSet(`auth:business:${user.businessId}`, AUTH_CACHE_TTL, () =>
         Business.findById(user.businessId).select('status').lean()
       );

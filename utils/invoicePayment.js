@@ -95,3 +95,29 @@ export function normalizeInvoicePaymentFields(invoice, body) {
   invoice.paymentCashAmount = roundMoney(pCash);
   invoice.paymentOnlineAmount = roundMoney(pOnline);
 }
+
+/** Relabel cash vs online on a closed invoice without changing totals (reporting correction). */
+export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod) {
+  const method = paymentMethod || invoice.paymentMethod;
+  invoice.paymentMethod = method;
+  const total = roundMoney(
+    (Number(invoice.paymentCashAmount) || 0) + (Number(invoice.paymentOnlineAmount) || 0)
+  );
+  if (method === 'ONLINE') {
+    invoice.paymentCashAmount = 0;
+    invoice.paymentOnlineAmount = total;
+  } else if (method === 'SPLIT') {
+    const cash = roundMoney(Number(invoice.paymentCashAmount) || 0);
+    if (cash > 0 && cash < total) {
+      invoice.paymentCashAmount = cash;
+      invoice.paymentOnlineAmount = roundMoney(total - cash);
+    } else {
+      invoice.paymentCashAmount = total;
+      invoice.paymentOnlineAmount = 0;
+      invoice.paymentMethod = 'CASH';
+    }
+  } else {
+    invoice.paymentCashAmount = total;
+    invoice.paymentOnlineAmount = 0;
+  }
+}

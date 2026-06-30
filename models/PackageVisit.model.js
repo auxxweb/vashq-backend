@@ -7,6 +7,7 @@ const serviceUsedSchema = new mongoose.Schema({
 
 const packageVisitSchema = new mongoose.Schema({
   businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, index: true },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null, index: true },
   customerPackageId: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomerPackage', required: true, index: true },
   bookingId: { type: mongoose.Schema.Types.ObjectId, required: false, index: true }, // optional integration
   // If this visit originated as a scheduled booking, keep the scheduled datetime here

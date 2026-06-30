@@ -11,9 +11,10 @@ function roundSummary(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-export async function buildCollectionReport(businessId, start, end, exclusiveEnd = true) {
+export async function buildCollectionReport(businessId, start, end, exclusiveEnd = true, branchId = null) {
   const bizOid = new mongoose.Types.ObjectId(String(businessId));
   const dateRange = exclusiveEnd ? { $gte: start, $lt: end } : { $gte: start, $lte: end };
+  const branchClause = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const [collections, creditCheckouts] = await Promise.all([
     PaymentCollection.find({
@@ -26,6 +27,7 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
       .lean(),
     Invoice.find({
       businessId: bizOid,
+      ...branchClause,
       settlementMode: 'CREDIT',
       saleConfirmedAt: dateRange,
       $or: [
@@ -129,6 +131,9 @@ export async function buildOutstandingReport(businessId, filters = {}) {
   if (customerId && mongoose.isValidObjectId(String(customerId))) {
     invoiceQuery.customerId = new mongoose.Types.ObjectId(String(customerId));
   }
+  if (filters.branchId && mongoose.isValidObjectId(String(filters.branchId))) {
+    invoiceQuery.branchId = new mongoose.Types.ObjectId(String(filters.branchId));
+  }
   if (minAmount > 0) {
     invoiceQuery.outstandingAmount = { $gte: minAmount };
   }
@@ -222,8 +227,10 @@ export async function buildOutstandingReport(businessId, filters = {}) {
 }
 
 /** Unified cash-in for the period: advances + full-pay checkout + credit checkout + credit recovery (no double count). */
-export async function getTodayCashReceived(businessId, startUtc, endUtc, advanceCash = 0, advanceOnline = 0) {
+export async function getTodayCashReceived(businessId, startUtc, endUtc, advanceCash = 0, advanceOnline = 0, branchId = null) {
   const bizOid = new mongoose.Types.ObjectId(String(businessId));
+  const branchOid = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
+  const jobBranchMatch = branchOid ? { branchId: branchOid } : {};
 
   const paidInWindow = {
     paymentStatus: 'RECEIVED',
@@ -246,6 +253,7 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
           businessId: bizOid,
           jobId: { $exists: true, $ne: null },
           saleType: { $nin: ['PACKAGE'] },
+          ...(branchOid ? { branchId: branchOid } : {}),
           ...paidInWindow
         }
       },
@@ -258,7 +266,8 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
               $match: {
                 $expr: { $eq: ['$_id', '$$jid'] },
                 businessId: bizOid,
-                status: 'DELIVERED'
+                status: 'DELIVERED',
+                ...jobBranchMatch
               }
             },
             { $limit: 1 }
@@ -275,6 +284,7 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
         $match: {
           businessId: bizOid,
           saleType: 'PACKAGE',
+          ...(branchOid ? { branchId: branchOid } : {}),
           ...paidInWindow
         }
       },
@@ -291,6 +301,7 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
           businessId: bizOid,
           settlementMode: 'CREDIT',
           saleConfirmedAt: { $gte: startUtc, $lt: endUtc },
+          ...(branchOid ? { branchId: branchOid } : {}),
           $or: [
             { paymentCashAmount: { $gt: 0.01 } },
             { paymentOnlineAmount: { $gt: 0.01 } }
@@ -339,16 +350,20 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
   };
 }
 
-export async function getCreditDashboardStats(businessId, startUtc, endUtc) {
+export async function getCreditDashboardStats(businessId, startUtc, endUtc, branchId = null) {
   const bizOid = new mongoose.Types.ObjectId(String(businessId));
+  const branchOid = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
+  const branchFilter = branchOid ? { branchId: branchOid } : {};
   const now = new Date();
+  const periodRange = { $gte: startUtc, $lt: endUtc };
 
-  const [openInvoices, topAgg] = await Promise.all([
+  const [openInvoices, topAgg, periodOutstandingAgg] = await Promise.all([
     Invoice.find({
       businessId: bizOid,
       settlementMode: 'CREDIT',
       saleConfirmedAt: { $ne: null },
-      outstandingAmount: { $gt: 0.01 }
+      outstandingAmount: { $gt: 0.01 },
+      ...branchFilter
     }).select('customerId outstandingAmount creditDueDate').lean(),
     Invoice.aggregate([
       {
@@ -356,7 +371,8 @@ export async function getCreditDashboardStats(businessId, startUtc, endUtc) {
           businessId: bizOid,
           settlementMode: 'CREDIT',
           outstandingAmount: { $gt: 0.01 },
-          saleConfirmedAt: { $ne: null }
+          saleConfirmedAt: { $ne: null },
+          ...branchFilter
         }
       },
       {
@@ -367,7 +383,25 @@ export async function getCreditDashboardStats(businessId, startUtc, endUtc) {
         }
       },
       { $sort: { totalOutstanding: -1 } },
-      { $limit: 5 }
+      { $limit: 4 }
+    ]),
+    Invoice.aggregate([
+      {
+        $match: {
+          businessId: bizOid,
+          settlementMode: 'CREDIT',
+          saleConfirmedAt: periodRange,
+          outstandingAmount: { $gt: 0.01 },
+          ...branchFilter
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$outstandingAmount' },
+          count: { $sum: 1 }
+        }
+      }
     ])
   ]);
 
@@ -399,6 +433,8 @@ export async function getCreditDashboardStats(businessId, startUtc, endUtc) {
 
   return {
     totalOutstandingReceivables: roundSummary(totalOutstandingReceivables),
+    periodOutstandingAmount: roundSummary(periodOutstandingAgg[0]?.total ?? 0),
+    periodOutstandingCount: periodOutstandingAgg[0]?.count ?? 0,
     overdueOutstandingAmount: roundSummary(overdueOutstandingAmount),
     overdueOutstandingCount,
     topOutstandingCustomers

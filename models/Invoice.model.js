@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import crypto from 'crypto';
 
 const invoiceItemSchema = new mongoose.Schema({
+  serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service' },
   serviceName: { type: String, required: true, trim: true },
   servicePrice: { type: Number, required: true, min: 0 }
 }, { _id: false });
@@ -12,6 +13,7 @@ const invoiceSchema = new mongoose.Schema({
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomerPackage' },
   packageName: { type: String, trim: true },
   businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null, index: true },
   invoiceNumber: { type: String, required: true, trim: true },
   // Company (for display)
   companyName: { type: String, trim: true },

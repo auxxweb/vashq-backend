@@ -10,7 +10,11 @@ import User from '../models/User.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
 import { balanceDue, assertSettlementMatchesDue, roundMoney } from '../utils/invoicePayment.js';
 import { isCreditSettlementMode, closePackageOnCredit } from '../services/credit/creditInvoiceService.js';
+import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
+import { moduleDisabledResponse } from '../middleware/businessModules.middleware.js';
 import { getInvoiceCompanySnapshot } from '../utils/invoiceCompany.js';
+import { applyBranchScope } from '../utils/branchQuery.js';
+import { assertBranchAccess, findScoped, branchIdForCreate } from '../utils/branchAccess.js';
 
 // ==================== Helpers ====================
 
@@ -308,14 +312,15 @@ export async function purchasePackage(req, res) {
       return res.status(404).json({ success: false, message: 'Package template not found' });
     }
 
-    const customer = await Customer.findOne({ _id: customerId, businessId: req.businessId });
+    const customer = await findScoped(Customer, req, { _id: customerId });
     if (!customer) {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
+    assertBranchAccess(req, customer);
 
     let car = null;
     if (carId) {
-      car = await Car.findOne({ _id: carId, businessId: req.businessId, customerId: customer._id });
+      car = await findScoped(Car, req, { _id: carId, customerId: customer._id });
       if (!car) {
         return res.status(400).json({ success: false, message: 'Car not found for this customer' });
       }
@@ -330,8 +335,11 @@ export async function purchasePackage(req, res) {
       quantity: Math.max(1, Math.floor(Number(row.quantity || 1)))
     }));
 
+    const purchaseBranchId = customer.branchId || req.branchId || branchIdForCreate(req);
+
     const customerPackage = await CustomerPackage.create({
       businessId: req.businessId,
+      branchId: purchaseBranchId,
       customerId: customer._id,
       packageTemplateId: template._id,
       name: template.name,
@@ -360,6 +368,7 @@ export async function purchasePackage(req, res) {
       packageId: customerPackage._id,
       packageName: template.name,
       businessId: req.businessId,
+      branchId: purchaseBranchId,
       invoiceNumber,
       companyName: company?.businessName || null,
       companyOwnerName: company?.ownerName || null,
@@ -440,7 +449,7 @@ export async function getCustomerPackages(req, res) {
 export async function listCustomerPackages(req, res) {
   try {
     const { status, remaining } = req.query;
-    const query = { businessId: req.businessId };
+    const query = applyBranchScope({ businessId: req.businessId }, req);
     if (status && typeof status === 'string' && status.trim()) {
       query.status = status.trim();
     }
@@ -474,10 +483,10 @@ export async function getCustomerPackageDetail(req, res) {
 
     await markExpiredPackages(req.businessId, { _id: pkgId });
 
-    const customerPackage = await CustomerPackage.findOne({
+    const customerPackage = await CustomerPackage.findOne(applyBranchScope({
       _id: pkgId,
       businessId: req.businessId
-    })
+    }, req))
       .populate('customerId', 'name phone email whatsappNumber')
       .lean();
 
@@ -561,6 +570,10 @@ export async function closePackageSale(req, res) {
     }
 
     if (isCreditSettlementMode(req.body)) {
+      const modules = await getBusinessModules(req.businessId);
+      if (!isModuleEnabled(modules, 'credit')) {
+        return moduleDisabledResponse(res, 'credit');
+      }
       try {
         const result = await closePackageOnCredit({
           invoice,
@@ -607,18 +620,18 @@ export async function listVisits(req, res) {
       return res.status(400).json({ success: false, message: 'Invalid package id' });
     }
 
-    const pkg = await CustomerPackage.findOne({
+    const pkg = await CustomerPackage.findOne(applyBranchScope({
       _id: customerPackageId,
       businessId: req.businessId
-    }).select('_id').lean();
+    }, req)).select('_id').lean();
     if (!pkg) {
       return res.status(404).json({ success: false, message: 'Customer package not found' });
     }
 
-    const visits = await PackageVisit.find({
+    const visits = await PackageVisit.find(applyBranchScope({
       businessId: req.businessId,
       customerPackageId
-    })
+    }, req))
       .sort({ date: -1, createdAt: -1 })
       .lean();
 
@@ -700,6 +713,7 @@ export async function scheduleVisit(req, res) {
 
     const visit = await PackageVisit.create({
       businessId: req.businessId,
+      branchId: req.branchId || null,
       customerPackageId: refreshed._id,
       scheduledFor: scheduledAt,
       date: scheduledAt,
@@ -780,6 +794,25 @@ export async function completeVisit(req, res) {
     }
 
     const now = new Date();
+    const decremented = await CustomerPackage.findOneAndUpdate(
+      {
+        _id: refreshed._id,
+        businessId: req.businessId,
+        status: 'active',
+        visitsRemaining: { $gt: 0 },
+        expiryDate: { $gte: now }
+      },
+      { $inc: { visitsUsed: 1, visitsRemaining: -1 } },
+      { new: true }
+    );
+    if (!decremented) {
+      return res.status(409).json({ success: false, message: 'No visits remaining or package is no longer active' });
+    }
+    if (decremented.visitsRemaining === 0) {
+      decremented.status = 'completed';
+      await CustomerPackage.updateOne({ _id: decremented._id }, { $set: { status: 'completed' } });
+    }
+
     let visit = await PackageVisit.findOne({
       businessId: req.businessId,
       customerPackageId: refreshed._id,
@@ -803,6 +836,7 @@ export async function completeVisit(req, res) {
     } else {
       visit = await PackageVisit.create({
         businessId: req.businessId,
+        branchId: req.branchId || null,
         customerPackageId: refreshed._id,
         bookingId: bookingId && mongoose.isValidObjectId(String(bookingId)) ? bookingId : undefined,
         date: now,
@@ -811,13 +845,8 @@ export async function completeVisit(req, res) {
       });
     }
 
-    applyServiceDeductions(refreshed, visitFields.servicesUsed);
-    refreshed.visitsUsed = Number(refreshed.visitsUsed || 0) + 1;
-    refreshed.visitsRemaining = Math.max(0, Number(refreshed.visitsRemaining || 0) - 1);
-    if (refreshed.visitsRemaining === 0) {
-      refreshed.status = 'completed';
-    }
-    await refreshed.save();
+    applyServiceDeductions(decremented, visitFields.servicesUsed);
+    await decremented.save();
 
     try {
       const ownerId = await resolveOwnerId(req);
@@ -825,12 +854,12 @@ export async function completeVisit(req, res) {
         await sendPushNotification({
           businessOwnerId: ownerId,
           title: 'Package visit completed',
-          body: `${refreshed.name} visit marked completed`,
+          body: `${decremented.name} visit marked completed`,
           data: {
             type: 'visit_completed',
-            packageId: String(refreshed._id),
+            packageId: String(decremented._id),
             refId: String(visit._id),
-            url: `/admin/packages/${refreshed._id}`
+            url: `/admin/packages/${decremented._id}`
           }
         });
       }
@@ -838,7 +867,7 @@ export async function completeVisit(req, res) {
       console.warn('Push notification error (visit_completed):', pushErr?.message || pushErr);
     }
 
-    res.json({ success: true, data: visit, customerPackage: refreshed });
+    res.json({ success: true, data: visit, customerPackage: decremented });
   } catch (error) {
     console.error('Complete package visit error:', error);
     res.status(500).json({ success: false, message: 'Server error' });

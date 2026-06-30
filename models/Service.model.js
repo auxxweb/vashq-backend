@@ -6,6 +6,12 @@ const serviceSchema = new mongoose.Schema({
     ref: 'Business',
     required: true
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null,
+    index: true
+  },
   name: {
     type: String,
     required: [true, 'Service name is required'],
@@ -14,7 +20,8 @@ const serviceSchema = new mongoose.Schema({
   price: {
     type: Number,
     required: [true, 'Price is required'],
-    min: [0, 'Price must be non-negative']
+    min: [0, 'Price must be non-negative'],
+    default: 0
   },
   minTime: {
     type: Number,
@@ -33,6 +40,16 @@ const serviceSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: [0, 'Loyalty points must be non-negative']
+  },
+  /** When true, price is entered per job/invoice (catalog price is optional guide only). */
+  isVariable: {
+    type: Boolean,
+    default: false
+  },
+  /** When true (and isVariable), sold via Variable Service tab — skips wash workflow and bills immediately. */
+  skipWorkProcess: {
+    type: Boolean,
+    default: false
   },
   isActive: {
     type: Boolean,

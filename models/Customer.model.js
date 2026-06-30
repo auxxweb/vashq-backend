@@ -7,6 +7,12 @@ const customerSchema = new mongoose.Schema({
     ref: 'Business',
     required: true
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    default: null,
+    index: true
+  },
   name: {
     type: String,
     required: [true, 'Name is required'],
@@ -60,7 +66,7 @@ customerSchema.pre('validate', async function validateUniquePhone(next) {
       return next(new Error('Phone is required'));
     }
 
-    const filter = customerPhoneFilter(this.businessId, this.phone);
+    const filter = customerPhoneFilter(this.businessId, this.phone, this.branchId);
     if (!this.isNew) filter._id = { $ne: this._id };
 
     const duplicate = await this.constructor.findOne(filter).select('_id').lean();
@@ -74,8 +80,9 @@ customerSchema.pre('validate', async function validateUniquePhone(next) {
   }
 });
 
-// Indexes — unique per business on phone (same number allowed across businesses)
+// Indexes — unique per business+branch on phone
 customerSchema.index({ businessId: 1 });
+customerSchema.index({ businessId: 1, branchId: 1, phone: 1 });
 customerSchema.index({ businessId: 1, phone: 1 });
 customerSchema.index({ phone: 1 });
 

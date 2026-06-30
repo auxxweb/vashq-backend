@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import cors from 'cors';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -23,9 +24,22 @@ import businessRoutes from './routes/business.routes.js';
 import aiInsightsRoutes from './routes/aiInsights.routes.js';
 import bookingAdminRoutes from './routes/bookingAdmin.routes.js';
 import { initFirebaseAdmin } from './services/firebaseAdmin.js';
+import branchesRoutes from './routes/branches.routes.js';
 import { startCronJobs } from './cronJobs.js';
 
 const app = express();
+
+if (process.env.NODE_ENV === 'production') {
+  const secret = process.env.JWT_SECRET || '';
+  if (!secret || secret === 'your-secret-key-change-in-production') {
+    console.error('FATAL: Set a strong JWT_SECRET in production.');
+    process.exit(1);
+  }
+}
+
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 
 // Middleware - allow FRONTEND_URL (string or comma-separated) or defaults
 const corsOrigin = process.env.FRONTEND_URL
@@ -58,11 +72,21 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/employee-login', authLimiter);
+app.use('/api/auth/forgot-password', authLimiter);
+app.use('/api/auth/reset-password', authLimiter);
+app.use('/api/auth/register', rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many registration attempts.' }
+}));
 
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/branches', branchesRoutes);
 app.use('/api/admin/ai-insights', aiInsightsRoutes);
 app.use('/api/admin/bookings', bookingAdminRoutes);
 app.use('/api/packages', packageRoutes);

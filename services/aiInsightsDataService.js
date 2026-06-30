@@ -30,7 +30,7 @@ function dateWindow(range, from, to) {
   return parseAiInsightsDateRange(range, from, to);
 }
 
-async function getBusinessContext(businessId) {
+export async function getBusinessContext(businessId) {
   const [business, settings] = await Promise.all([
     Business.findById(businessId).select('businessName defaultCurrency carHandlingCapacity maxConcurrentJobs workingHoursStart workingHoursEnd').lean(),
     BusinessSettings.findOne({ businessId }).select('timezone currency').lean()
