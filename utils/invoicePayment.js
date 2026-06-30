@@ -92,6 +92,7 @@ export function normalizeInvoicePaymentFields(invoice, body) {
     }
   }
 
+  invoice.paymentMethod = method;
   invoice.paymentCashAmount = roundMoney(pCash);
   invoice.paymentOnlineAmount = roundMoney(pOnline);
 }
@@ -99,25 +100,37 @@ export function normalizeInvoicePaymentFields(invoice, body) {
 /** Relabel cash vs online on a closed invoice without changing totals (reporting correction). */
 export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod) {
   const method = paymentMethod || invoice.paymentMethod;
-  invoice.paymentMethod = method;
   const total = roundMoney(
     (Number(invoice.paymentCashAmount) || 0) + (Number(invoice.paymentOnlineAmount) || 0)
   );
+  const cash = roundMoney(Number(invoice.paymentCashAmount) || 0);
+  const online = roundMoney(Number(invoice.paymentOnlineAmount) || 0);
+
   if (method === 'ONLINE') {
+    invoice.paymentMethod = 'ONLINE';
     invoice.paymentCashAmount = 0;
     invoice.paymentOnlineAmount = total;
-  } else if (method === 'SPLIT') {
-    const cash = roundMoney(Number(invoice.paymentCashAmount) || 0);
-    if (cash > 0 && cash < total) {
+    return;
+  }
+  if (method === 'SPLIT') {
+    if (cash > EPS && online > EPS) {
+      invoice.paymentMethod = 'SPLIT';
       invoice.paymentCashAmount = cash;
-      invoice.paymentOnlineAmount = roundMoney(total - cash);
-    } else {
-      invoice.paymentCashAmount = total;
-      invoice.paymentOnlineAmount = 0;
-      invoice.paymentMethod = 'CASH';
+      invoice.paymentOnlineAmount = online;
+      return;
     }
-  } else {
+    if (online > EPS) {
+      invoice.paymentMethod = 'ONLINE';
+      invoice.paymentCashAmount = 0;
+      invoice.paymentOnlineAmount = total;
+      return;
+    }
+    invoice.paymentMethod = 'CASH';
     invoice.paymentCashAmount = total;
     invoice.paymentOnlineAmount = 0;
+    return;
   }
+  invoice.paymentMethod = 'CASH';
+  invoice.paymentCashAmount = total;
+  invoice.paymentOnlineAmount = 0;
 }

@@ -32,7 +32,8 @@ export async function resolveBranchContext(req, res, next) {
       return next();
     }
 
-    const modules = await getBusinessModules(req.businessId);
+    const modules = req.businessModules || await getBusinessModules(req.businessId);
+    req.businessModules = modules;
     const branchesModuleOn = isModuleEnabled(modules, 'branches');
     const defaultBranch = await ensureDefaultBranchForBusiness(req.businessId);
 

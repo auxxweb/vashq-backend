@@ -74,7 +74,9 @@ export function parseBusinessDateRange(businessTz, range, fromQ = '', toQ = '') 
     }
     startZ = fromZ;
     endExclusiveZ = endExclusiveDayZ(toZ);
-    rangeLabel = 'Custom';
+    rangeLabel = fromZ.hasSame(toZ, 'day')
+      ? fromZ.toFormat('d MMM yyyy')
+      : `${fromZ.toFormat('d MMM')} – ${toZ.toFormat('d MMM yyyy')}`;
   } else {
     startZ = startOfDayZ(nowZ);
     endExclusiveZ = endExclusiveDayZ(startZ);

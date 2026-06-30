@@ -3,6 +3,51 @@ import { roundMoney } from './invoicePayment.js';
 const EPS = 0.02;
 
 /**
+ * Cash + online for a credit payment collection row.
+ * Legacy rows without split amounts infer from paymentMethod.
+ *
+ * @param {object} c - PaymentCollection lean doc (amount, paymentMethod, paymentCashAmount, paymentOnlineAmount)
+ * @returns {{ cash: number, online: number }}
+ */
+export function collectionCashOnline(c) {
+  if (!c) return { cash: 0, online: 0 };
+  const amt = roundMoney(Number(c.amount) || 0);
+  const pc = roundMoney(Number(c.paymentCashAmount) || 0);
+  const po = roundMoney(Number(c.paymentOnlineAmount) || 0);
+  const pm = c.paymentMethod || 'CASH';
+  const hasStored = pc + po > EPS;
+
+  if (pm === 'SPLIT') {
+    if (hasStored) return { cash: pc, online: po };
+    return { cash: amt, online: 0 };
+  }
+  if (hasStored) return { cash: pc, online: po };
+  if (pm === 'ONLINE') return { cash: 0, online: amt };
+  return { cash: amt, online: 0 };
+}
+
+/**
+ * Cash + online collected at credit checkout (excludes advance).
+ * Uses stored split amounts when present; otherwise infers from paymentMethod.
+ */
+export function creditCheckoutCashOnline(inv) {
+  if (!inv) return { cash: 0, online: 0 };
+  const pc = roundMoney(Number(inv.paymentCashAmount) || 0);
+  const po = roundMoney(Number(inv.paymentOnlineAmount) || 0);
+  const settled = roundMoney(pc + po);
+  const pm = inv.paymentMethod || 'CASH';
+  const hasStored = settled > EPS;
+
+  if (pm === 'SPLIT') {
+    if (hasStored) return { cash: pc, online: po };
+    return { cash: 0, online: 0 };
+  }
+  if (hasStored) return { cash: pc, online: po };
+  if (pm === 'ONLINE') return { cash: 0, online: settled };
+  return { cash: settled, online: 0 };
+}
+
+/**
  * Cash + online amounts collected at invoice settlement (checkout only).
  * Uses balance due = finalAmount - min(advancePayment, finalAmount), not full final amount.
  * For legacy rows with no stored split amounts, infers from paymentMethod.

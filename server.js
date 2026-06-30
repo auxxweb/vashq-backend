@@ -30,6 +30,7 @@ import { startCronJobs } from './cronJobs.js';
 const app = express();
 
 if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
   const secret = process.env.JWT_SECRET || '';
   if (!secret || secret === 'your-secret-key-change-in-production') {
     console.error('FATAL: Set a strong JWT_SECRET in production.');
@@ -57,10 +58,26 @@ app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Health check
+// Health check (includes DB readiness for load balancers)
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  const dbReady = mongoose.connection.readyState === 1;
+  res.status(dbReady ? 200 : 503).json({
+    status: dbReady ? 'OK' : 'DEGRADED',
+    db: dbReady ? 'connected' : 'disconnected',
+    message: dbReady ? 'Server is running' : 'Database unavailable'
+  });
 });
+
+// General API rate limit (auth routes have stricter limits below)
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 400,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/api/health',
+  message: { success: false, message: 'Too many requests, please try again later.' }
+});
+app.use('/api', apiLimiter);
 
 // Rate limit auth endpoints to reduce brute-force load
 const authLimiter = rateLimit({
@@ -113,7 +130,10 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/washq_saas', {
       maxPoolSize: 20,
-      serverSelectionTimeoutMS: 10_000
+      minPoolSize: 2,
+      serverSelectionTimeoutMS: 10_000,
+      socketTimeoutMS: 45_000,
+      maxIdleTimeMS: 30_000
     });
     console.log('MongoDB connected successfully');
 

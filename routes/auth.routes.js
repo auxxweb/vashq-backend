@@ -10,6 +10,7 @@ import { authenticate } from '../middleware/auth.middleware.js';
 import { isBranchOperational } from '../services/branchService.js';
 import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
 import { invalidateUserAuthCache } from '../utils/authCache.js';
+import { isAdminPanelRole } from '../utils/adminRoles.js';
 
 async function assertBranchesModuleForBusiness(businessId) {
   const modules = await getBusinessModules(businessId);
@@ -414,11 +415,12 @@ router.get('/me', authenticate, async (req, res) => {
 });
 
 // @route   PUT /api/auth/me/password
-// @desc    Change own password (any authenticated user)
+// @desc    Change own password (business owner or branch admin only)
 // @access  Private
 router.put('/me/password', authenticate, [
   body('currentPassword').notEmpty(),
-  body('newPassword').isLength({ min: 6 })
+  body('newPassword').isLength({ min: 6 }),
+  body('confirmPassword').optional().isLength({ min: 6 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -429,11 +431,24 @@ router.put('/me/password', authenticate, [
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    const valid = await user.comparePassword(req.body.currentPassword);
+    if (!isAdminPanelRole(user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Employee accounts cannot change password here. Ask your business or branch admin to reset it.'
+      });
+    }
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+    if (confirmPassword != null && newPassword !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'New passwords do not match' });
+    }
+    const valid = await user.comparePassword(currentPassword);
     if (!valid) {
       return res.status(400).json({ success: false, message: 'Current password is incorrect' });
     }
-    user.password = req.body.newPassword;
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ success: false, message: 'New password must be different from current password' });
+    }
+    user.password = newPassword;
     await user.save();
     invalidateUserAuthCache(user._id);
     res.json({ success: true, message: 'Password updated successfully' });

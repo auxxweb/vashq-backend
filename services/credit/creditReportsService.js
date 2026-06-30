@@ -4,11 +4,42 @@ import Invoice from '../../models/Invoice.model.js';
 import Customer from '../../models/Customer.model.js';
 import User from '../../models/User.model.js';
 import { roundMoney } from '../../utils/creditPayment.js';
-import { invoiceSettlementAggregationStages } from '../../utils/paymentChannelAmounts.js';
+import {
+  collectionCashOnline,
+  creditCheckoutCashOnline,
+  invoiceSettlementAggregationStages
+} from '../../utils/paymentChannelAmounts.js';
 import { deriveCollectionDisplayStatus, getTotalCollected } from './outstandingService.js';
 
 function roundSummary(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+async function loadCollectionsInRange(businessId, dateRange, branchId = null) {
+  const bizOid = new mongoose.Types.ObjectId(String(businessId));
+  const baseQuery = PaymentCollection.find({
+    businessId: bizOid,
+    collectionDate: dateRange
+  })
+    .populate('customerId', 'name phone')
+    .populate('collectedBy', 'name email')
+    .sort({ collectionDate: -1, createdAt: -1 });
+
+  if (!branchId) {
+    return baseQuery.lean();
+  }
+
+  const branchOid = new mongoose.Types.ObjectId(String(branchId));
+  const branchInvoiceIds = new Set(
+    (await Invoice.find({ businessId: bizOid, branchId: branchOid }).select('_id').lean())
+      .map((row) => String(row._id))
+  );
+  if (!branchInvoiceIds.size) return [];
+
+  const rows = await baseQuery.lean();
+  return rows.filter((row) =>
+    (row.allocations || []).some((alloc) => branchInvoiceIds.has(String(alloc.invoiceId)))
+  );
 }
 
 export async function buildCollectionReport(businessId, start, end, exclusiveEnd = true, branchId = null) {
@@ -17,14 +48,7 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
   const branchClause = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const [collections, creditCheckouts] = await Promise.all([
-    PaymentCollection.find({
-      businessId: bizOid,
-      collectionDate: dateRange
-    })
-      .populate('customerId', 'name phone')
-      .populate('collectedBy', 'name email')
-      .sort({ collectionDate: -1, createdAt: -1 })
-      .lean(),
+    loadCollectionsInRange(businessId, dateRange, branchId),
     Invoice.find({
       businessId: bizOid,
       ...branchClause,
@@ -40,42 +64,45 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
       .lean()
   ]);
 
-  const checkoutSettlement = (inv) =>
-    roundMoney((Number(inv.paymentCashAmount) || 0) + (Number(inv.paymentOnlineAmount) || 0));
+  const recoveryRows = collections.map((c) => {
+    const channels = collectionCashOnline(c);
+    return {
+      rowType: 'credit_recovery',
+      _id: c._id,
+      date: c.collectionDate,
+      customerId: c.customerId?._id || c.customerId,
+      customerName: c.customerId?.name || '',
+      customerPhone: c.customerId?.phone || '',
+      amount: roundMoney(c.amount),
+      paymentMethod: c.paymentMethod,
+      paymentCashAmount: channels.cash,
+      paymentOnlineAmount: channels.online,
+      allocationMode: c.allocationMode,
+      invoicesAffected: (c.allocations || []).map((a) => a.invoiceNumber).filter(Boolean).join(', '),
+      notes: c.notes || '',
+      collectedBy: c.collectedBy?.name || c.collectedBy?.email || ''
+    };
+  });
 
-  const recoveryRows = collections.map((c) => ({
-    rowType: 'credit_recovery',
-    _id: c._id,
-    date: c.collectionDate,
-    customerId: c.customerId?._id || c.customerId,
-    customerName: c.customerId?.name || '',
-    customerPhone: c.customerId?.phone || '',
-    amount: roundMoney(c.amount),
-    paymentMethod: c.paymentMethod,
-    paymentCashAmount: roundMoney(c.paymentCashAmount),
-    paymentOnlineAmount: roundMoney(c.paymentOnlineAmount),
-    allocationMode: c.allocationMode,
-    invoicesAffected: (c.allocations || []).map((a) => a.invoiceNumber).filter(Boolean).join(', '),
-    notes: c.notes || '',
-    collectedBy: c.collectedBy?.name || c.collectedBy?.email || ''
-  }));
-
-  const checkoutRows = creditCheckouts.map((inv) => ({
-    rowType: 'credit_checkout',
-    _id: inv._id,
-    date: inv.saleConfirmedAt,
-    customerId: inv.customerId,
-    customerName: inv.customerName || '',
-    customerPhone: inv.customerPhone || '',
-    amount: checkoutSettlement(inv),
-    paymentMethod: inv.paymentMethod,
-    paymentCashAmount: roundMoney(inv.paymentCashAmount),
-    paymentOnlineAmount: roundMoney(inv.paymentOnlineAmount),
-    allocationMode: 'CHECKOUT',
-    invoicesAffected: inv.invoiceNumber || '',
-    notes: '',
-    collectedBy: ''
-  }));
+  const checkoutRows = creditCheckouts.map((inv) => {
+    const channels = creditCheckoutCashOnline(inv);
+    return {
+      rowType: 'credit_checkout',
+      _id: inv._id,
+      date: inv.saleConfirmedAt,
+      customerId: inv.customerId,
+      customerName: inv.customerName || '',
+      customerPhone: inv.customerPhone || '',
+      amount: roundMoney(channels.cash + channels.online),
+      paymentMethod: inv.paymentMethod,
+      paymentCashAmount: channels.cash,
+      paymentOnlineAmount: channels.online,
+      allocationMode: 'CHECKOUT',
+      invoicesAffected: inv.invoiceNumber || '',
+      notes: '',
+      collectedBy: ''
+    };
+  });
 
   const data = [...recoveryRows, ...checkoutRows].sort(
     (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
@@ -88,14 +115,16 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
 
   for (const c of collections) {
     creditRecovery += Number(c.amount) || 0;
-    totalCash += Number(c.paymentCashAmount) || 0;
-    totalOnline += Number(c.paymentOnlineAmount) || 0;
+    const channels = collectionCashOnline(c);
+    totalCash += channels.cash;
+    totalOnline += channels.online;
   }
   for (const inv of creditCheckouts) {
-    const settled = checkoutSettlement(inv);
+    const channels = creditCheckoutCashOnline(inv);
+    const settled = roundMoney(channels.cash + channels.online);
     checkoutCollection += settled;
-    totalCash += Number(inv.paymentCashAmount) || 0;
-    totalOnline += Number(inv.paymentOnlineAmount) || 0;
+    totalCash += channels.cash;
+    totalOnline += channels.online;
   }
 
   const totalCollection = creditRecovery + checkoutCollection;
@@ -246,7 +275,7 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
     ]
   };
 
-  const [fullPayJobAgg, fullPayPackageAgg, collections, creditCheckoutAgg] = await Promise.all([
+  const [fullPayJobAgg, fullPayPackageAgg, collections, creditCheckoutInvoices] = await Promise.all([
     Invoice.aggregate([
       {
         $match: {
@@ -291,32 +320,19 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
       ...invoiceSettlementAggregationStages(),
       { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
     ]),
-    PaymentCollection.find({
+    loadCollectionsInRange(businessId, { $gte: startUtc, $lt: endUtc }, branchId),
+    Invoice.find({
       businessId: bizOid,
-      collectionDate: { $gte: startUtc, $lt: endUtc }
-    }).select('amount paymentCashAmount paymentOnlineAmount').lean(),
-    Invoice.aggregate([
-      {
-        $match: {
-          businessId: bizOid,
-          settlementMode: 'CREDIT',
-          saleConfirmedAt: { $gte: startUtc, $lt: endUtc },
-          ...(branchOid ? { branchId: branchOid } : {}),
-          $or: [
-            { paymentCashAmount: { $gt: 0.01 } },
-            { paymentOnlineAmount: { $gt: 0.01 } }
-          ]
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: { $add: [{ $ifNull: ['$paymentCashAmount', 0] }, { $ifNull: ['$paymentOnlineAmount', 0] }] } },
-          cash: { $sum: '$paymentCashAmount' },
-          online: { $sum: '$paymentOnlineAmount' }
-        }
-      }
-    ])
+      settlementMode: 'CREDIT',
+      saleConfirmedAt: { $gte: startUtc, $lt: endUtc },
+      ...(branchOid ? { branchId: branchOid } : {}),
+      $or: [
+        { paymentCashAmount: { $gt: 0.01 } },
+        { paymentOnlineAmount: { $gt: 0.01 } }
+      ]
+    })
+      .select('paymentMethod paymentCashAmount paymentOnlineAmount')
+      .lean()
   ]);
 
   let todayCreditRecovery = 0;
@@ -324,15 +340,22 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
   let recoveryOnline = 0;
   for (const c of collections) {
     todayCreditRecovery += Number(c.amount) || 0;
-    recoveryCash += Number(c.paymentCashAmount) || 0;
-    recoveryOnline += Number(c.paymentOnlineAmount) || 0;
+    const channels = collectionCashOnline(c);
+    recoveryCash += channels.cash;
+    recoveryOnline += channels.online;
   }
 
   const fullPayCash = (fullPayJobAgg[0]?.cash ?? 0) + (fullPayPackageAgg[0]?.cash ?? 0);
   const fullPayOnline = (fullPayJobAgg[0]?.online ?? 0) + (fullPayPackageAgg[0]?.online ?? 0);
-  const checkout = creditCheckoutAgg[0] || { total: 0, cash: 0, online: 0 };
-  const creditCheckoutCash = checkout.cash || 0;
-  const creditCheckoutOnline = checkout.online || 0;
+  let creditCheckoutCash = 0;
+  let creditCheckoutOnline = 0;
+  let creditCheckoutTotal = 0;
+  for (const inv of creditCheckoutInvoices) {
+    const channels = creditCheckoutCashOnline(inv);
+    creditCheckoutCash += channels.cash;
+    creditCheckoutOnline += channels.online;
+    creditCheckoutTotal += roundSummary(channels.cash + channels.online);
+  }
 
   const advCash = roundSummary(advanceCash);
   const advOnline = roundSummary(advanceOnline);
@@ -344,7 +367,7 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
     todayCashReceivedCash,
     todayCashReceivedOnline,
     todayFullPayCheckout: roundSummary(fullPayCash + fullPayOnline),
-    todayCreditCheckout: roundSummary(checkout.total || 0),
+    todayCreditCheckout: roundSummary(creditCheckoutTotal),
     todayCreditRecovery: roundSummary(todayCreditRecovery),
     todayAdvances: roundSummary(advCash + advOnline)
   };

@@ -8,10 +8,13 @@ import BusinessSettings from '../models/BusinessSettings.model.js';
 import PlatformSettings from '../models/PlatformSettings.model.js';
 import { sumExpenseChannelTotals } from '../utils/expensePayment.js';
 import { roundMoney } from '../utils/invoicePayment.js';
+import { invoiceSettlementCashOnline, creditCheckoutCashOnline } from '../utils/paymentChannelAmounts.js';
 import { parseAiInsightsDateRange } from '../utils/aiInsightsDateRange.js';
 import { buildCollectionReport, getTodayCashReceived } from './credit/creditReportsService.js';
 
 export { parseAiInsightsDateRange as parseStatementDateRange };
+
+const PAYMENT_EPS = 0.02;
 
 function bizOid(id) {
   return new mongoose.Types.ObjectId(id);
@@ -93,13 +96,17 @@ async function gatherPeriodFinancials(businessId, start, end) {
 
     const pc = roundMoney(Number(inv.paymentCashAmount) || 0);
     const po = roundMoney(Number(inv.paymentOnlineAmount) || 0);
-    if (pc + po > 0) {
+    if (pc + po > PAYMENT_EPS) {
       salesCash += pc;
       salesOnline += po;
-    } else if (inv.paymentMethod === 'ONLINE' && inv.paymentStatus === 'RECEIVED') {
-      salesOnline += roundMoney(Math.max(0, amt - Math.min(Number(inv.advancePayment) || 0, amt)));
-    } else if (inv.paymentStatus === 'RECEIVED' && !isCredit) {
-      salesCash += roundMoney(Math.max(0, amt - Math.min(Number(inv.advancePayment) || 0, amt)));
+    } else if (inv.paymentStatus === 'RECEIVED') {
+      const ch = invoiceSettlementCashOnline(inv);
+      salesCash += ch.cash;
+      salesOnline += ch.online;
+    } else if (isCredit) {
+      const ch = creditCheckoutCashOnline(inv);
+      salesCash += ch.cash;
+      salesOnline += ch.online;
     }
 
     totalGst += roundMoney(Number(inv.gstAmount) || 0);

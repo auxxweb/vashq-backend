@@ -1,4 +1,7 @@
 import { effectiveAdvance, roundMoney } from '../../utils/invoicePayment.js';
+import mongoose from 'mongoose';
+import Invoice from '../../models/Invoice.model.js';
+import { applyBranchScopeOid } from '../../utils/branchQuery.js';
 
 const EPS = 0.02;
 
@@ -89,6 +92,33 @@ export function applyCollectionToInvoice(invoice, amount) {
 
   invoice.amountCollectedLater = roundMoney((Number(invoice.amountCollectedLater) || 0) + alloc);
   return syncInvoiceOutstanding(invoice);
+}
+
+/** Sum outstanding credit balances per customer (branch-scoped when req.branchId is set). */
+export async function aggregateOutstandingByCustomer(businessId, req, { customerIds = null } = {}) {
+  const match = applyBranchScopeOid({
+    businessId: new mongoose.Types.ObjectId(String(businessId)),
+    settlementMode: 'CREDIT',
+    saleConfirmedAt: { $ne: null },
+    outstandingAmount: { $gt: 0.01 }
+  }, req);
+
+  if (customerIds?.length) {
+    match.customerId = {
+      $in: customerIds.map((id) => new mongoose.Types.ObjectId(String(id)))
+    };
+  }
+
+  const rows = await Invoice.aggregate([
+    { $match: match },
+    { $group: { _id: '$customerId', totalOutstanding: { $sum: '$outstandingAmount' } } }
+  ]);
+
+  return new Map(
+    rows
+      .filter((row) => row._id)
+      .map((row) => [String(row._id), Math.round(row.totalOutstanding * 100) / 100])
+  );
 }
 
 export function sumCustomerOutstanding(invoices) {

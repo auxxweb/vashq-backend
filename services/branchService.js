@@ -15,8 +15,13 @@ import Expense from '../models/Expense.model.js';
 import Booking from '../models/Booking.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
 import CustomerPackage from '../models/CustomerPackage.model.js';
+import User from '../models/User.model.js';
+import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import { getBranchPlatformConfig, normalizeBranchCode, suggestBranchCode } from '../utils/branchConfig.js';
 import { getBusinessModules, isModuleEnabled } from './businessModulesService.js';
+import { cacheGetOrSet, cacheDelete } from '../utils/cache.js';
+
+const DEFAULT_BRANCH_CACHE_TTL = 120_000;
 
 export async function seedBranchSettingsFromBusiness(businessId, branchId) {
   const [businessSettings, business] = await Promise.all([
@@ -56,7 +61,18 @@ export async function ensureDefaultBranchForBusiness(businessId) {
   const businessObjectId = typeof businessId === 'string'
     ? new mongoose.Types.ObjectId(businessId)
     : businessId;
+  const cacheKey = `defaultBranch:${String(businessObjectId)}`;
 
+  const cached = await cacheGetOrSet(cacheKey, DEFAULT_BRANCH_CACHE_TTL, async () => {
+    const branch = await resolveDefaultBranchForBusiness(businessObjectId);
+    return branch?.toObject ? branch.toObject() : branch;
+  });
+
+  if (!cached) return null;
+  return Branch.hydrate(cached);
+}
+
+async function resolveDefaultBranchForBusiness(businessObjectId) {
   let defaultBranch = await Branch.findOne({ businessId: businessObjectId, isDefault: true });
   if (defaultBranch) {
     await backfillBranchIdOnLegacyRecords(businessObjectId, defaultBranch._id);
@@ -105,22 +121,104 @@ export async function ensureDefaultBranchForBusiness(businessId) {
 }
 
 async function backfillBranchIdOnLegacyRecords(businessId, branchId) {
-  await Promise.all([
-    Job.updateMany({ businessId, branchId: { $exists: false } }, { $set: { branchId } }),
-    Job.updateMany({ businessId, branchId: null }, { $set: { branchId } }),
-    Invoice.updateMany({ businessId, branchId: { $exists: false } }, { $set: { branchId } }),
-    Invoice.updateMany({ businessId, branchId: null }, { $set: { branchId } }),
-    Expense.updateMany({ businessId, branchId: { $exists: false } }, { $set: { branchId } }),
-    Expense.updateMany({ businessId, branchId: null }, { $set: { branchId } }),
-    Booking.updateMany({ businessId, branchId: { $exists: false } }, { $set: { branchId } }),
-    Booking.updateMany({ businessId, branchId: null }, { $set: { branchId } }),
-    PackageVisit.updateMany({ businessId, branchId: { $exists: false } }, { $set: { branchId } }),
-    PackageVisit.updateMany({ businessId, branchId: null }, { $set: { branchId } }),
-    Customer.updateMany({ businessId, branchId: { $in: [null, undefined] } }, { $set: { branchId } }),
-    Car.updateMany({ businessId, branchId: { $in: [null, undefined] } }, { $set: { branchId } }),
-    Service.updateMany({ businessId, branchId: { $in: [null, undefined] } }, { $set: { branchId } }),
-    CustomerPackage.updateMany({ businessId, branchId: { $in: [null, undefined] } }, { $set: { branchId } })
+  const missingBranch = { $or: [{ branchId: null }, { branchId: { $exists: false } }] };
+  const staffMissingBranch = {
+    businessId,
+    role: { $in: ['EMPLOYEE', 'BRANCH_ADMIN'] },
+    ...missingBranch
+  };
+
+  const [
+    jobs,
+    invoices,
+    expenses,
+    bookings,
+    packageVisits,
+    customers,
+    cars,
+    services,
+    customerPackages,
+    staff,
+    whatsappMessages
+  ] = await Promise.all([
+    Job.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    Invoice.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    Expense.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    Booking.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    PackageVisit.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    Customer.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    Car.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    Service.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    CustomerPackage.updateMany({ businessId, ...missingBranch }, { $set: { branchId } }),
+    User.updateMany(staffMissingBranch, { $set: { branchId } }),
+    WhatsAppMessage.updateMany({ businessId, ...missingBranch }, { $set: { branchId } })
   ]);
+
+  return {
+    jobs: jobs.modifiedCount,
+    invoices: invoices.modifiedCount,
+    expenses: expenses.modifiedCount,
+    bookings: bookings.modifiedCount,
+    packageVisits: packageVisits.modifiedCount,
+    customers: customers.modifiedCount,
+    cars: cars.modifiedCount,
+    services: services.modifiedCount,
+    customerPackages: customerPackages.modifiedCount,
+    staff: staff.modifiedCount,
+    whatsappMessages: whatsappMessages.modifiedCount
+  };
+}
+
+/** Count legacy records missing branchId for a business (for migration reporting). */
+export async function countLegacyBranchIdGaps(businessId) {
+  const missingBranch = { $or: [{ branchId: null }, { branchId: { $exists: false } }] };
+  const staffFilter = {
+    businessId,
+    role: { $in: ['EMPLOYEE', 'BRANCH_ADMIN'] },
+    ...missingBranch
+  };
+
+  const [
+    jobs,
+    invoices,
+    expenses,
+    bookings,
+    packageVisits,
+    customers,
+    cars,
+    services,
+    customerPackages,
+    staff,
+    whatsappMessages
+  ] = await Promise.all([
+    Job.countDocuments({ businessId, ...missingBranch }),
+    Invoice.countDocuments({ businessId, ...missingBranch }),
+    Expense.countDocuments({ businessId, ...missingBranch }),
+    Booking.countDocuments({ businessId, ...missingBranch }),
+    PackageVisit.countDocuments({ businessId, ...missingBranch }),
+    Customer.countDocuments({ businessId, ...missingBranch }),
+    Car.countDocuments({ businessId, ...missingBranch }),
+    Service.countDocuments({ businessId, ...missingBranch }),
+    CustomerPackage.countDocuments({ businessId, ...missingBranch }),
+    User.countDocuments(staffFilter),
+    WhatsAppMessage.countDocuments({ businessId, ...missingBranch })
+  ]);
+
+  return {
+    jobs,
+    invoices,
+    expenses,
+    bookings,
+    packageVisits,
+    customers,
+    cars,
+    services,
+    customerPackages,
+    staff,
+    whatsappMessages,
+    total: jobs + invoices + expenses + bookings + packageVisits + customers + cars
+      + services + customerPackages + staff + whatsappMessages
+  };
 }
 
 /** Copy services and package templates from default branch to a new branch. */
@@ -446,6 +544,7 @@ export async function approveBranchCreationRequest(request, superAdminUserId, pa
   });
 
   await seedBranchSettingsFromBusiness(request.businessId, branch._id);
+  cacheDelete(`defaultBranch:${String(request.businessId)}`);
 
   if (isAddon) {
     const startDate = new Date();

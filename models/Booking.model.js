@@ -85,6 +85,7 @@ const bookingSchema = new mongoose.Schema({
 });
 
 bookingSchema.index({ businessId: 1, status: 1, bookingDate: -1 });
+bookingSchema.index({ businessId: 1, createdAt: -1 });
 bookingSchema.index({ businessId: 1, customerId: 1, createdAt: -1 });
 bookingSchema.index({ businessId: 1, slotId: 1, bookingDate: 1, bayNumber: 1 });
 bookingSchema.index(

@@ -8,7 +8,7 @@ import Service from '../models/Service.model.js';
 import Invoice, { generateInvoiceNumber, generateShareToken } from '../models/Invoice.model.js';
 import User from '../models/User.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
-import { balanceDue, assertSettlementMatchesDue, roundMoney } from '../utils/invoicePayment.js';
+import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, roundMoney } from '../utils/invoicePayment.js';
 import { isCreditSettlementMode, closePackageOnCredit } from '../services/credit/creditInvoiceService.js';
 import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
 import { moduleDisabledResponse } from '../middleware/businessModules.middleware.js';
@@ -590,6 +590,11 @@ export async function closePackageSale(req, res) {
 
     const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
     try {
+      normalizeInvoicePaymentFields(invoice, {
+        paymentMethod: req.body.paymentMethod ?? invoice.paymentMethod,
+        paymentCashAmount: req.body.paymentCashAmount,
+        paymentOnlineAmount: req.body.paymentOnlineAmount
+      });
       assertSettlementMatchesDue(
         invoice.paymentMethod,
         due,

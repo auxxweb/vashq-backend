@@ -91,11 +91,11 @@ export function normalizeCreditCheckoutPayment(invoice, body = {}) {
     pOnline = roundMoney(Math.max(0, Math.min(pOnline, due - pCash)));
   }
 
-  if (body.paymentMethod !== undefined) {
-    invoice.paymentMethod = method;
-  }
   invoice.paymentCashAmount = roundMoney(pCash);
   invoice.paymentOnlineAmount = roundMoney(pOnline);
+  if (body.paymentMethod !== undefined || body.paymentCashAmount !== undefined || body.paymentOnlineAmount !== undefined) {
+    invoice.paymentMethod = method;
+  }
 
   assertPartialSettlementValid(
     invoice.paymentMethod,

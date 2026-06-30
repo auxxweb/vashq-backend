@@ -20,6 +20,8 @@ import {
   validateManualAllocations
 } from '../services/credit/collectionService.js';
 import { applyCreditCloseToInvoice } from '../services/credit/creditInvoiceService.js';
+import { normalizeInvoicePaymentFields } from '../utils/invoicePayment.js';
+import { collectionCashOnline, creditCheckoutCashOnline } from '../utils/paymentChannelAmounts.js';
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -217,5 +219,32 @@ assert(sumCustomerOutstanding(aggInvoices) === 800, 'customer outstanding sum');
 const legacy = mockInvoice({ paymentStatus: 'RECEIVED', settlementMode: 'FULL' });
 assert(deriveCollectionDisplayStatus(legacy) === COLLECTION_STATUS.PAID, 'legacy paid');
 assert(deriveCollectionDisplayStatus(mockInvoice()) === null, 'pending non-credit null status');
+
+// --- payment channel helpers ---
+const cashColl = collectionCashOnline({ amount: 500, paymentMethod: 'CASH', paymentCashAmount: 0, paymentOnlineAmount: 0 });
+assert(cashColl.cash === 500 && cashColl.online === 0, 'collection cash legacy infer');
+
+const splitColl = collectionCashOnline({
+  amount: 300,
+  paymentMethod: 'SPLIT',
+  paymentCashAmount: 120,
+  paymentOnlineAmount: 180
+});
+assert(splitColl.cash === 120 && splitColl.online === 180, 'collection split stored');
+
+let payInv = mockInvoice({ finalAmount: 1000, advancePayment: 0, paymentMethod: 'CASH', paymentCashAmount: 0, paymentOnlineAmount: 0 });
+normalizeInvoicePaymentFields(payInv, { paymentMethod: 'ONLINE' });
+assert(payInv.paymentMethod === 'ONLINE' && payInv.paymentOnlineAmount === 1000 && payInv.paymentCashAmount === 0, 'invoice online normalize');
+
+payInv = mockInvoice({ finalAmount: 800, advancePayment: 200, paymentMethod: 'CASH' });
+normalizeInvoicePaymentFields(payInv, { paymentMethod: 'SPLIT', paymentCashAmount: 300 });
+assert(payInv.paymentMethod === 'SPLIT' && payInv.paymentCashAmount === 300 && payInv.paymentOnlineAmount === 300, 'invoice split auto-fill');
+
+const creditCheckout = creditCheckoutCashOnline({
+  paymentMethod: 'SPLIT',
+  paymentCashAmount: 100,
+  paymentOnlineAmount: 50
+});
+assert(creditCheckout.cash === 100 && creditCheckout.online === 50, 'credit checkout split');
 
 console.log('credit module tests passed');

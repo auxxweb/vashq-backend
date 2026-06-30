@@ -1,43 +1,19 @@
 import mongoose from 'mongoose';
 import Invoice from '../models/Invoice.model.js';
-
-function isUnclosedInvoice(doc) {
-  const outstanding = Number(doc.outstandingAmount) || 0;
-  if (outstanding > 0.02) return true;
-  return doc.paymentStatus !== 'RECEIVED';
-}
-
-function statusLabelFor(invoice) {
-  if (invoice.paymentStatus === 'RECEIVED' && (Number(invoice.outstandingAmount) || 0) <= 0.02) {
-    return 'Paid';
-  }
-  const outstanding = Number(invoice.outstandingAmount) || 0;
-  if (outstanding > 0.02) {
-    const collected =
-      (Number(invoice.amountCollectedAtCheckout) || 0) + (Number(invoice.amountCollectedLater) || 0);
-    if (collected > 0.02) return 'Partially paid';
-    return 'Amount due';
-  }
-  if (invoice.paymentStatus === 'PENDING') {
-    if (invoice.settlementMode === 'CREDIT' && !invoice.saleConfirmedAt) return 'Awaiting checkout';
-    return 'Payment pending';
-  }
-  return 'Open';
-}
+import { invoiceStatusFilterClause } from './invoiceListFilter.js';
 
 /**
- * Unclosed invoices in dashboard period (created in range, payment not fully received).
+ * Unclosed invoices in dashboard period — same definition as Invoices list "Pending":
+ * payment not received and not yet closed on credit (no amount-due / outstanding balance).
  */
 export async function getDashboardUnclosedInvoices(businessId, startUtc, endUtc, limit = 10, branchId = null) {
   const businessObjectId = new mongoose.Types.ObjectId(String(businessId));
   const cap = Math.min(Math.max(Number(limit) || 10, 1), 25);
+  const pendingClause = invoiceStatusFilterClause('pending');
   const query = {
     businessId: businessObjectId,
     createdAt: { $gte: startUtc, $lt: endUtc },
-    $or: [
-      { paymentStatus: 'PENDING' },
-      { outstandingAmount: { $gt: 0.02 } }
-    ]
+    ...pendingClause
   };
   if (branchId) query.branchId = new mongoose.Types.ObjectId(String(branchId));
 
@@ -45,11 +21,10 @@ export async function getDashboardUnclosedInvoices(businessId, startUtc, endUtc,
     .populate('jobId', 'tokenNumber status directBill')
     .populate('packageId', 'name')
     .sort({ createdAt: -1 })
-    .limit(cap * 2)
+    .limit(cap)
     .lean();
 
   return rows
-    .filter(isUnclosedInvoice)
     .slice(0, cap)
     .map((inv) => ({
       _id: inv._id,
@@ -65,7 +40,7 @@ export async function getDashboardUnclosedInvoices(businessId, startUtc, endUtc,
       packageName: inv.packageName || inv.packageId?.name || null,
       jobToken: inv.jobId?.tokenNumber || null,
       isProductSale: !!inv.jobId?.directBill,
-      statusLabel: statusLabelFor(inv),
+      statusLabel: 'Pending',
       createdAt: inv.createdAt
     }));
 }

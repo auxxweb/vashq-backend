@@ -289,13 +289,20 @@ router.get('/', async (req, res) => {
     }
     if (req.query.search && typeof req.query.search === 'string' && req.query.search.trim()) {
       const orClauses = bookingSearchOrClauses(req.query.search);
-      if (orClauses.length) filter.$or = orClauses;
+      if (orClauses.length) {
+        const branchOr = filter.$or;
+        delete filter.$or;
+        filter.$and = [
+          ...(branchOr ? [{ $or: branchOr }] : []),
+          { $or: orClauses }
+        ];
+      }
     }
 
     const bookings = await Booking.find(filter)
       .populate('slotId', 'name startTime endTime')
       .populate('serviceIds', 'name price')
-      .sort({ bookingDate: -1, createdAt: -1 })
+      .sort({ createdAt: -1, bookingDate: -1 })
       .limit(Math.min(Number(req.query.limit) || 100, 200))
       .lean();
 

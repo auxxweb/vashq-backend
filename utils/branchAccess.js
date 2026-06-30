@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
+import Job from '../models/Job.model.js';
 import { branchFilter } from '../middleware/branchContext.middleware.js';
 import { applyBranchScope, applyBranchScopeOid } from './branchQuery.js';
+import { isAdminPanelRole } from './adminRoles.js';
 
 /** Merge business + optional branch filter from request context. */
 export function scopedFilter(req, extra = {}) {
@@ -70,4 +72,26 @@ export function requireBranchIdForWrite(req) {
 
 export function branchIdForCreate(req) {
   return requireBranchIdForWrite(req);
+}
+
+/** Admins: any open invoice. Employees: only invoices for jobs assigned to them. */
+export async function assertInvoiceCheckoutAccess(req, invoice) {
+  if (isAdminPanelRole(req.user?.role)) return;
+  if (req.user?.role !== 'EMPLOYEE') {
+    const err = new Error('Only admins can edit invoices');
+    err.status = 403;
+    throw err;
+  }
+  const jobId = invoice?.jobId?._id || invoice?.jobId;
+  if (!jobId) {
+    const err = new Error('You can only complete checkout on jobs assigned to you');
+    err.status = 403;
+    throw err;
+  }
+  const job = await Job.findOne({ _id: jobId, businessId: req.businessId }).select('assignedTo').lean();
+  if (!job || String(job.assignedTo) !== String(req.user._id)) {
+    const err = new Error('You can only complete checkout on jobs assigned to you');
+    err.status = 403;
+    throw err;
+  }
 }

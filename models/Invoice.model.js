@@ -72,6 +72,8 @@ invoiceSchema.index({ businessId: 1, createdAt: -1 });
 invoiceSchema.index({ businessId: 1, paymentStatus: 1, paymentReceivedAt: -1 });
 invoiceSchema.index({ businessId: 1, customerId: 1, outstandingAmount: 1 });
 invoiceSchema.index({ businessId: 1, settlementMode: 1, saleConfirmedAt: -1 });
+invoiceSchema.index({ businessId: 1, branchId: 1, paymentStatus: 1, paymentReceivedAt: -1 });
+invoiceSchema.index({ businessId: 1, branchId: 1, saleType: 1, createdAt: -1 });
 
 export function generateShareToken() {
   return crypto.randomBytes(24).toString('hex');
