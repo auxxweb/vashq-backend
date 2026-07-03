@@ -22,7 +22,7 @@ import {
   WASH_JOB_FILTER,
   applyLoyaltyEarnForJob
 } from '../utils/directBillJob.js';
-import { buildCatalogTypeQuery } from '../utils/serviceCatalog.js';
+import { buildServicesListQuery } from '../utils/serviceCatalog.js';
 import { loadDashboardStats } from '../services/dashboardStatsService.js';
 import { getDashboardServicesDistribution } from '../utils/dashboardServicesDistribution.js';
 import { getDashboardUnclosedInvoices } from '../utils/dashboardUnclosedInvoices.js';
@@ -3042,21 +3042,7 @@ router.delete('/cars/:id', async (req, res) => {
 router.get('/services', async (req, res) => {
   try {
     const { search, page = 1, limit = 20, all, catalogType } = req.query;
-    const query = scopedFilter(req);
-    Object.assign(query, buildCatalogTypeQuery(catalogType));
-    if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const searchOr = [
-        { name: { $regex: term, $options: 'i' } },
-        { description: { $regex: term, $options: 'i' } }
-      ];
-      if (query.$or) {
-        query.$and = [{ $or: query.$or }, { $or: searchOr }];
-        delete query.$or;
-      } else {
-        query.$or = searchOr;
-      }
-    }
+    const query = buildServicesListQuery(scopedFilter(req), { search, catalogType });
     const variableModuleOn = isModuleEnabled(req.businessModules, 'variableServices');
     const filterVariable = (list) => (
       variableModuleOn ? list : list.filter((s) => !s.isVariable)

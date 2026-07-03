@@ -1,23 +1,83 @@
 /** Catalog taxonomy: fixed wash services, variable visit services, retail products. */
 
+const CATALOG_FILTER_MAP = {
+  all: 'all',
+  services: 'service',
+  service: 'service',
+  variable: 'variable',
+  'variable-services': 'variable',
+  products: 'product',
+  product: 'product',
+};
+
+export function normalizeCatalogTypeFilter(catalogType) {
+  const key = String(catalogType || 'all').toLowerCase();
+  return CATALOG_FILTER_MAP[key] || 'all';
+}
+
 export function getServiceCatalogType(service) {
   if (!service?.isVariable) return 'service';
   if (service.skipWorkProcess) return 'product';
   return 'variable';
 }
 
+export function matchesCatalogType(service, catalogType) {
+  const filter = normalizeCatalogTypeFilter(catalogType);
+  if (filter === 'all') return true;
+  return getServiceCatalogType(service) === filter;
+}
+
+/** Mongo filter aligned with getServiceCatalogType(). */
 export function buildCatalogTypeQuery(catalogType) {
-  const type = String(catalogType || 'all').toLowerCase();
-  if (type === 'services' || type === 'service') {
-    return { isVariable: { $ne: true } };
+  const filter = normalizeCatalogTypeFilter(catalogType);
+  if (filter === 'service') {
+    return {
+      $or: [
+        { isVariable: false },
+        { isVariable: null },
+        { isVariable: { $exists: false } },
+      ],
+    };
   }
-  if (type === 'variable' || type === 'variable-services') {
-    return { isVariable: true, skipWorkProcess: { $ne: true } };
+  if (filter === 'variable') {
+    return {
+      isVariable: true,
+      $or: [
+        { skipWorkProcess: false },
+        { skipWorkProcess: null },
+        { skipWorkProcess: { $exists: false } },
+      ],
+    };
   }
-  if (type === 'products' || type === 'product') {
-    return { isVariable: true, skipWorkProcess: true };
+  if (filter === 'product') {
+    return {
+      isVariable: true,
+      skipWorkProcess: true,
+    };
   }
   return {};
+}
+
+/**
+ * Combine branch scope, catalog type, and search without clobbering $or clauses.
+ */
+export function buildServicesListQuery(baseFilter, { search, catalogType } = {}) {
+  const clauses = [{ ...baseFilter }];
+  const catalog = buildCatalogTypeQuery(catalogType);
+  if (Object.keys(catalog).length) clauses.push(catalog);
+
+  if (search && typeof search === 'string' && search.trim()) {
+    const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    clauses.push({
+      $or: [
+        { name: { $regex: term, $options: 'i' } },
+        { description: { $regex: term, $options: 'i' } },
+      ],
+    });
+  }
+
+  if (clauses.length === 1) return clauses[0];
+  return { $and: clauses };
 }
 
 export function shouldTrackInventory(service) {
