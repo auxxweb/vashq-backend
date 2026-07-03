@@ -3,6 +3,15 @@ import Booking, { BOOKING_OCCUPYING_STATUSES } from '../models/Booking.model.js'
 import BookingSlot from '../models/BookingSlot.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import { DEFAULT_WHATSAPP_TEMPLATES, normalizeWhatsappTemplates } from './whatsappTemplates.js';
+import {
+  normalizeWeeklySchedule,
+  resolveWeeklySchedule,
+  isDateOpenForBooking,
+  isSlotWithinDayHours,
+  getDayScheduleForDate,
+  closedDayMessage,
+  normalizeTimeValue
+} from './bookingSchedule.js';
 
 export { normalizePhone } from './customer.utils.js';
 
@@ -26,17 +35,28 @@ export function isPastBookingDate(dateStr, timezone = 'Asia/Kolkata') {
 
 export async function getBookingSettings(businessId) {
   const settings = await BusinessSettings.findOne({ businessId }).lean();
+  const workingHours = settings?.workingHours || { start: '09:00', end: '18:00' };
+  const rawSchedule = resolveWeeklySchedule(settings);
+  const weeklyOperatingSchedule = normalizeWeeklySchedule(rawSchedule, {
+    fallbackStart: workingHours.start,
+    fallbackEnd: workingHours.end,
+    legacyAllowedDays: settings?.bookingAllowedDays
+  });
   return {
     onlineBookingEnabled: settings?.onlineBookingEnabled !== false,
     bookingAllowedDays: Array.isArray(settings?.bookingAllowedDays) ? settings.bookingAllowedDays : null,
+    weeklyOperatingSchedule,
+    /** @deprecated use weeklyOperatingSchedule */
+    bookingWeeklySchedule: weeklyOperatingSchedule,
     bookingAdvanceDays: Number(settings?.bookingAdvanceDays) || 30,
     timezone: settings?.timezone || 'Asia/Kolkata',
-    currency: settings?.currency || 'INR'
+    currency: settings?.currency || 'INR',
+    workingHours
   };
 }
 
 export function isDateAllowedForBooking(dateStr, bookingSettings, options = {}) {
-  const { bookingAllowedDays, bookingAdvanceDays, timezone } = bookingSettings;
+  const { bookingAdvanceDays, timezone } = bookingSettings;
   if (isPastBookingDate(dateStr, timezone)) return false;
 
   if (options.skipDateRules) return true;
@@ -46,11 +66,7 @@ export function isDateAllowedForBooking(dateStr, bookingSettings, options = {}) 
   const maxDay = today.plus({ days: bookingAdvanceDays });
   if (day > maxDay) return false;
 
-  if (Array.isArray(bookingAllowedDays) && bookingAllowedDays.length > 0) {
-    const dow = day.weekday % 7;
-    if (!bookingAllowedDays.includes(dow)) return false;
-  }
-  return true;
+  return isDateOpenForBooking(dateStr, bookingSettings);
 }
 
 export async function countOccupiedBays(businessId, slotId, bookingDate) {
@@ -85,19 +101,48 @@ export function buildBayMap(capacity, occupiedBayNumbers = []) {
   });
 }
 
+export async function ensureDefaultBookingSlots(businessId) {
+  const enabledCount = await BookingSlot.countDocuments({ businessId, isEnabled: true });
+  if (enabledCount > 0) return;
+
+  const bookingSettings = await getBookingSettings(businessId);
+  const start = normalizeTimeValue(bookingSettings.workingHours?.start || '09:00');
+  const end = normalizeTimeValue(bookingSettings.workingHours?.end || '18:00');
+  const safeEnd = start >= end ? '18:00' : end;
+
+  await BookingSlot.create({
+    businessId,
+    name: 'Walk-in',
+    startTime: start,
+    endTime: safeEnd,
+    capacity: 5,
+    isEnabled: true,
+    sortOrder: 0
+  });
+}
+
 export async function getSlotAvailabilityForDate(businessId, dateStr, options = {}) {
   const bookingSettings = await getBookingSettings(businessId);
   if (!options.skipOnlineCheck && !bookingSettings.onlineBookingEnabled) {
     return { allowed: false, slots: [], reason: 'Online booking is not enabled' };
   }
   if (!isDateAllowedForBooking(dateStr, bookingSettings, options)) {
-    return { allowed: false, slots: [], reason: 'Date not available for booking' };
+    return { allowed: false, slots: [], reason: closedDayMessage(dateStr, bookingSettings) };
+  }
+
+  if (options.skipOnlineCheck) {
+    await ensureDefaultBookingSlots(businessId);
   }
 
   const bookingDate = parseBookingDate(dateStr, bookingSettings.timezone);
+  const daySchedule = getDayScheduleForDate(dateStr, bookingSettings);
   const slots = await BookingSlot.find({ businessId, isEnabled: true }).sort({ sortOrder: 1, startTime: 1 }).lean();
+  const skipHoursFilter = options.skipOnlineCheck || options.skipSlotHoursFilter;
+  const slotsForDay = skipHoursFilter
+    ? slots
+    : slots.filter((slot) => isSlotWithinDayHours(slot, daySchedule));
 
-  const availability = await Promise.all(slots.map(async (slot) => {
+  const availability = await Promise.all(slotsForDay.map(async (slot) => {
     const occupied = await countOccupiedBays(businessId, slot._id, bookingDate);
     const booked = occupied.length;
     const available = Math.max(0, slot.capacity - booked);
@@ -114,7 +159,22 @@ export async function getSlotAvailabilityForDate(businessId, dateStr, options = 
     };
   }));
 
-  return { allowed: true, slots: availability, bookingDate, timezone: bookingSettings.timezone };
+  let emptyReason;
+  if (!availability.length) {
+    if (!slots.length) {
+      emptyReason = 'no_slots';
+    } else if (!skipHoursFilter) {
+      emptyReason = 'slots_outside_hours';
+    }
+  }
+
+  return {
+    allowed: true,
+    slots: availability,
+    bookingDate,
+    timezone: bookingSettings.timezone,
+    ...(emptyReason ? { emptyReason } : {})
+  };
 }
 
 export async function validateSlotBooking(businessId, slotId, dateStr, preferredBay = null, options = {}) {
@@ -123,12 +183,22 @@ export async function validateSlotBooking(businessId, slotId, dateStr, preferred
     throw new Error('Online booking is not enabled for this business');
   }
   if (!isDateAllowedForBooking(dateStr, bookingSettings, options)) {
-    throw new Error('Selected date is not available for booking');
+    throw new Error(closedDayMessage(dateStr, bookingSettings));
+  }
+
+  if (options.skipOnlineCheck) {
+    await ensureDefaultBookingSlots(businessId);
   }
 
   const slot = await BookingSlot.findOne({ _id: slotId, businessId, isEnabled: true }).lean();
   if (!slot) {
     throw new Error('Selected time slot is not available');
+  }
+
+  const daySchedule = getDayScheduleForDate(dateStr, bookingSettings);
+  const skipHoursFilter = options.skipOnlineCheck || options.skipSlotHoursFilter;
+  if (!skipHoursFilter && !isSlotWithinDayHours(slot, daySchedule)) {
+    throw new Error('Selected time slot is outside operating hours for this day');
   }
 
   const bookingDate = parseBookingDate(dateStr, bookingSettings.timezone);

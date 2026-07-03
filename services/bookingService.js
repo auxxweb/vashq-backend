@@ -21,6 +21,9 @@ import {
 } from '../utils/booking.utils.js';
 import { applyCreatedAtRange } from '../utils/businessDateRange.js';
 import { findOrCreateCustomer, normalizePhone } from '../utils/customer.utils.js';
+import { normalizeJobImageUrls } from '../utils/jobImages.js';
+
+const MIN_JOB_BEFORE_IMAGES = 2;
 
 async function findOrCreateCar(businessId, customerId, vehicle) {
   const carNumber = String(vehicle.vehicleNumber || '').trim().toUpperCase();
@@ -62,7 +65,7 @@ async function notifyOwner(businessId, { type, title, body, bookingId, url }) {
   }
 }
 
-const ADMIN_BOOKING_OPTS = { skipOnlineCheck: true, skipDateRules: true };
+const ADMIN_BOOKING_OPTS = { skipOnlineCheck: true };
 
 async function resolveBookingCustomerAndCar(businessId, payload) {
   const pickupAddress = payload.deliveryMethod === 'PICKUP_DROP'
@@ -393,6 +396,15 @@ export async function getBookingConvertJobContext(businessId, bookingId) {
 
   const requireCarPicker = !autoCarId && cars.length > 0;
 
+  const employees = await User.find({
+    businessId,
+    role: 'EMPLOYEE',
+    status: 'ACTIVE'
+  })
+    .select('name email employeeCode')
+    .sort({ name: 1 })
+    .lean();
+
   return {
     customerId: booking.customerId,
     cars,
@@ -403,7 +415,8 @@ export async function getBookingConvertJobContext(businessId, bookingId) {
     vehicleNumber: booking.vehicleNumber || '',
     vehicleBrand: booking.vehicleBrand || '',
     vehicleModel: booking.vehicleModel || '',
-    vehicleType: booking.vehicleType || ''
+    vehicleType: booking.vehicleType || '',
+    employees
   };
 }
 
@@ -445,6 +458,24 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
   const advanceFields = normalizeJobAdvanceForCreate({}, 0);
   const estimatedDelivery = calculateETA(catalogServices);
 
+  const createWithoutImages = !!payload.createWithoutImages;
+  let beforeImages = [];
+  if (!createWithoutImages) {
+    beforeImages = normalizeJobImageUrls(payload.beforeImages);
+    if (beforeImages.length < MIN_JOB_BEFORE_IMAGES) {
+      throw new Error(`Please upload at least ${MIN_JOB_BEFORE_IMAGES} before photos or choose submit without images`);
+    }
+  }
+
+  let assignedTo = payload.assignedTo || null;
+  if (userRole === 'EMPLOYEE' && !assignedTo) {
+    assignedTo = userId;
+  }
+  if (assignedTo) {
+    const emp = await User.findOne({ _id: assignedTo, businessId, role: 'EMPLOYEE', status: 'ACTIVE' });
+    if (!emp) assignedTo = null;
+  }
+
   const pickupNote = booking.deliveryMethod === 'PICKUP_DROP'
     ? [`Pickup & Drop`, booking.pickupAddress, booking.pickupLandmark, booking.pickupNotes].filter(Boolean).join(' · ')
     : '';
@@ -455,8 +486,6 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
   while (attempts < 5) {
     try {
       const tokenNumber = await generateTokenNumber(businessId, branchId);
-      let assignedTo = null;
-      if (userRole === 'EMPLOYEE') assignedTo = userId;
 
       job = await Job.create({
         businessId,
@@ -467,6 +496,7 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
         totalPrice,
         ...advanceFields,
         estimatedDelivery,
+        beforeImages,
         notes,
         assignedTo,
         sourceBookingId: booking._id,
@@ -507,6 +537,24 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
       });
     } catch (pushErr) {
       console.error('Booking conversion push notification failed:', pushErr?.message || pushErr);
+    }
+  }
+
+  if (job.assignedTo) {
+    try {
+      await sendPushNotification({
+        businessOwnerId: job.assignedTo,
+        title: 'New job assigned',
+        body: `Token ${job.tokenNumber} · ${booking.customerName}`,
+        data: {
+          type: 'job_received',
+          bookingId: String(job._id),
+          jobId: String(job._id),
+          url: `/employee/jobs/${job._id}`
+        }
+      });
+    } catch (pushErr) {
+      console.error('Booking conversion employee push failed:', pushErr?.message || pushErr);
     }
   }
 

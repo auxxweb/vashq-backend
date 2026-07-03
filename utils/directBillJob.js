@@ -10,6 +10,8 @@ import {
   assertSettlementMatchesDue,
   normalizeInvoicePaymentFields
 } from './invoicePayment.js';
+import { deductServiceStockForSale, restoreServiceStock } from './serviceInventory.js';
+import { lineQuantity } from './serviceCatalog.js';
 
 /** Counter / direct sales — not counted as wash jobs. */
 export const WASH_JOB_FILTER = { directBill: { $ne: true } };
@@ -70,7 +72,10 @@ export async function createInvoiceForJobRecord({
 
   const nameByServiceId = await serviceNameMapForJobLines(businessId, job.services, catalogServices);
   const items = jobLinesToInvoiceItems(job.services || [], nameByServiceId);
-  const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + (Number(i.servicePrice) || 0), 0);
+  const subtotal = job.totalPrice ?? items.reduce(
+    (sum, i) => sum + (Number(i.servicePrice) || 0) * lineQuantity(i.quantity),
+    0
+  );
   const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
   const company = await getInvoiceCompanySnapshot(businessId);
 
@@ -111,7 +116,12 @@ export async function applyLoyaltyEarnForJob(businessId, customerId, jobServices
   const svc = await Service.find({ businessId, _id: { $in: serviceIds } })
     .select('loyaltyPointsEarned')
     .lean();
-  const earned = svc.reduce((sum, s) => sum + Math.max(0, Number(s.loyaltyPointsEarned || 0)), 0);
+  const pointsById = new Map(svc.map((s) => [String(s._id), Math.max(0, Number(s.loyaltyPointsEarned || 0))]));
+  const earned = (jobServices || []).reduce((sum, line) => {
+    const sid = String(line.serviceId?._id || line.serviceId || '');
+    const perUnit = pointsById.get(sid) || 0;
+    return sum + perUnit * lineQuantity(line.quantity);
+  }, 0);
   if (earned === 0) return 0;
 
   const customer = await Customer.findOne({ _id: customerId, businessId }).select('loyaltyPointsBalance');
@@ -168,6 +178,7 @@ export async function finalizeDirectBillSale({
   paymentBody = {}
 }) {
   let invoice;
+  let stockDeductions = [];
   try {
     invoice = await createInvoiceForJobRecord({
       job,
@@ -177,7 +188,12 @@ export async function finalizeDirectBillSale({
       car,
       catalogServices
     });
+    stockDeductions = await deductServiceStockForSale(businessId, job.services, catalogServices);
   } catch (billErr) {
+    if (stockDeductions.length) {
+      await restoreServiceStock(businessId, stockDeductions).catch(() => {});
+    }
+    await Invoice.deleteOne({ jobId: job._id, businessId }).catch(() => {});
     await Job.deleteOne({ _id: job._id, businessId });
     throw billErr;
   }

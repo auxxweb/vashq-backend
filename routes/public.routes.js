@@ -100,6 +100,8 @@ router.get('/book/:businessId', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Online booking is not available' });
     }
 
+    const bookingSettingsFull = await getBookingSettings(businessId);
+
     res.json({
       success: true,
       business: {
@@ -112,10 +114,12 @@ router.get('/book/:businessId', async (req, res) => {
       },
       services,
       bookingSettings: {
-        currency: settings?.currency || 'INR',
-        timezone: settings?.timezone || 'Asia/Kolkata',
-        bookingAdvanceDays: settings?.bookingAdvanceDays || 30,
-        bookingAllowedDays: settings?.bookingAllowedDays || null
+        currency: bookingSettingsFull.currency,
+        timezone: bookingSettingsFull.timezone,
+        bookingAdvanceDays: bookingSettingsFull.bookingAdvanceDays,
+        bookingAllowedDays: bookingSettingsFull.bookingAllowedDays,
+        weeklyOperatingSchedule: bookingSettingsFull.weeklyOperatingSchedule,
+        bookingWeeklySchedule: bookingSettingsFull.weeklyOperatingSchedule
       }
     });
   } catch (error) {

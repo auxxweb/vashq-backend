@@ -19,8 +19,10 @@ import {
   createInvoiceForJobRecord,
   directBillStatusHistory,
   finalizeDirectBillSale,
-  WASH_JOB_FILTER
+  WASH_JOB_FILTER,
+  applyLoyaltyEarnForJob
 } from '../utils/directBillJob.js';
+import { buildCatalogTypeQuery } from '../utils/serviceCatalog.js';
 import { loadDashboardStats } from '../services/dashboardStatsService.js';
 import { getDashboardServicesDistribution } from '../utils/dashboardServicesDistribution.js';
 import { getDashboardUnclosedInvoices } from '../utils/dashboardUnclosedInvoices.js';
@@ -49,6 +51,7 @@ import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, 
 import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
+import { normalizeJobImageUrls } from '../utils/jobImages.js';
 import { invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
 import { resolveExpensePaymentFields, sumExpenseChannelTotals } from '../utils/expensePayment.js';
 import OwnerTask from '../models/OwnerTask.model.js';
@@ -96,6 +99,8 @@ import {
   isFreeTrialPlan,
   invalidateSubscriptionCache
 } from '../services/subscriptionService.js';
+import { validateServiceTimeRange } from '../utils/serviceTime.js';
+import { parseBusinessCalendarDate } from '../utils/calendarDate.js';
 
 const router = express.Router();
 
@@ -593,8 +598,8 @@ router.post('/expenses', [
         errors: errors.array()
       });
     }
-    const expenseDate = req.body.expenseDate ? new Date(req.body.expenseDate) : new Date();
-    expenseDate.setHours(0, 0, 0, 0);
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
+    const expenseDate = parseBusinessCalendarDate(req.body.expenseDate, settings?.timezone);
     const typeIds = [...new Set(req.body.entries.map((e) => String(e.expenseTypeId)))];
     const expenseTypes = await ExpenseType.find({
       _id: { $in: typeIds },
@@ -695,9 +700,8 @@ router.put('/expenses/:id', [
     if (req.body.notes !== undefined) expense.notes = req.body.notes || '';
     if (req.body.billImage !== undefined) expense.billImage = req.body.billImage || '';
     if (req.body.expenseDate != null) {
-      const d = new Date(req.body.expenseDate);
-      d.setHours(0, 0, 0, 0);
-      expense.expenseDate = d;
+      const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
+      expense.expenseDate = parseBusinessCalendarDate(req.body.expenseDate, settings?.timezone);
     }
     await expense.save();
     await expense.populate('expenseTypeId', 'expenseName');
@@ -1113,21 +1117,7 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
 
     // Loyalty points: earn from services (redeem is already applied when invoice is saved)
     if (job?.customerId) {
-      const serviceIds = Array.isArray(job.services) ? job.services.map((s) => s?.serviceId).filter(Boolean) : [];
-      let earned = 0;
-      if (serviceIds.length) {
-        const svc = await Service.find({ businessId: req.businessId, _id: { $in: serviceIds } })
-          .select('loyaltyPointsEarned')
-          .lean();
-        earned = svc.reduce((sum, s) => sum + Math.max(0, Number(s.loyaltyPointsEarned || 0)), 0);
-      }
-      if (earned !== 0) {
-        const customer = await Customer.findOne({ _id: job.customerId, businessId: req.businessId }).select('loyaltyPointsBalance');
-        if (customer) {
-          customer.loyaltyPointsBalance = Math.max(0, Number(customer.loyaltyPointsBalance || 0) + earned);
-          await customer.save();
-        }
-      }
+      await applyLoyaltyEarnForJob(req.businessId, job.customerId, job.services);
     }
     res.json({ success: true, message: 'Job closed' });
 
@@ -3051,8 +3041,9 @@ router.delete('/cars/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/services', async (req, res) => {
   try {
-    const { search, page = 1, limit = 20, all } = req.query;
+    const { search, page = 1, limit = 20, all, catalogType } = req.query;
     const query = scopedFilter(req);
+    Object.assign(query, buildCatalogTypeQuery(catalogType));
     if (search && typeof search === 'string' && search.trim()) {
       const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const searchOr = [
@@ -3074,7 +3065,7 @@ router.get('/services', async (req, res) => {
     if (returnAll) {
       const services = filterVariable(await Service.find(query)
         .sort({ name: 1 })
-        .select('name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess isActive createdAt')
+        .select('name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive createdAt')
         .lean());
       const total = services.length;
       return res.json({
@@ -3111,14 +3102,21 @@ router.post('/services', adminPanelOnly, [
   body('price').optional().isFloat({ min: 0 }),
   body('isVariable').optional().isBoolean(),
   body('skipWorkProcess').optional().isBoolean(),
-  body('minTime').optional().isInt({ min: 0 }),
-  body('maxTime').optional().isInt({ min: 0 }),
-  body('loyaltyPointsEarned').optional().isInt({ min: 0 })
+  body('trackInventory').optional().isBoolean(),
+  body('stockQuantity').optional({ values: 'null' }).isFloat({ min: 0 }),
+  body('lowStockThreshold').optional({ values: 'null' }).isFloat({ min: 0 }),
+  body('minTime').optional({ values: 'null' }).isInt({ min: 0 }),
+  body('maxTime').optional({ values: 'null' }).isInt({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      const first = errors.array()[0];
+      return res.status(400).json({
+        success: false,
+        message: first?.msg || 'Validation failed',
+        errors: errors.array()
+      });
     }
 
     const isVariable = !!req.body.isVariable;
@@ -3131,11 +3129,42 @@ router.post('/services', adminPanelOnly, [
       return res.status(400).json({ success: false, message: 'Fixed services require a price greater than zero' });
     }
 
+    const timeCheck = skipWorkProcess
+      ? { ok: true, minTime: null, maxTime: null }
+      : (() => {
+        const minRaw = req.body.minTime !== undefined && req.body.minTime !== '' ? Number(req.body.minTime) : null;
+        const maxRaw = req.body.maxTime !== undefined && req.body.maxTime !== '' ? Number(req.body.maxTime) : null;
+        return validateServiceTimeRange(minRaw, maxRaw);
+      })();
+    if (!timeCheck.ok) {
+      return res.status(400).json({ success: false, message: timeCheck.message });
+    }
+
+    const loyaltyPointsEarned = req.body.loyaltyPointsEarned === '' || req.body.loyaltyPointsEarned == null
+      ? 0
+      : Number(req.body.loyaltyPointsEarned) || 0;
+
+    const trackInventory = skipWorkProcess && req.body.trackInventory !== false;
+    const stockQuantity = skipWorkProcess && trackInventory
+      ? Math.max(0, Math.floor(Number(req.body.stockQuantity) || 0))
+      : null;
+    const lowStockThreshold = skipWorkProcess && trackInventory
+      ? Math.max(0, Math.floor(Number(req.body.lowStockThreshold ?? 5) || 5))
+      : 5;
+
     const service = await Service.create({
-      ...req.body,
+      name: req.body.name,
+      description: req.body.description,
       isVariable,
       skipWorkProcess,
+      trackInventory: skipWorkProcess ? trackInventory : false,
+      stockQuantity,
+      lowStockThreshold,
       price: isVariable ? Math.max(0, price) : price,
+      minTime: timeCheck.minTime,
+      maxTime: timeCheck.maxTime,
+      loyaltyPointsEarned,
+      isActive: req.body.isActive !== false,
       businessId: req.businessId,
       branchId: branchIdForCreate(req)
     });
@@ -3161,14 +3190,21 @@ router.put('/services/:id', adminPanelOnly, [
   body('price').optional().isFloat({ min: 0 }),
   body('isVariable').optional().isBoolean(),
   body('skipWorkProcess').optional().isBoolean(),
-  body('minTime').optional().isInt({ min: 0 }),
-  body('maxTime').optional().isInt({ min: 0 }),
-  body('loyaltyPointsEarned').optional().isInt({ min: 0 })
+  body('trackInventory').optional().isBoolean(),
+  body('stockQuantity').optional({ values: 'null' }).isFloat({ min: 0 }),
+  body('lowStockThreshold').optional({ values: 'null' }).isFloat({ min: 0 }),
+  body('minTime').optional({ values: 'null' }).isInt({ min: 0 }),
+  body('maxTime').optional({ values: 'null' }).isInt({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      const first = errors.array()[0];
+      return res.status(400).json({
+        success: false,
+        message: first?.msg || 'Validation failed',
+        errors: errors.array()
+      });
     }
 
     const existing = await findScoped(Service, req, { _id: req.params.id });
@@ -3191,7 +3227,59 @@ router.put('/services/:id', adminPanelOnly, [
       return res.status(400).json({ success: false, message: 'Fixed services require a price greater than zero' });
     }
 
-    const update = { ...req.body, isVariable, skipWorkProcess, price: isVariable ? Math.max(0, price) : price };
+    const timeCheck = skipWorkProcess
+      ? { ok: true, minTime: null, maxTime: null }
+      : (() => {
+        const minRaw = req.body.minTime !== undefined
+          ? (req.body.minTime === '' || req.body.minTime === null ? null : Number(req.body.minTime))
+          : (existing.minTime ?? null);
+        const maxRaw = req.body.maxTime !== undefined
+          ? (req.body.maxTime === '' || req.body.maxTime === null ? null : Number(req.body.maxTime))
+          : (existing.maxTime ?? null);
+        return validateServiceTimeRange(minRaw, maxRaw);
+      })();
+    if (!timeCheck.ok) {
+      return res.status(400).json({ success: false, message: timeCheck.message });
+    }
+
+    const loyaltyPointsEarned = req.body.loyaltyPointsEarned !== undefined
+      ? (req.body.loyaltyPointsEarned === '' || req.body.loyaltyPointsEarned == null
+        ? 0
+        : Number(req.body.loyaltyPointsEarned) || 0)
+      : existing.loyaltyPointsEarned;
+
+    const trackInventory = skipWorkProcess
+      ? (req.body.trackInventory !== undefined ? !!req.body.trackInventory : !!existing.trackInventory)
+      : false;
+    const stockQuantity = skipWorkProcess && trackInventory
+      ? Math.max(0, Math.floor(
+        req.body.stockQuantity !== undefined
+          ? Number(req.body.stockQuantity) || 0
+          : Number(existing.stockQuantity) || 0
+      ))
+      : null;
+    const lowStockThreshold = skipWorkProcess && trackInventory
+      ? Math.max(0, Math.floor(
+        req.body.lowStockThreshold !== undefined
+          ? Number(req.body.lowStockThreshold) || 0
+          : Number(existing.lowStockThreshold ?? 5) || 5
+      ))
+      : 5;
+
+    const update = {
+      name: req.body.name ?? existing.name,
+      description: req.body.description !== undefined ? req.body.description : existing.description,
+      isVariable,
+      skipWorkProcess,
+      trackInventory,
+      stockQuantity,
+      lowStockThreshold,
+      price: isVariable ? Math.max(0, price) : price,
+      minTime: timeCheck.minTime,
+      maxTime: timeCheck.maxTime,
+      loyaltyPointsEarned,
+      isActive: req.body.isActive !== undefined ? !!req.body.isActive : existing.isActive
+    };
     const service = await Service.findOneAndUpdate(
       scopedFilter(req, { _id: req.params.id }),
       update,
@@ -3211,7 +3299,7 @@ router.put('/services/:id', adminPanelOnly, [
     console.error('Update service error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: error.message || 'Server error'
     });
   }
 });
@@ -3636,7 +3724,7 @@ router.post('/jobs', [
           totalPrice,
           ...advanceFields,
           estimatedDelivery,
-          beforeImages: directBill ? [] : (Array.isArray(beforeImages) ? beforeImages : []),
+          beforeImages: directBill ? [] : normalizeJobImageUrls(beforeImages),
           notes,
           assignedTo,
           customerPackageId: customerPackageId || null,
@@ -3834,7 +3922,10 @@ router.patch('/jobs/:id/status', [
 
     // Update job
     job.status = status;
-    if (afterImages) job.afterImages = afterImages;
+    if (req.body.afterImages !== undefined) {
+      job.afterImages = normalizeJobImageUrls(afterImages);
+      job.markModified('afterImages');
+    }
     if (status === 'DELIVERED') job.actualDelivery = new Date();
     
     job.statusHistory.push({
@@ -3950,7 +4041,8 @@ router.put('/jobs/:id', [
   body('serviceIds').optional().isArray({ min: 1 }),
   body('services').optional().isArray({ min: 1 }),
   body('notes').optional().isString(),
-  body('estimatedDelivery').optional().isISO8601()
+  body('estimatedDelivery').optional().isISO8601(),
+  body('beforeImages').optional().isArray()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -3977,6 +4069,11 @@ router.put('/jobs/:id', [
 
     if (typeof notes === 'string') {
       job.notes = notes.trim();
+    }
+
+    if (req.body.beforeImages !== undefined) {
+      job.beforeImages = normalizeJobImageUrls(req.body.beforeImages);
+      job.markModified('beforeImages');
     }
 
     const hasServicesArray = Array.isArray(servicesBody) && servicesBody.length > 0;
@@ -4302,6 +4399,13 @@ router.get('/settings', async (req, res) => {
     if (platform?.defaultPhoneCountryIso2) {
       settingsObj.defaultPhoneCountryIso2 = platform.defaultPhoneCountryIso2;
     }
+    const { normalizeWeeklySchedule, resolveWeeklySchedule } = await import('../utils/bookingSchedule.js');
+    const wh = settingsObj.workingHours || { start: '09:00', end: '18:00' };
+    settingsObj.weeklyOperatingSchedule = normalizeWeeklySchedule(resolveWeeklySchedule(settingsObj), {
+      fallbackStart: wh.start,
+      fallbackEnd: wh.end,
+      legacyAllowedDays: settingsObj.bookingAllowedDays
+    });
     res.json({
       success: true,
       settings: settingsObj
@@ -4381,6 +4485,24 @@ router.put('/settings', [
     if (req.body.taxPercentage !== undefined) updateFields.taxPercentage = req.body.taxPercentage;
     if (req.body.loyaltyPointValueInr !== undefined) updateFields.loyaltyPointValueInr = req.body.loyaltyPointValueInr === '' ? 0 : Number(req.body.loyaltyPointValueInr);
     if (req.body.loyaltyMaxRedeemPointsPerJob !== undefined) updateFields.loyaltyMaxRedeemPointsPerJob = req.body.loyaltyMaxRedeemPointsPerJob === '' ? 0 : Number(req.body.loyaltyMaxRedeemPointsPerJob);
+    if (req.body.onlineBookingEnabled !== undefined) updateFields.onlineBookingEnabled = !!req.body.onlineBookingEnabled;
+    if (req.body.bookingAdvanceDays !== undefined) updateFields.bookingAdvanceDays = Number(req.body.bookingAdvanceDays);
+    if (req.body.weeklyOperatingSchedule !== undefined || req.body.bookingWeeklySchedule !== undefined) {
+      const { normalizeWeeklySchedule, weeklyScheduleToAllowedDays } = await import('../utils/bookingSchedule.js');
+      const wh = req.body.workingHours || settings?.workingHours || { start: '09:00', end: '18:00' };
+      const raw = req.body.weeklyOperatingSchedule ?? req.body.bookingWeeklySchedule;
+      const normalized = normalizeWeeklySchedule(raw, {
+        fallbackStart: wh.start,
+        fallbackEnd: wh.end
+      });
+      updateFields.weeklyOperatingSchedule = normalized;
+      updateFields.bookingWeeklySchedule = normalized;
+      updateFields.bookingAllowedDays = weeklyScheduleToAllowedDays(normalized);
+      const firstOpen = normalized.find((d) => d.isOpen) || normalized[0];
+      if (firstOpen) {
+        updateFields.workingHours = { start: firstOpen.start, end: firstOpen.end };
+      }
+    }
 
     if (!settings) {
       settings = await BusinessSettings.create({
@@ -4417,6 +4539,46 @@ router.put('/settings', [
       success: false,
       message: 'Server error'
     });
+  }
+});
+
+// @route   PUT /api/admin/settings/operating-schedule
+// @desc    Update weekly working days & hours (general shop schedule; bookings follow this)
+// @access  Private (owner + branch admin)
+router.put('/settings/operating-schedule', adminPanelOnly, [
+  body('weeklyOperatingSchedule').isArray()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const { normalizeWeeklySchedule, weeklyScheduleToAllowedDays } = await import('../utils/bookingSchedule.js');
+    const existing = await BusinessSettings.findOne({ businessId: req.businessId }).lean();
+    const workingHours = existing?.workingHours || { start: '09:00', end: '18:00' };
+    const normalized = normalizeWeeklySchedule(req.body.weeklyOperatingSchedule, {
+      fallbackStart: workingHours.start,
+      fallbackEnd: workingHours.end
+    });
+    const firstOpen = normalized.find((d) => d.isOpen) || normalized[0];
+    await BusinessSettings.findOneAndUpdate(
+      { businessId: req.businessId },
+      {
+        $set: {
+          weeklyOperatingSchedule: normalized,
+          bookingWeeklySchedule: normalized,
+          bookingAllowedDays: weeklyScheduleToAllowedDays(normalized),
+          workingHours: firstOpen
+            ? { start: firstOpen.start, end: firstOpen.end }
+            : workingHours
+        }
+      },
+      { upsert: true, new: true }
+    );
+    res.json({ success: true, weeklyOperatingSchedule: normalized });
+  } catch (error) {
+    console.error('Update operating schedule error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

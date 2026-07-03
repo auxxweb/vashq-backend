@@ -1,14 +1,16 @@
 import mongoose from 'mongoose';
 import Service from '../models/Service.model.js';
 import Job from '../models/Job.model.js';
+import { lineQuantity, shouldTrackInventory } from './serviceCatalog.js';
+import { assertSufficientStock } from './serviceInventory.js';
 
 /**
  * Build validated job service lines from either:
- * - services: [{ serviceId, price?, customName? }]  (supports variable pricing)
+ * - services: [{ serviceId, price?, customName?, quantity? }]  (supports variable pricing)
  * - serviceIds: [id, ...]                         (legacy fixed catalog prices)
  */
 export async function resolveJobServiceLines(businessId, input = {}) {
-  const { serviceIds, services: linesInput } = input;
+  const { serviceIds, services: linesInput, checkStock = true } = input;
   const businessIdObj = typeof businessId === 'string'
     ? new mongoose.Types.ObjectId(businessId)
     : businessId;
@@ -34,7 +36,8 @@ export async function resolveJobServiceLines(businessId, input = {}) {
       return {
         serviceId: oid,
         price: row.price != null && row.price !== '' ? Number(row.price) : null,
-        customName: row.customName != null ? String(row.customName).trim() : ''
+        customName: row.customName != null ? String(row.customName).trim() : '',
+        quantity: row.quantity != null && row.quantity !== '' ? Number(row.quantity) : 1
       };
     });
   } else if (Array.isArray(serviceIds) && serviceIds.length > 0) {
@@ -47,7 +50,7 @@ export async function resolveJobServiceLines(businessId, input = {}) {
         err.status = 400;
         throw err;
       }
-      return { serviceId: oid, price: null, customName: '' };
+      return { serviceId: oid, price: null, customName: '', quantity: 1 };
     });
   } else {
     const err = new Error('At least one service is required');
@@ -86,7 +89,8 @@ export async function resolveJobServiceLines(businessId, input = {}) {
     let price;
     if (svc.isVariable) {
       if (row.price == null || row.price === '') {
-        price = 0;
+        const catalogDefault = Number(svc.price) || 0;
+        price = (svc.skipWorkProcess && catalogDefault > 0) ? catalogDefault : 0;
       } else if (!Number.isFinite(row.price) || row.price < 0) {
         const err = new Error(`"${svc.name}" has an invalid price — enter 0 or more, or leave blank to set when editing the open invoice`);
         err.status = 400;
@@ -104,14 +108,29 @@ export async function resolveJobServiceLines(businessId, input = {}) {
     }
 
     const customName = row.customName?.trim() || '';
+    const quantity = lineQuantity(row.quantity);
+    const isProduct = !!svc.isVariable && !!svc.skipWorkProcess;
+    if (!isProduct && quantity !== 1) {
+      const err = new Error(`Quantity is only supported for product sales ("${svc.name}")`);
+      err.status = 400;
+      throw err;
+    }
+
     return {
       serviceId: svc._id,
       price,
+      quantity,
       ...(customName ? { customName } : {})
     };
   });
 
-  const totalPrice = Math.round(lines.reduce((sum, l) => sum + l.price, 0) * 100) / 100;
+  if (checkStock) {
+    assertSufficientStock(lines, catalog);
+  }
+
+  const totalPrice = Math.round(
+    lines.reduce((sum, l) => sum + l.price * lineQuantity(l.quantity), 0) * 100
+  ) / 100;
   const catalogOrdered = requestedLines.map((l) => catalogMap.get(l.serviceId.toString())).filter(Boolean);
 
   return { lines, totalPrice, catalogServices: catalogOrdered };
@@ -126,7 +145,8 @@ export function jobLinesToInvoiceItems(jobServices = [], nameByServiceId = null)
     return {
       serviceId: sid,
       serviceName: s.customName || catalogName || 'Service',
-      servicePrice: s.price ?? 0
+      servicePrice: s.price ?? 0,
+      quantity: lineQuantity(s.quantity)
     };
   });
 }
@@ -136,7 +156,10 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
   if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) return false;
 
   const items = jobLinesToInvoiceItems(job.services || []);
-  const subtotal = job.totalPrice ?? items.reduce((sum, i) => sum + (Number(i.servicePrice) || 0), 0);
+  const subtotal = job.totalPrice ?? items.reduce(
+    (sum, i) => sum + (Number(i.servicePrice) || 0) * lineQuantity(i.quantity),
+    0
+  );
 
   invoice.items = items;
   invoice.subtotal = subtotal;
@@ -184,6 +207,7 @@ export async function syncJobFromInvoiceItems(jobId, businessId, items, subtotal
       return {
         serviceId: sid,
         price: Math.round((Number(i.servicePrice) || 0) * 100) / 100,
+        quantity: lineQuantity(i.quantity),
         ...(customName ? { customName } : {})
       };
     });
@@ -235,7 +259,10 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
 
   invoice.items = updatedItems;
   invoice.subtotal = Math.round(
-    updatedItems.reduce((sum, i) => sum + (Number(i.servicePrice) || 0), 0) * 100
+    updatedItems.reduce(
+      (sum, i) => sum + (Number(i.servicePrice) || 0) * lineQuantity(i.quantity),
+      0
+    ) * 100
   ) / 100;
   recalculateInvoiceFinalAmount(invoice);
 

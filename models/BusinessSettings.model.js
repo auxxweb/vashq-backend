@@ -36,6 +36,13 @@ const businessSettingsSchema = new mongoose.Schema({
     start: { type: String, default: '09:00' },
     end: { type: String, default: '18:00' }
   },
+  /** Shop-wide working days & hours (0=Sun … 6=Sat). Used for bookings and operations. */
+  weeklyOperatingSchedule: [{
+    day: { type: Number, min: 0, max: 6, required: true },
+    isOpen: { type: Boolean, default: true },
+    start: { type: String, default: '09:00' },
+    end: { type: String, default: '18:00' }
+  }],
   capacity: {
     type: Number,
     default: 5,
@@ -80,8 +87,15 @@ const businessSettingsSchema = new mongoose.Schema({
   loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 }, // 0 = no redeem allowed
   // Online booking
   onlineBookingEnabled: { type: Boolean, default: true },
-  /** Days of week 0=Sun … 6=Sat; empty/null = all days */
+  /** Days of week 0=Sun … 6=Sat; empty/null = all days (legacy — prefer bookingWeeklySchedule) */
   bookingAllowedDays: [{ type: Number, min: 0, max: 6 }],
+  /** Per-day open hours and closure; 0=Sun … 6=Sat */
+  bookingWeeklySchedule: [{
+    day: { type: Number, min: 0, max: 6, required: true },
+    isOpen: { type: Boolean, default: true },
+    start: { type: String, default: '09:00' },
+    end: { type: String, default: '18:00' }
+  }],
   bookingAdvanceDays: { type: Number, min: 1, max: 365, default: 30 }
 }, {
   timestamps: true

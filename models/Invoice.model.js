@@ -4,7 +4,8 @@ import crypto from 'crypto';
 const invoiceItemSchema = new mongoose.Schema({
   serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service' },
   serviceName: { type: String, required: true, trim: true },
-  servicePrice: { type: Number, required: true, min: 0 }
+  servicePrice: { type: Number, required: true, min: 0 },
+  quantity: { type: Number, default: 1, min: 1 }
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema({

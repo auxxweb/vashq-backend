@@ -31,15 +31,21 @@ const serviceSchema = new mongoose.Schema({
   maxTime: {
     type: Number,
     default: null,
-    min: [0, 'Max time must be non-negative']
+    min: [0, 'Max time must be non-negative'],
+    validate: {
+      validator(value) {
+        if (value == null || this.minTime == null) return true;
+        return value > this.minTime;
+      },
+      message: 'Maximum service time must be greater than minimum service time'
+    }
   },
   description: {
     type: String
   },
   loyaltyPointsEarned: {
     type: Number,
-    default: 0,
-    min: [0, 'Loyalty points must be non-negative']
+    default: 0
   },
   /** When true, price is entered per job/invoice (catalog price is optional guide only). */
   isVariable: {
@@ -50,6 +56,21 @@ const serviceSchema = new mongoose.Schema({
   skipWorkProcess: {
     type: Boolean,
     default: false
+  },
+  /** Product inventory — enabled for direct-sale (skip work process) items. */
+  trackInventory: {
+    type: Boolean,
+    default: false
+  },
+  stockQuantity: {
+    type: Number,
+    default: null,
+    min: [0, 'Stock cannot be negative']
+  },
+  lowStockThreshold: {
+    type: Number,
+    default: 5,
+    min: [0, 'Low stock threshold cannot be negative']
   },
   isActive: {
     type: Boolean,

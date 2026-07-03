@@ -22,6 +22,7 @@ import {
   getBookingSettings,
   getSlotAvailabilityForDate
 } from '../utils/booking.utils.js';
+import { normalizeWeeklySchedule, weeklyScheduleToAllowedDays } from '../utils/bookingSchedule.js';
 import { parseBusinessDateRange } from '../utils/businessDateRange.js';
 import { bookingSearchOrClauses } from '../utils/searchUtils.js';
 
@@ -80,6 +81,83 @@ router.get('/link-info', async (req, res) => {
     });
   } catch (e) {
     console.error('Booking link info error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ---------- Booking schedule & online settings (owner + branch admin) ----------
+router.get('/settings', async (req, res) => {
+  try {
+    const bookingSettings = await getBookingSettings(req.businessId);
+    res.json({ success: true, bookingSettings });
+  } catch (e) {
+    console.error('Get booking settings error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.put('/settings', adminPanelOnly, [
+  body('onlineBookingEnabled').optional().isBoolean(),
+  body('bookingAdvanceDays').optional().isInt({ min: 1, max: 365 })
+], async (req, res) => {
+  try {
+    if (!validate(req, res)) return;
+    const update = {};
+
+    if (req.body.onlineBookingEnabled !== undefined) {
+      update.onlineBookingEnabled = !!req.body.onlineBookingEnabled;
+    }
+    if (req.body.bookingAdvanceDays !== undefined) {
+      update.bookingAdvanceDays = Number(req.body.bookingAdvanceDays);
+    }
+
+    if (Object.keys(update).length) {
+      await BusinessSettings.findOneAndUpdate(
+        { businessId: req.businessId },
+        { $set: update },
+        { upsert: true }
+      );
+    }
+
+    const bookingSettings = await getBookingSettings(req.businessId);
+    res.json({ success: true, bookingSettings });
+  } catch (e) {
+    console.error('Update booking settings error:', e);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/** @deprecated use PUT /api/admin/settings/operating-schedule */
+router.put('/operating-schedule', adminPanelOnly, [
+  body('weeklyOperatingSchedule').isArray()
+], async (req, res) => {
+  try {
+    if (!validate(req, res)) return;
+    const existing = await BusinessSettings.findOne({ businessId: req.businessId }).lean();
+    const workingHours = existing?.workingHours || { start: '09:00', end: '18:00' };
+    const normalized = normalizeWeeklySchedule(req.body.weeklyOperatingSchedule, {
+      fallbackStart: workingHours.start,
+      fallbackEnd: workingHours.end
+    });
+    const firstOpen = normalized.find((d) => d.isOpen) || normalized[0];
+    await BusinessSettings.findOneAndUpdate(
+      { businessId: req.businessId },
+      {
+        $set: {
+          weeklyOperatingSchedule: normalized,
+          bookingWeeklySchedule: normalized,
+          bookingAllowedDays: weeklyScheduleToAllowedDays(normalized),
+          workingHours: firstOpen
+            ? { start: firstOpen.start, end: firstOpen.end }
+            : workingHours
+        }
+      },
+      { upsert: true, new: true }
+    );
+    const bookingSettings = await getBookingSettings(req.businessId);
+    res.json({ success: true, weeklyOperatingSchedule: bookingSettings.weeklyOperatingSchedule, bookingSettings });
+  } catch (e) {
+    console.error('Update operating schedule error:', e);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -235,8 +313,7 @@ router.get('/availability', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Date is required' });
     }
     const availability = await getSlotAvailabilityForDate(req.businessId, date, {
-      skipOnlineCheck: true,
-      skipDateRules: true
+      skipOnlineCheck: true
     });
     res.json({ success: true, ...availability });
   } catch (e) {
@@ -398,7 +475,10 @@ router.post('/:id/convert-job', adminPanelOnly, [
   body('vehicleNumber').optional().trim(),
   body('vehicleBrand').optional().trim(),
   body('vehicleModel').optional().trim(),
-  body('vehicleType').optional().trim()
+  body('vehicleType').optional().trim(),
+  body('assignedTo').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid employee'),
+  body('beforeImages').optional().isArray(),
+  body('createWithoutImages').optional().toBoolean()
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;

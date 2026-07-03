@@ -77,18 +77,25 @@ export function normalizeCreditCheckoutPayment(invoice, body = {}) {
       err.status = 400;
       throw err;
     }
+    const allowPartial = body.allowPartialCheckout === true;
     const cashProvided = body.paymentCashAmount !== undefined;
     const onlineProvided = body.paymentOnlineAmount !== undefined;
-    if (cashProvided && !onlineProvided) {
-      pOnline = roundMoney(Math.max(0, due - pCash));
-      if (pCash + pOnline > due + EPS) {
+    if (!allowPartial) {
+      if (cashProvided && !onlineProvided) {
         pOnline = roundMoney(Math.max(0, due - pCash));
+        if (pCash + pOnline > due + EPS) {
+          pOnline = roundMoney(Math.max(0, due - pCash));
+        }
+      } else if (onlineProvided && !cashProvided) {
+        pCash = roundMoney(Math.max(0, due - pOnline));
       }
+      pCash = roundMoney(Math.max(0, Math.min(pCash, due)));
+      pOnline = roundMoney(Math.max(0, Math.min(pOnline, due - pCash)));
+    } else if (cashProvided && !onlineProvided) {
+      pOnline = 0;
     } else if (onlineProvided && !cashProvided) {
-      pCash = roundMoney(Math.max(0, due - pOnline));
+      pCash = 0;
     }
-    pCash = roundMoney(Math.max(0, Math.min(pCash, due)));
-    pOnline = roundMoney(Math.max(0, Math.min(pOnline, due - pCash)));
   }
 
   invoice.paymentCashAmount = roundMoney(pCash);
