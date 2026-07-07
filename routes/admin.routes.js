@@ -879,7 +879,10 @@ router.get('/invoices/:id', async (req, res) => {
     let invoice = await Invoice.findOne(scopedFilter(req, { _id: req.params.id }))
       .populate({
         path: 'jobId',
-        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+        populate: [
+          { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' },
+          { path: 'assignedTo', select: 'name email employeeCode' }
+        ]
       })
       .populate('packageId', 'name')
       .lean();
