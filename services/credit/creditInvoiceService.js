@@ -1,6 +1,5 @@
 import Job from '../../models/Job.model.js';
-import Customer from '../../models/Customer.model.js';
-import Service from '../../models/Service.model.js';
+import { applyLoyaltySettlementForJob } from '../../utils/directBillJob.js';
 import {
   isCreditSettlementMode,
   normalizeCreditCheckoutPayment,
@@ -15,26 +14,9 @@ import { appendCreditLedgerEvent } from './creditLedgerService.js';
 import { sendPushNotification } from '../notificationService.js';
 import User from '../../models/User.model.js';
 
-async function earnLoyaltyForJob(businessId, job) {
+async function earnLoyaltyForJob(businessId, job, invoice, { earnPoints = true } = {}) {
   if (!job?.customerId) return;
-
-  const serviceIds = Array.isArray(job.services)
-    ? job.services.map((s) => s?.serviceId).filter(Boolean)
-    : [];
-  let earned = 0;
-  if (serviceIds.length) {
-    const svc = await Service.find({ businessId, _id: { $in: serviceIds } })
-      .select('loyaltyPointsEarned')
-      .lean();
-    earned = svc.reduce((sum, s) => sum + Math.max(0, Number(s.loyaltyPointsEarned || 0)), 0);
-  }
-  if (earned === 0) return;
-
-  const customer = await Customer.findOne({ _id: job.customerId, businessId }).select('loyaltyPointsBalance');
-  if (customer) {
-    customer.loyaltyPointsBalance = Math.max(0, Number(customer.loyaltyPointsBalance || 0) + earned);
-    await customer.save();
-  }
+  await applyLoyaltySettlementForJob(businessId, job.customerId, job.services, invoice, { earnPoints });
 }
 
 async function notifyJobClosed(user, businessId, invoice, jobId) {
@@ -113,9 +95,8 @@ export async function closeJobOnCredit({ invoice, job, businessId, user, body })
     createdBy: user._id
   });
 
-  if (isFullyPaid(invoice)) {
-    await earnLoyaltyForJob(businessId, job);
-  }
+  const fullyPaid = isFullyPaid(invoice);
+  await earnLoyaltyForJob(businessId, job, invoice, { earnPoints: fullyPaid });
 
   notifyJobClosed(user, businessId, invoice, invoice.jobId).catch(() => {});
 

@@ -3,7 +3,7 @@ import User from '../models/User.model.js';
 import Business from '../models/Business.model.js';
 import { cacheGetOrSet } from '../utils/cache.js';
 
-const AUTH_CACHE_TTL = 10_000;
+const AUTH_CACHE_TTL = 30_000;
 
 export const authenticate = async (req, res, next) => {
   try {

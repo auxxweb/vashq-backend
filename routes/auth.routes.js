@@ -1,7 +1,9 @@
 import express from 'express';
 import { body, validationResult } from 'express-validator';
 import User from '../models/User.model.js';
+import Business from '../models/Business.model.js';
 import Branch from '../models/Branch.model.js';
+import { cacheGetOrSet } from '../utils/cache.js';
 import OtpToken from '../models/OtpToken.model.js';
 import { generateToken } from '../utils/jwt.utils.js';
 import { generateOTP, getOTPExpiry } from '../utils/otp.utils.js';
@@ -387,16 +389,22 @@ router.post('/reset-password', [
 // @access  Private
 router.get('/me', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id)
-      .select('-password')
-      .populate('businessId', 'businessName status');
+    const user = req.user;
+    let businessName = null;
+    const businessId = user.businessId ? String(user.businessId) : null;
+    if (businessId) {
+      const business = await cacheGetOrSet(`auth:business:name:${businessId}`, 30_000, () =>
+        Business.findById(businessId).select('businessName status').lean()
+      );
+      businessName = business?.businessName || null;
+    }
 
     const u = {
       id: user._id,
       email: user.email,
       role: user.role,
-      businessId: user.businessId?._id || null,
-      businessName: user.businessId?.businessName || null
+      businessId: businessId || null,
+      businessName
     };
     if (user.role === 'EMPLOYEE' || user.role === 'BRANCH_ADMIN') {
       u.name = user.name || '';

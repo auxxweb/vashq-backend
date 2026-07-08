@@ -8,6 +8,7 @@ import { isBranchAdmin, isBusinessOwner } from '../utils/adminRoles.js';
 
 /** Paths that skip branch context (branch management itself). */
 const BRANCH_EXEMPT_PREFIXES = [
+  '/bootstrap',
   '/branches',
   '/branch-requests',
   '/my-subscription',

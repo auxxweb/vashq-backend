@@ -12,6 +12,7 @@ import {
 } from './invoicePayment.js';
 import { deductServiceStockForSale, restoreServiceStock } from './serviceInventory.js';
 import { lineQuantity } from './serviceCatalog.js';
+import { isFullyPaid } from '../services/credit/outstandingService.js';
 
 /** Counter / direct sales — not counted as wash jobs. */
 export const WASH_JOB_FILTER = { directBill: { $ne: true } };
@@ -108,8 +109,7 @@ export async function createInvoiceForJobRecord({
   });
 }
 
-export async function applyLoyaltyEarnForJob(businessId, customerId, jobServices = []) {
-  if (!customerId) return 0;
+async function computeLoyaltyEarnedForJobServices(businessId, jobServices = []) {
   const serviceIds = (jobServices || []).map((s) => s?.serviceId).filter(Boolean);
   if (!serviceIds.length) return 0;
 
@@ -117,17 +117,85 @@ export async function applyLoyaltyEarnForJob(businessId, customerId, jobServices
     .select('loyaltyPointsEarned')
     .lean();
   const pointsById = new Map(svc.map((s) => [String(s._id), Math.max(0, Number(s.loyaltyPointsEarned || 0))]));
-  const earned = (jobServices || []).reduce((sum, line) => {
+  return (jobServices || []).reduce((sum, line) => {
     const sid = String(line.serviceId?._id || line.serviceId || '');
     const perUnit = pointsById.get(sid) || 0;
     return sum + perUnit * lineQuantity(line.quantity);
   }, 0);
-  if (earned === 0) return 0;
+}
+
+/**
+ * Apply loyalty redemption (deduct) and optional earn when a job invoice is settled.
+ * Each action runs at most once per invoice (tracked via loyaltyRedeemAppliedAt / loyaltyEarnAppliedAt).
+ * Example: balance 10, redeem 5, earn 3 → new balance 8.
+ */
+export async function applyLoyaltySettlementForJob(
+  businessId,
+  customerId,
+  jobServices = [],
+  invoice = null,
+  { earnPoints = true } = {}
+) {
+  if (!customerId || !invoice) return { redeemed: 0, earned: 0 };
+
+  const redeemPoints = Math.max(0, Math.floor(Number(invoice.loyaltyRedeemedPoints) || 0));
+  const earned = earnPoints ? await computeLoyaltyEarnedForJobServices(businessId, jobServices) : 0;
+  const redeemDue = redeemPoints > 0 && !invoice.loyaltyRedeemAppliedAt;
+  const earnDue = earned > 0 && earnPoints && !invoice.loyaltyEarnAppliedAt;
+  if (!redeemDue && !earnDue) return { redeemed: 0, earned: 0 };
 
   const customer = await Customer.findOne({ _id: customerId, businessId }).select('loyaltyPointsBalance');
-  if (!customer) return 0;
-  customer.loyaltyPointsBalance = Math.max(0, Number(customer.loyaltyPointsBalance || 0) + earned);
+  if (!customer) return { redeemed: 0, earned: 0 };
+
+  let balance = Number(customer.loyaltyPointsBalance || 0);
+  let redeemed = 0;
+  let earnedApplied = 0;
+
+  if (redeemDue) {
+    balance = Math.max(0, balance - redeemPoints);
+    redeemed = redeemPoints;
+    invoice.loyaltyRedeemAppliedAt = new Date();
+  }
+  if (earnDue) {
+    balance += earned;
+    earnedApplied = earned;
+    invoice.loyaltyEarnAppliedAt = new Date();
+  }
+
+  customer.loyaltyPointsBalance = balance;
   await customer.save();
+  await invoice.save();
+
+  return { redeemed, earned: earnedApplied };
+}
+
+/** Credit recovery path: earn service points when a pay-later invoice becomes fully paid. */
+export async function maybeEarnLoyaltyForPaidInvoice(businessId, invoiceId) {
+  const invoice = await Invoice.findOne({ _id: invoiceId, businessId });
+  if (!invoice?.jobId || invoice.loyaltyEarnAppliedAt) return { earned: 0 };
+  if (!isFullyPaid(invoice)) return { earned: 0 };
+
+  const job = await Job.findOne({ _id: invoice.jobId, businessId }).select('customerId services').lean();
+  if (!job?.customerId) return { earned: 0 };
+
+  const { earned } = await applyLoyaltySettlementForJob(
+    businessId,
+    job.customerId,
+    job.services,
+    invoice,
+    { earnPoints: true }
+  );
+  return { earned };
+}
+
+export async function applyLoyaltyEarnForJob(businessId, customerId, jobServices = [], invoice = null) {
+  const { earned } = await applyLoyaltySettlementForJob(
+    businessId,
+    customerId,
+    jobServices,
+    invoice,
+    { earnPoints: true }
+  );
   return earned;
 }
 
@@ -159,7 +227,7 @@ export async function settleDirectBillInvoice(invoice, job, businessId, paymentB
   invoice.paymentReceivedAt = new Date();
   await invoice.save();
 
-  await applyLoyaltyEarnForJob(businessId, job.customerId, job.services);
+  await applyLoyaltySettlementForJob(businessId, job.customerId, job.services, invoice, { earnPoints: true });
   return invoice;
 }
 

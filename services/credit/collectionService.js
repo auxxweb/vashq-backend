@@ -17,11 +17,13 @@ import {
   getCheckoutTotal,
   getTotalCollected,
   isOpenCreditInvoice,
+  isFullyPaid,
   sortInvoicesFifo,
   sumCustomerOutstanding,
   syncInvoiceOutstanding
 } from './outstandingService.js';
 import { appendCreditLedgerEvent } from './creditLedgerService.js';
+import { maybeEarnLoyaltyForPaidInvoice } from '../../utils/directBillJob.js';
 
 const EPS = 0.02;
 
@@ -214,6 +216,7 @@ export async function recordCollection({
 
   const session = await mongoose.startSession();
   session.startTransaction();
+  const invoicesForLoyaltyEarn = [];
 
   try {
     if (idempotencyKey) {
@@ -269,8 +272,18 @@ export async function recordCollection({
         err.status = 409;
         throw err;
       }
+      const outstandingBefore = computeOutstanding(inv);
       applyCollectionToInvoice(inv, alloc.amount);
       await inv.save({ session });
+
+      if (
+        outstandingBefore > EPS &&
+        isFullyPaid(inv) &&
+        inv.jobId &&
+        !inv.loyaltyEarnAppliedAt
+      ) {
+        invoicesForLoyaltyEarn.push(String(inv._id));
+      }
 
       await appendCreditLedgerEvent({
         businessId,
@@ -310,6 +323,12 @@ export async function recordCollection({
     await collection.save({ session });
 
     await session.commitTransaction();
+
+    for (const invoiceId of invoicesForLoyaltyEarn) {
+      await maybeEarnLoyaltyForPaidInvoice(businessId, invoiceId).catch((err) => {
+        console.error('Loyalty earn after collection failed:', invoiceId, err?.message || err);
+      });
+    }
 
     return { collection: collection.toObject(), duplicate: false };
   } catch (error) {

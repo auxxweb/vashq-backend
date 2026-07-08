@@ -1,6 +1,7 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import Invoice from '../models/Invoice.model.js';
+import Job from '../models/Job.model.js';
 import PlatformSettings from '../models/PlatformSettings.model.js';
 import Business from '../models/Business.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
@@ -188,6 +189,12 @@ router.get('/invoice/:id/view', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
+    let isProductSale = false;
+    if (invoice.jobId) {
+      const job = await Job.findById(invoice.jobId).select('directBill').lean();
+      isProductSale = !!job?.directBill;
+    }
+
     const [platform, business] = await Promise.all([
       PlatformSettings.findOne({}).lean(),
       getInvoiceCompanySnapshot(invoice.businessId)
@@ -198,7 +205,10 @@ router.get('/invoice/:id/view', async (req, res) => {
       await Invoice.updateOne({ _id: id, shareToken: token }, { $set: toPersist });
     }
 
-    const invoiceForView = mergeInvoiceWithCompanySnapshot(invoice, business);
+    const invoiceForView = {
+      ...mergeInvoiceWithCompanySnapshot(invoice, business),
+      isProductSale
+    };
     const currency = platform?.defaultCurrency || 'USD';
 
     res.json({ success: true, invoice: invoiceForView, currency, business });

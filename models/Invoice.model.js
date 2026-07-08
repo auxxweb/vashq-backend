@@ -36,6 +36,10 @@ const invoiceSchema = new mongoose.Schema({
   gstAmount: { type: Number, default: 0, min: 0 },
   loyaltyRedeemedPoints: { type: Number, default: 0, min: 0 },
   loyaltyRedeemedAmount: { type: Number, default: 0, min: 0 },
+  /** Set when redeemed points are deducted from the customer balance (once per invoice). */
+  loyaltyRedeemAppliedAt: { type: Date },
+  /** Set when service loyalty points are credited to the customer (once per invoice). */
+  loyaltyEarnAppliedAt: { type: Date },
   finalAmount: { type: Number, required: true, min: 0 },
   /** Copied from job at invoice creation; capped by final amount when computing balance due. */
   advancePayment: { type: Number, default: 0, min: 0 },

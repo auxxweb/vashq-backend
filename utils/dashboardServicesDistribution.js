@@ -49,10 +49,16 @@ export async function getDashboardServicesDistribution(businessId, startUtc, end
       }
     },
     {
+      $addFields: {
+        lineQty: { $max: [1, { $ifNull: ['$services.quantity', 1] }] },
+        lineUnitPrice: { $ifNull: ['$services.price', 0] }
+      }
+    },
+    {
       $group: {
         _id: '$lineName',
-        count: { $sum: 1 },
-        revenue: { $sum: { $ifNull: ['$services.price', 0] } }
+        count: { $sum: '$lineQty' },
+        revenue: { $sum: { $multiply: ['$lineUnitPrice', '$lineQty'] } }
       }
     },
     {

@@ -20,7 +20,7 @@ import {
   directBillStatusHistory,
   finalizeDirectBillSale,
   WASH_JOB_FILTER,
-  applyLoyaltyEarnForJob
+  applyLoyaltySettlementForJob
 } from '../utils/directBillJob.js';
 import { buildServicesListQuery } from '../utils/serviceCatalog.js';
 import { loadDashboardStats } from '../services/dashboardStatsService.js';
@@ -101,6 +101,9 @@ import {
 } from '../services/subscriptionService.js';
 import { validateServiceTimeRange } from '../utils/serviceTime.js';
 import { parseBusinessCalendarDate } from '../utils/calendarDate.js';
+import { getBusinessTimezone } from '../utils/businessTimezone.js';
+import { getCachedDashboardStats, getCachedDashboardCharts } from '../utils/dashboardCache.js';
+import { getMySubscriptionPayload, loadAdminBootstrap } from '../services/adminBootstrapService.js';
 
 const router = express.Router();
 
@@ -164,6 +167,7 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p.startsWith('/expenses') ||
       p === '/expense-types' ||
       p === '/my-subscription' ||
+      p === '/bootstrap' ||
       p === '/available-plans' ||
       p.startsWith('/upgrade-request') ||
       p.startsWith('/settlement-change-requests');
@@ -229,6 +233,22 @@ router.use(async (req, res, next) => {
 router.use(enforceActiveSubscription());
 
 router.use('/credit', creditRoutes);
+
+// @route   GET /api/admin/bootstrap
+// @desc    Shell bootstrap: subscription, modules, branches, unread count (one round-trip)
+// @access  Private (Car Wash Admin, Branch Admin, Employee)
+router.get('/bootstrap', async (req, res) => {
+  try {
+    const payload = await loadAdminBootstrap({
+      businessId: req.businessId,
+      user: req.user
+    });
+    res.json({ success: true, ...payload });
+  } catch (error) {
+    console.error('Admin bootstrap error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
 // Multer: max 4 files, 20MB each (client compresses large images; this is a safety limit)
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -1118,9 +1138,11 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
       { $set: { status: 'DELIVERED', actualDelivery: new Date() } }
     );
 
-    // Loyalty points: earn from services (redeem is already applied when invoice is saved)
+    // Loyalty: deduct redeemed points and earn from services when job is closed
     if (job?.customerId) {
-      await applyLoyaltyEarnForJob(req.businessId, job.customerId, job.services);
+      await applyLoyaltySettlementForJob(req.businessId, job.customerId, job.services, invoice, {
+        earnPoints: true
+      });
     }
     res.json({ success: true, message: 'Job closed' });
 
@@ -1637,21 +1659,28 @@ router.get('/reports/collections', adminPanelOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/reports/outstanding?customerId=&minAmount=&overdueOnly=true
+// GET /api/admin/reports/outstanding?range=...&from=&to=&customerId=&minAmount=&overdueOnly=true
 router.get('/reports/outstanding', adminPanelOnly, async (req, res) => {
   try {
+    const { range = 'daily', from, to } = req.query;
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const branchId = req.branchScope === 'all' ? null : req.branchId;
     const report = await buildOutstandingReport(req.businessId, {
       customerId: req.query.customerId,
       minAmount: req.query.minAmount,
       overdueOnly: req.query.overdueOnly,
-      branchId
+      branchId,
+      start,
+      end,
+      exclusiveEnd
     });
     res.json({
       success: true,
       data: report.data,
       summary: report.summary,
-      totalAmount: report.summary.totalOutstanding
+      totalAmount: report.summary.totalOutstanding,
+      start: report.start,
+      end: report.end
     });
   } catch (error) {
     console.error('Reports outstanding error:', error);
@@ -1711,8 +1740,7 @@ router.get('/dashboard/branch-overview', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Switch to All branches to view branch overview' });
     }
     const businessId = req.businessId;
-    const settingsLean = await BusinessSettings.findOne({ businessId }).select('timezone').lean();
-    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const businessTz = await getBusinessTimezone(businessId);
     const range = String(req.query.range || 'today').toLowerCase();
     const fromQ = String(req.query.from || '').trim();
     const toQ = String(req.query.to || '').trim();
@@ -1746,42 +1774,57 @@ router.get('/dashboard', async (req, res) => {
     const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
     const expenseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
 
-    const settingsLean = await BusinessSettings.findOne({ businessId })
-      .select('timezone')
-      .lean();
-    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
-
     const range = String(req.query.range || 'today').toLowerCase();
     const fromQ = String(req.query.from || '').trim();
     const toQ = String(req.query.to || '').trim();
 
-    let bounds;
-    try {
-      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
-    } catch (boundsErr) {
-      if (boundsErr.statusCode === 400) {
-        return res.status(400).json({ success: false, message: boundsErr.message });
-      }
-      throw boundsErr;
-    }
-    const { startUtc, endUtc, rangeLabel } = bounds;
-
-    const statsPayload = await loadDashboardStats({
-      businessId,
-      businessTz,
-      startUtc,
-      endUtc,
-      rangeLabel,
+    const cacheKeyParts = {
+      businessId: String(businessId),
+      branchScope: req.branchScope,
+      branchId: scopedBranchId ? String(scopedBranchId) : null,
       range,
+      from: fromQ,
+      to: toQ,
       isEmployee,
-      baseMatch,
-      expenseMatch,
-      scopedBranchId,
-      businessModules: req.businessModules
+      userId: isEmployee ? String(req.user._id) : null
+    };
+
+    const statsPayload = await getCachedDashboardStats(cacheKeyParts, async () => {
+      const businessTz = await getBusinessTimezone(businessId);
+
+      let bounds;
+      try {
+        bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+      } catch (boundsErr) {
+        if (boundsErr.statusCode === 400) {
+          const err = new Error(boundsErr.message);
+          err.statusCode = 400;
+          throw err;
+        }
+        throw boundsErr;
+      }
+      const { startUtc, endUtc, rangeLabel } = bounds;
+
+      return loadDashboardStats({
+        businessId,
+        businessTz,
+        startUtc,
+        endUtc,
+        rangeLabel,
+        range,
+        isEmployee,
+        baseMatch,
+        expenseMatch,
+        scopedBranchId,
+        businessModules: req.businessModules
+      });
     });
 
     res.json({ success: true, stats: statsPayload, isEmployee: !!isEmployee });
   } catch (error) {
+    if (error.statusCode === 400) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     console.error('Dashboard error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -1796,10 +1839,7 @@ router.get('/dashboard/unclosed-invoices', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Admin access only' });
     }
     const businessId = req.businessId;
-    const settingsLean = await BusinessSettings.findOne({ businessId })
-      .select('timezone')
-      .lean();
-    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const businessTz = await getBusinessTimezone(businessId);
     const range = String(req.query.range || 'today').toLowerCase();
     const fromQ = String(req.query.from || '').trim();
     const toQ = String(req.query.to || '').trim();
@@ -1836,119 +1876,134 @@ router.get('/dashboard/charts', async (req, res) => {
     const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
     const invoiceMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
 
-    const settingsLean = await BusinessSettings.findOne({ businessId })
-      .select('timezone')
-      .lean();
-    const businessTz = settingsLean?.timezone || process.env.CRON_TZ || 'UTC';
+    const businessTz = await getBusinessTimezone(businessId);
 
     const range = String(req.query.range || 'today').toLowerCase();
     const fromQ = String(req.query.from || '').trim();
     const toQ = String(req.query.to || '').trim();
 
-    let bounds;
-    try {
-      bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
-    } catch (boundsErr) {
-      if (boundsErr.statusCode === 400) {
-        return res.status(400).json({ success: false, message: boundsErr.message });
+    const cacheKeyParts = {
+      businessId: String(businessId),
+      branchScope: req.branchScope,
+      branchId: scopedBranchId ? String(scopedBranchId) : null,
+      range,
+      from: fromQ,
+      to: toQ,
+      isEmployee,
+      userId: isEmployee ? String(req.user._id) : null
+    };
+
+    const chartsPayload = await getCachedDashboardCharts(cacheKeyParts, async () => {
+      let bounds;
+      try {
+        bounds = parseBusinessDateRange(businessTz, range, fromQ, toQ);
+      } catch (boundsErr) {
+        if (boundsErr.statusCode === 400) {
+          const err = new Error(boundsErr.message);
+          err.statusCode = 400;
+          throw err;
+        }
+        throw boundsErr;
       }
-      throw boundsErr;
-    }
-    const { startUtc, endUtc, rangeLabel } = bounds;
-    const endExclusiveZ = DateTime.fromJSDate(endUtc).setZone(businessTz);
-    const washJobMatch = { ...baseMatch, ...WASH_JOB_FILTER };
+      const { startUtc, endUtc, rangeLabel } = bounds;
+      const endExclusiveZ = DateTime.fromJSDate(endUtc).setZone(businessTz);
+      const washJobMatch = { ...baseMatch, ...WASH_JOB_FILTER };
 
-    // Revenue trend: run 7 day queries in parallel
-    const revenuePromises = [];
-    const anchorDayZ = endExclusiveZ.minus({ days: 1 }).startOf('day');
-    for (let i = 6; i >= 0; i--) {
-      const dayZ = anchorDayZ.minus({ days: i });
-      const d = dayZ.toUTC().toJSDate();
-      const next = dayZ.plus({ days: 1 }).toUTC().toJSDate();
-      revenuePromises.push(
-        Invoice.aggregate([
-          { $match: invoiceMatch },
-          {
-            $lookup: {
-              from: 'jobs',
-              let: { jid: '$jobId' },
-              pipeline: [
-                {
-                  $match: {
-                    $expr: { $eq: ['$_id', '$$jid'] },
-                    directBill: { $ne: true },
-                    status: 'DELIVERED',
-                    $or: [
-                      { actualDelivery: { $gte: d, $lt: next } },
-                      { actualDelivery: { $exists: false }, updatedAt: { $gte: d, $lt: next } }
-                    ]
-                  }
-                },
-                { $limit: 1 }
-              ],
-              as: 'j'
-            }
-          },
-          { $match: { j: { $ne: [] } } },
-          { $group: { _id: null, total: { $sum: '$finalAmount' } } }
-        ]).then((r) => ({ d, total: r[0]?.total ?? 0 }))
-      );
-    }
-    const revenueResults = await Promise.all(revenuePromises);
-    const revenueTrend = revenueResults.map(({ d, total }) => ({
-      date: DateTime.fromJSDate(d).setZone(businessTz).toFormat('ccc, LLL d'),
-      revenue: Math.round(total * 100) / 100
-    }));
-
-    const servicesDistribution = await getDashboardServicesDistribution(businessId, startUtc, endUtc, scopedBranchId);
-
-    // Job trend for employees: jobs completed per day (last 7 days)
-    let jobTrend = [];
-    if (isEmployee) {
-      const jobPromises = [];
-      const anchorEmpDayZ = endExclusiveZ.minus({ days: 1 }).startOf('day');
+      // Revenue trend: run 7 day queries in parallel
+      const revenuePromises = [];
+      const anchorDayZ = endExclusiveZ.minus({ days: 1 }).startOf('day');
       for (let i = 6; i >= 0; i--) {
-        const dayZ = anchorEmpDayZ.minus({ days: i });
+        const dayZ = anchorDayZ.minus({ days: i });
         const d = dayZ.toUTC().toJSDate();
         const next = dayZ.plus({ days: 1 }).toUTC().toJSDate();
-        jobPromises.push(
-          Job.aggregate([
+        revenuePromises.push(
+          Invoice.aggregate([
+            { $match: invoiceMatch },
             {
-              $match: {
-                ...baseMatch,
-                ...WASH_JOB_FILTER,
-                status: 'DELIVERED',
-                $or: [
-                  { actualDelivery: { $gte: d, $lt: next } },
-                  { actualDelivery: { $exists: false }, updatedAt: { $gte: d, $lt: next } }
-                ]
+              $lookup: {
+                from: 'jobs',
+                let: { jid: '$jobId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: ['$_id', '$$jid'] },
+                      directBill: { $ne: true },
+                      status: 'DELIVERED',
+                      $or: [
+                        { actualDelivery: { $gte: d, $lt: next } },
+                        { actualDelivery: { $exists: false }, updatedAt: { $gte: d, $lt: next } }
+                      ]
+                    }
+                  },
+                  { $limit: 1 }
+                ],
+                as: 'j'
               }
             },
-            { $count: 'count' }
-          ]).then((r) => ({ d, count: r[0]?.count ?? 0 }))
+            { $match: { j: { $ne: [] } } },
+            { $group: { _id: null, total: { $sum: '$finalAmount' } } }
+          ]).then((r) => ({ d, total: r[0]?.total ?? 0 }))
         );
       }
-      const jobResults = await Promise.all(jobPromises);
-      jobTrend = jobResults.map(({ d, count }) => ({
+      const revenueResults = await Promise.all(revenuePromises);
+      const revenueTrend = revenueResults.map(({ d, total }) => ({
         date: DateTime.fromJSDate(d).setZone(businessTz).toFormat('ccc, LLL d'),
-        jobs: count
+        revenue: Math.round(total * 100) / 100
       }));
-    }
 
-    res.json({
-      success: true,
-      revenueTrend: isEmployee ? [] : revenueTrend,
-      jobTrend,
-      servicesDistribution,
-      servicesDistributionMeta: {
-        label: rangeLabel,
-        timezone: businessTz,
-        range,
-        start: startUtc.toISOString(),
-        end: endUtc.toISOString()
+      const servicesDistribution = await getDashboardServicesDistribution(businessId, startUtc, endUtc, scopedBranchId);
+
+      let jobTrend = [];
+      if (isEmployee) {
+        const jobPromises = [];
+        const anchorEmpDayZ = endExclusiveZ.minus({ days: 1 }).startOf('day');
+        for (let i = 6; i >= 0; i--) {
+          const dayZ = anchorEmpDayZ.minus({ days: i });
+          const d = dayZ.toUTC().toJSDate();
+          const next = dayZ.plus({ days: 1 }).toUTC().toJSDate();
+          jobPromises.push(
+            Job.aggregate([
+              {
+                $match: {
+                  ...baseMatch,
+                  ...WASH_JOB_FILTER,
+                  status: 'DELIVERED',
+                  $or: [
+                    { actualDelivery: { $gte: d, $lt: next } },
+                    { actualDelivery: { $exists: false }, updatedAt: { $gte: d, $lt: next } }
+                  ]
+                }
+              },
+              { $count: 'count' }
+            ]).then((r) => ({ d, count: r[0]?.count ?? 0 }))
+          );
+        }
+        const jobResults = await Promise.all(jobPromises);
+        jobTrend = jobResults.map(({ d, count }) => ({
+          date: DateTime.fromJSDate(d).setZone(businessTz).toFormat('ccc, LLL d'),
+          jobs: count
+        }));
       }
+
+      return {
+        revenueTrend: isEmployee ? [] : revenueTrend,
+        jobTrend,
+        servicesDistribution,
+        servicesDistributionMeta: {
+          label: rangeLabel,
+          timezone: businessTz,
+          range,
+          start: startUtc.toISOString(),
+          end: endUtc.toISOString()
+        }
+      };
     });
+
+    res.json({ success: true, ...chartsPayload });
   } catch (error) {
+    if (error.statusCode === 400) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     console.error('Dashboard charts error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -2445,6 +2500,7 @@ router.get('/customers/:id', async (req, res) => {
       Car.find(branchCarFilter).sort({ createdAt: -1 }).lean(),
       Job.find(branchJobFilter)
         .populate('carId', 'carNumber brand model color')
+        .populate('branchId', 'name')
         .populate({ path: 'services.serviceId', select: 'name isVariable skipWorkProcess' })
         .sort({ createdAt: -1 })
         .limit(50)
@@ -4180,7 +4236,8 @@ router.get('/notifications', async (req, res) => {
   try {
     const notifications = await Notification.find({ businessId: req.businessId })
       .sort({ createdAt: -1 })
-      .limit(100);
+      .limit(100)
+      .lean();
 
     const unreadCount = await Notification.countDocuments({
       businessId: req.businessId,
@@ -4583,51 +4640,8 @@ async function getPlatformDefaultCurrency() {
 // @access  Private (Car Wash Admin)
 router.get('/my-subscription', async (req, res) => {
   try {
-    await ensureDefaultSubscriptionPlan();
-    let subscription = await ShopSubscription.findOne({ shopId: req.businessId })
-      .populate('planId', 'name description validityDays features isActive isFreeTrial price');
-    if (!subscription) {
-      const business = await Business.findById(req.businessId).select('freeTrialUsed').lean();
-      const skipFreeTrial = business?.freeTrialUsed === true;
-      const defaultPlanQuery = { isActive: true };
-      if (skipFreeTrial) defaultPlanQuery.isFreeTrial = { $ne: true };
-      const defaultPlan = await SubscriptionPlan.findOne(defaultPlanQuery).sort({ validityDays: 1 });
-      if (!defaultPlan) {
-        return res.json({
-          success: true,
-          subscription: null,
-          message: skipFreeTrial ? 'No paid plans available. Contact admin.' : 'No plans available. Contact admin.'
-        });
-      }
-      const startDate = new Date();
-      const expiryDate = new Date(startDate);
-      expiryDate.setDate(expiryDate.getDate() + defaultPlan.validityDays);
-      subscription = await ShopSubscription.create({
-        shopId: req.businessId,
-        planId: defaultPlan._id,
-        startDate,
-        expiryDate,
-        status: 'ACTIVE'
-      });
-      invalidateSubscriptionCache(req.businessId);
-      await subscription.populate('planId', 'name description validityDays features isActive isFreeTrial price');
-    }
-    const subObj = subscription.toObject ? subscription.toObject() : subscription;
-    if (subObj.expiryDate && new Date(subObj.expiryDate) < new Date() && subObj.status === 'ACTIVE') {
-      await ShopSubscription.updateOne(
-        { _id: subscription._id },
-        { status: 'EXPIRED' }
-      );
-      invalidateSubscriptionCache(req.businessId);
-      subObj.status = 'EXPIRED';
-    }
-    const business = await Business.findById(req.businessId).select('freeTrialUsed').lean();
-    const freeTrialUsed = business?.freeTrialUsed === true;
-    const hasPendingUpgrade = await PlanUpgradeRequest.exists({ shopId: req.businessId, status: 'PENDING' });
-    const canRequestUpgrade = !hasPendingUpgrade;
-    const currency = await getPlatformDefaultCurrency();
-    const enabledModules = await getBusinessModules(req.businessId);
-    res.json({ success: true, subscription: subObj, canRequestUpgrade, freeTrialUsed, currency, enabledModules });
+    const payload = await getMySubscriptionPayload(req.businessId);
+    res.json({ success: true, ...payload });
   } catch (error) {
     console.error('Get my-subscription error:', error);
     res.status(500).json({ success: false, message: 'Server error' });

@@ -150,11 +150,16 @@ export async function buildOutstandingReport(businessId, filters = {}) {
   const minAmount = Math.max(0, Number(filters.minAmount) || 0);
   const overdueOnly = filters.overdueOnly === 'true' || filters.overdueOnly === true;
   const customerId = filters.customerId;
+  const { start, end, exclusiveEnd = true } = filters;
+
+  const saleConfirmedClause = start && end
+    ? (exclusiveEnd ? { $gte: start, $lt: end } : { $gte: start, $lte: end })
+    : { $ne: null };
 
   const invoiceQuery = {
     businessId: bizOid,
     settlementMode: 'CREDIT',
-    saleConfirmedAt: { $ne: null },
+    saleConfirmedAt: saleConfirmedClause,
     outstandingAmount: { $gt: 0.01 }
   };
   if (customerId && mongoose.isValidObjectId(String(customerId))) {
@@ -251,7 +256,9 @@ export async function buildOutstandingReport(businessId, filters = {}) {
       openInvoiceCount: filtered.length,
       overdueCustomerCount: overdueCustomers,
       overdueAmount: roundSummary(overdueAmount)
-    }
+    },
+    start: start || null,
+    end: end || null
   };
 }
 

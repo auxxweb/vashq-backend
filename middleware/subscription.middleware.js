@@ -7,6 +7,7 @@ import {
 } from '../services/subscriptionService.js';
 
 const ADMIN_ALLOW_WHEN_LOCKED = new Set([
+  '/bootstrap',
   '/my-subscription',
   '/available-plans',
   '/branch-licenses',
