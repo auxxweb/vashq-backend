@@ -55,6 +55,26 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 // Note: Image uploads use multipart (multer), max 20MB per file × 4. Client compresses before upload. If you see "Upload failed" on mobile, set proxy body limit: nginx client_max_body_size 10M; or API Gateway payload limit ≥ 10MB.
 
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS || 3000);
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api') || req.path === '/api/health') return next();
+  const startedAt = process.hrtime.bigint();
+  res.on('finish', () => {
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    if (elapsedMs >= SLOW_REQUEST_MS) {
+      console.warn('Slow request:', {
+        method: req.method,
+        path: req.originalUrl,
+        status: res.statusCode,
+        elapsedMs: Math.round(elapsedMs),
+        userId: req.user?._id ? String(req.user._id) : undefined,
+        businessId: req.businessId ? String(req.businessId) : undefined
+      });
+    }
+  });
+  next();
+});
+
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
