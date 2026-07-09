@@ -100,6 +100,7 @@ export async function loadAdminBootstrap({ businessId, user }) {
   }
 
   return {
+    businessId: String(businessId),
     ...subscriptionPayload,
     unreadCount,
     branches
