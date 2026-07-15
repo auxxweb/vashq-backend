@@ -82,6 +82,10 @@ import {
   companyFieldsToPersist
 } from '../utils/invoiceCompany.js';
 import { DEFAULT_WHATSAPP_TEMPLATES, normalizeWhatsappTemplates } from '../utils/whatsappTemplates.js';
+import {
+  applyBranchWhatsAppSettings,
+  resolveWhatsAppBranchId
+} from '../utils/whatsappSettingsMerge.js';
 import { DateTime } from 'luxon';
 import { resolveBranchContext, branchFilter } from '../middleware/branchContext.middleware.js';
 import { moduleDisabledResponse } from '../middleware/businessModules.middleware.js';
@@ -4452,9 +4456,20 @@ router.get('/settings', async (req, res) => {
       fallbackEnd: wh.end,
       legacyAllowedDays: settingsObj.bookingAllowedDays
     });
+
+    const whatsAppBranchId = await resolveWhatsAppBranchId(req.businessId, {
+      queryBranchId: req.query.branchId,
+      requestBranchId: req.branchId
+    });
+    const mergedSettings = await applyBranchWhatsAppSettings(
+      settingsObj,
+      req.businessId,
+      whatsAppBranchId
+    );
+
     res.json({
       success: true,
-      settings: settingsObj
+      settings: mergedSettings
     });
   } catch (error) {
     console.error('Get settings error:', error);

@@ -20,6 +20,7 @@ import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import { getBranchPlatformConfig, normalizeBranchCode, suggestBranchCode } from '../utils/branchConfig.js';
 import { getBusinessModules, isModuleEnabled } from './businessModulesService.js';
 import { cacheGetOrSet, cacheDelete } from '../utils/cache.js';
+import { syncDefaultBranchWhatsAppToBusiness } from '../utils/whatsappSettingsMerge.js';
 
 const DEFAULT_BRANCH_CACHE_TTL = 120_000;
 
@@ -614,6 +615,15 @@ export async function updateBranchSettings(businessId, branchId, payload) {
     { $set: update },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
+
+  const whatsAppPayload = {};
+  if (payload.shopWhatsappNumber !== undefined) whatsAppPayload.shopWhatsappNumber = payload.shopWhatsappNumber;
+  if (payload.googleReviewLink !== undefined) whatsAppPayload.googleReviewLink = payload.googleReviewLink;
+  if (payload.whatsappTemplates !== undefined) whatsAppPayload.whatsappTemplates = payload.whatsappTemplates;
+  if (Object.keys(whatsAppPayload).length) {
+    await syncDefaultBranchWhatsAppToBusiness(businessId, branchId, whatsAppPayload);
+  }
+
   return settings;
 }
 
