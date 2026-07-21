@@ -44,7 +44,7 @@ const invoiceSchema = new mongoose.Schema({
   /** Copied from job at invoice creation; capped by final amount when computing balance due. */
   advancePayment: { type: Number, default: 0, min: 0 },
   // Payment
-  paymentMethod: { type: String, enum: ['CASH', 'ONLINE', 'SPLIT'], default: 'CASH' },
+  paymentMethod: { type: String, enum: ['CASH', 'ONLINE', 'SPLIT'], default: 'ONLINE' },
   /** Amounts collected at settlement (balance due); SPLIT uses both. */
   paymentCashAmount: { type: Number, default: 0, min: 0 },
   paymentOnlineAmount: { type: Number, default: 0, min: 0 },

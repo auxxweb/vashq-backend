@@ -13,6 +13,7 @@ import {
 import { deductServiceStockForSale, restoreServiceStock } from './serviceInventory.js';
 import { lineQuantity } from './serviceCatalog.js';
 import { isFullyPaid } from '../services/credit/outstandingService.js';
+import { invalidateDashboardForBusiness } from './dashboardFinancialSync.js';
 
 /** Counter / direct sales — not counted as wash jobs. */
 export const WASH_JOB_FILTER = { directBill: { $ne: true } };
@@ -100,7 +101,7 @@ export async function createInvoiceForJobRecord({
     subtotal,
     finalAmount: subtotal,
     advancePayment: advanceFromJob,
-    paymentMethod: 'CASH',
+    paymentMethod: 'ONLINE',
     paymentCashAmount: 0,
     paymentOnlineAmount: 0,
     paymentStatus: 'PENDING',
@@ -226,6 +227,7 @@ export async function settleDirectBillInvoice(invoice, job, businessId, paymentB
   invoice.paymentStatus = 'RECEIVED';
   invoice.paymentReceivedAt = new Date();
   await invoice.save();
+  invalidateDashboardForBusiness(businessId);
 
   await applyLoyaltySettlementForJob(businessId, job.customerId, job.services, invoice, { earnPoints: true });
   return invoice;

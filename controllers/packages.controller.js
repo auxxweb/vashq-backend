@@ -15,6 +15,7 @@ import { moduleDisabledResponse } from '../middleware/businessModules.middleware
 import { getInvoiceCompanySnapshot } from '../utils/invoiceCompany.js';
 import { applyBranchScope } from '../utils/branchQuery.js';
 import { assertBranchAccess, findScoped, branchIdForCreate } from '../utils/branchAccess.js';
+import { invalidateDashboardForBusiness } from '../utils/dashboardFinancialSync.js';
 
 // ==================== Helpers ====================
 
@@ -384,7 +385,7 @@ export async function purchasePackage(req, res) {
       subtotal,
       finalAmount: subtotal,
       advancePayment: 0,
-      paymentMethod: 'CASH',
+      paymentMethod: 'ONLINE',
       paymentCashAmount: 0,
       paymentOnlineAmount: 0,
       paymentStatus: 'PENDING',
@@ -608,6 +609,7 @@ export async function closePackageSale(req, res) {
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
+    invalidateDashboardForBusiness(req.businessId);
 
     res.json({ success: true, invoice, message: 'Package marked paid' });
   } catch (error) {

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Invoice from '../models/Invoice.model.js';
+import { invoiceCollectedAmountExpression } from './dashboardFinancialSync.js';
 
 /** Dashboard KPIs for package template sales (saleType PACKAGE invoices). */
 export async function getPackageSalesDashboardStats(businessId, startUtc, endUtc, branchId = null) {
@@ -8,32 +9,32 @@ export async function getPackageSalesDashboardStats(businessId, startUtc, endUtc
   const packageMatch = {
     businessId: businessObjectId,
     saleType: 'PACKAGE',
+    createdAt: createdRange,
     ...(branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {})
   };
 
   const [packageSalesCount, revenueAgg, collectedAgg, pendingCount] = await Promise.all([
-    Invoice.countDocuments({ ...packageMatch, createdAt: createdRange }),
+    Invoice.countDocuments(packageMatch),
     Invoice.aggregate([
-      { $match: { ...packageMatch, createdAt: createdRange } },
+      { $match: packageMatch },
       { $group: { _id: null, total: { $sum: '$finalAmount' } } }
     ]),
     Invoice.aggregate([
-      {
-        $match: {
-          ...packageMatch,
-          $or: [
-            { paymentStatus: 'RECEIVED', paymentReceivedAt: createdRange },
-            { settlementMode: 'CREDIT', saleConfirmedAt: createdRange }
-          ]
-        }
-      },
-      { $group: { _id: null, total: { $sum: '$finalAmount' } } }
+      { $match: packageMatch },
+      { $group: { _id: null, total: { $sum: invoiceCollectedAmountExpression() } } }
     ]),
     Invoice.countDocuments({
       ...packageMatch,
-      createdAt: createdRange,
-      paymentStatus: 'PENDING',
-      $or: [{ settlementMode: { $ne: 'CREDIT' } }, { saleConfirmedAt: null }]
+      $or: [
+        { outstandingAmount: { $gt: 0.01 } },
+        {
+          paymentStatus: 'PENDING',
+          $or: [
+            { settlementMode: { $ne: 'CREDIT' } },
+            { saleConfirmedAt: null }
+          ]
+        }
+      ]
     })
   ]);
 

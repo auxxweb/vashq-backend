@@ -13,6 +13,7 @@ import {
 import { appendCreditLedgerEvent } from './creditLedgerService.js';
 import { sendPushNotification } from '../notificationService.js';
 import User from '../../models/User.model.js';
+import { invalidateDashboardForBusiness } from '../../utils/dashboardFinancialSync.js';
 
 async function earnLoyaltyForJob(businessId, job, invoice, { earnPoints = true } = {}) {
   if (!job?.customerId) return;
@@ -73,6 +74,7 @@ export async function closeJobOnCredit({ invoice, job, businessId, user, body })
 
   applyCreditCloseToInvoice(invoice, body);
   await invoice.save();
+  invalidateDashboardForBusiness(businessId);
 
   await Job.findOneAndUpdate(
     { _id: invoice.jobId, businessId },
@@ -118,6 +120,7 @@ export async function closePackageOnCredit({ invoice, businessId, user, body, cu
 
   applyCreditCloseToInvoice(invoice, body);
   await invoice.save();
+  invalidateDashboardForBusiness(businessId);
 
   await appendCreditLedgerEvent({
     businessId,

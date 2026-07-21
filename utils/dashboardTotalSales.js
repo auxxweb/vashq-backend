@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Invoice from '../models/Invoice.model.js';
+import { invoiceCollectedAmountExpression, invoiceOutstandingAmountExpression } from './dashboardFinancialSync.js';
 
 function roundMoney(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -75,7 +76,7 @@ export async function getPeriodSalesBreakdown(businessId, startUtc, endUtc, bran
 
   const baseMatch = { businessId: businessObjectId, ...branch };
 
-  const [jobAgg, productAgg, packageAgg, creditAgg] = await Promise.all([
+  const [jobAgg, productAgg, packageAgg, creditAgg, creditCollectedAgg, creditOutstandingAgg] = await Promise.all([
     Invoice.aggregate([
       { $match: { ...baseMatch, ...notCreditClause() } },
       { $lookup: deliveredWashJobLookup(startUtc, endUtc) },
@@ -108,6 +109,26 @@ export async function getPeriodSalesBreakdown(businessId, startUtc, endUtc, bran
         }
       },
       { $group: { _id: null, total: { $sum: '$finalAmount' } } }
+    ]),
+    Invoice.aggregate([
+      {
+        $match: {
+          ...baseMatch,
+          settlementMode: 'CREDIT',
+          saleConfirmedAt: creditConfirmedRange
+        }
+      },
+      { $group: { _id: null, total: { $sum: invoiceCollectedAmountExpression() } } }
+    ]),
+    Invoice.aggregate([
+      {
+        $match: {
+          ...baseMatch,
+          settlementMode: 'CREDIT',
+          saleConfirmedAt: creditConfirmedRange
+        }
+      },
+      { $group: { _id: null, total: { $sum: invoiceOutstandingAmountExpression() } } }
     ])
   ]);
 
@@ -115,6 +136,8 @@ export async function getPeriodSalesBreakdown(businessId, startUtc, endUtc, bran
   const productSalesRevenue = roundMoney(productAgg[0]?.total ?? 0);
   const packageSalesRevenue = roundMoney(packageAgg[0]?.total ?? 0);
   const creditSalesRevenue = roundMoney(creditAgg[0]?.total ?? 0);
+  const creditSalesCollected = roundMoney(creditCollectedAgg[0]?.total ?? 0);
+  const creditSalesOutstanding = roundMoney(creditOutstandingAgg[0]?.total ?? 0);
   const totalSalesRevenue = roundMoney(
     jobSalesRevenue + productSalesRevenue + packageSalesRevenue + creditSalesRevenue
   );
@@ -124,6 +147,8 @@ export async function getPeriodSalesBreakdown(businessId, startUtc, endUtc, bran
     productSalesRevenue,
     packageSalesRevenue,
     creditSalesRevenue,
+    creditSalesCollected,
+    creditSalesOutstanding,
     totalSalesRevenue
   };
 }

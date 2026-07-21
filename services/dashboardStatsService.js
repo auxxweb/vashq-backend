@@ -48,6 +48,8 @@ const EMPTY_SALES = {
   productSalesRevenue: 0,
   packageSalesRevenue: 0,
   creditSalesRevenue: 0,
+  creditSalesCollected: 0,
+  creditSalesOutstanding: 0,
   totalSalesRevenue: 0
 };
 

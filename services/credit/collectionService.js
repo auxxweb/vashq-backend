@@ -24,6 +24,7 @@ import {
 } from './outstandingService.js';
 import { appendCreditLedgerEvent } from './creditLedgerService.js';
 import { maybeEarnLoyaltyForPaidInvoice } from '../../utils/directBillJob.js';
+import { invalidateDashboardForBusiness } from '../../utils/dashboardFinancialSync.js';
 
 const EPS = 0.02;
 
@@ -323,6 +324,8 @@ export async function recordCollection({
     await collection.save({ session });
 
     await session.commitTransaction();
+
+    invalidateDashboardForBusiness(businessId);
 
     for (const invoiceId of invoicesForLoyaltyEarn) {
       await maybeEarnLoyaltyForPaidInvoice(businessId, invoiceId).catch((err) => {

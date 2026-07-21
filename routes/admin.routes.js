@@ -107,6 +107,7 @@ import { validateServiceTimeRange } from '../utils/serviceTime.js';
 import { parseBusinessCalendarDate } from '../utils/calendarDate.js';
 import { getBusinessTimezone } from '../utils/businessTimezone.js';
 import { getCachedDashboardStats, getCachedDashboardCharts } from '../utils/dashboardCache.js';
+import { invalidateDashboardForBusiness } from '../utils/dashboardFinancialSync.js';
 import { getMySubscriptionPayload, loadAdminBootstrap } from '../services/adminBootstrapService.js';
 
 const router = express.Router();
@@ -288,11 +289,30 @@ router.post('/upload/images', (req, res, next) => {
       return res.status(400).json({ success: false, message: 'No images provided' });
     }
     const isEmployee = req.user.role === 'EMPLOYEE';
-    const folderKey = req.body.folder === 'after' ? 'after' : req.body.folder === 'expenses' ? 'expenses' : req.body.folder === 'payment' ? 'payment' : 'before';
+    const folderKey = req.body.folder === 'after'
+      ? 'after'
+      : req.body.folder === 'expenses'
+        ? 'expenses'
+        : req.body.folder === 'payment'
+          ? 'payment'
+          : req.body.folder === 'logos'
+            ? 'logos'
+            : 'before';
     if (isEmployee && folderKey === 'payment') {
       return res.status(403).json({ success: false, message: 'Employees cannot upload payment proof images.' });
     }
-    const folder = folderKey === 'after' ? 'washq/jobs/after' : folderKey === 'expenses' ? 'washq/expenses' : folderKey === 'payment' ? 'washq/payment' : 'washq/jobs/before';
+    if (folderKey === 'logos' && !isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only the business owner can upload a business logo.' });
+    }
+    const folder = folderKey === 'after'
+      ? 'washq/jobs/after'
+      : folderKey === 'expenses'
+        ? 'washq/expenses'
+        : folderKey === 'payment'
+          ? 'washq/payment'
+          : folderKey === 'logos'
+            ? 'washq/logos'
+            : 'washq/jobs/before';
     const urls = [];
     for (const file of req.files) {
       const { url } = await uploadBuffer(file.buffer, file.mimetype, folder);
@@ -1137,6 +1157,7 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
+    invalidateDashboardForBusiness(req.businessId);
     await Job.findOneAndUpdate(
       { _id: invoice.jobId, businessId: req.businessId },
       { $set: { status: 'DELIVERED', actualDelivery: new Date() } }
