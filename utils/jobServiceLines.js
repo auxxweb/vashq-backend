@@ -2,7 +2,19 @@ import mongoose from 'mongoose';
 import Service from '../models/Service.model.js';
 import Job from '../models/Job.model.js';
 import { lineQuantity } from './serviceCatalog.js';
-import { assertSufficientStock, deductServiceStockForSale } from './serviceInventory.js';
+import { assertSufficientStock, deductServiceStockForSale, restoreServiceStock } from './serviceInventory.js';
+import { isProductCatalogService } from './jobCart.js';
+
+async function serviceNameMapForLines(businessId, jobServices = []) {
+  const serviceIds = (jobServices || [])
+    .map((s) => s.serviceId?._id || s.serviceId)
+    .filter(Boolean);
+  if (!serviceIds.length) return new Map();
+  const catalog = await Service.find({ businessId, _id: { $in: serviceIds } })
+    .select('name')
+    .lean();
+  return new Map(catalog.map((s) => [String(s._id), s.name]));
+}
 
 /**
  * Build validated job service lines from either:
@@ -155,7 +167,21 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
   if (!invoice || !job || invoice.paymentStatus === 'RECEIVED') return false;
   if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) return false;
 
-  const items = jobLinesToInvoiceItems(job.services || []);
+  const businessId = job.businessId || invoice.businessId;
+  const nameByServiceId = await serviceNameMapForLines(businessId, job.services || []);
+  // Prefer existing invoice labels (custom names) when catalog/customName are missing
+  const previousNameById = new Map(
+    (invoice.items || [])
+      .filter((i) => i?.serviceId && i?.serviceName && i.serviceName !== 'Service')
+      .map((i) => [String(i.serviceId?._id || i.serviceId), String(i.serviceName)])
+  );
+
+  const items = jobLinesToInvoiceItems(job.services || [], nameByServiceId).map((item) => {
+    if (item.serviceName && item.serviceName !== 'Service') return item;
+    const prev = previousNameById.get(String(item.serviceId));
+    if (prev) return { ...item, serviceName: prev };
+    return item;
+  });
   const subtotal = job.totalPrice ?? items.reduce(
     (sum, i) => sum + (Number(i.servicePrice) || 0) * lineQuantity(i.quantity),
     0
@@ -417,6 +443,99 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
 
   if (alreadyDeducted) {
     await deductServiceStockForSale(businessId, newLines, catalogServices);
+  }
+
+  await syncDraftInvoiceFromJob(invoice, job);
+  return { job, invoice };
+}
+
+/**
+ * Remove a retail product line from an open wash-job or product-sale invoice.
+ */
+export async function removeProductLineFromOpenInvoice(invoice, businessId, { serviceId } = {}) {
+  if (!invoice?.jobId) {
+    const err = new Error('Invoice is not linked to a job');
+    err.status = 400;
+    throw err;
+  }
+  if (invoice.paymentStatus === 'RECEIVED') {
+    const err = new Error('Cannot remove products from a paid invoice');
+    err.status = 403;
+    throw err;
+  }
+  if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
+    const err = new Error('Cannot remove products from a closed credit invoice');
+    err.status = 403;
+    throw err;
+  }
+  if (!serviceId) {
+    const err = new Error('Product is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const job = await Job.findOne({ _id: invoice.jobId, businessId });
+  if (!job) {
+    const err = new Error('Job not found');
+    err.status = 404;
+    throw err;
+  }
+  if (job.status === 'CANCELLED') {
+    const err = new Error('Products cannot be removed from a cancelled job');
+    err.status = 400;
+    throw err;
+  }
+
+  const targetId = String(serviceId);
+  const existing = Array.isArray(job.services) ? [...job.services] : [];
+  const idx = existing.findIndex((row) => String(row.serviceId?._id || row.serviceId) === targetId);
+  if (idx < 0) {
+    const err = new Error('Product line not found on this invoice');
+    err.status = 404;
+    throw err;
+  }
+
+  const allIds = existing.map((l) => l.serviceId).filter(Boolean);
+  const catalog = allIds.length
+    ? await Service.find({ _id: { $in: allIds }, businessId }).lean()
+    : [];
+  const catalogById = new Map(catalog.map((s) => [String(s._id), s]));
+  const removedRow = typeof existing[idx].toObject === 'function'
+    ? existing[idx].toObject()
+    : { ...existing[idx] };
+  const removedSvc = catalogById.get(targetId);
+  if (!isProductCatalogService(removedSvc)) {
+    const err = new Error('Only product lines can be removed here');
+    err.status = 400;
+    throw err;
+  }
+  if (existing.length <= 1) {
+    const err = new Error('Cannot remove the last item from the invoice');
+    err.status = 400;
+    throw err;
+  }
+
+  const removedQty = lineQuantity(removedRow.quantity);
+  existing.splice(idx, 1);
+
+  const totalPrice = Math.round(
+    existing.reduce((sum, l) => sum + (Number(l.price) || 0) * lineQuantity(l.quantity), 0) * 100
+  ) / 100;
+
+  const advanceOnJob = Math.max(0, Number(job.advancePayment) || 0);
+  if (advanceOnJob > totalPrice + 1e-6) {
+    const err = new Error('Job advance exceeds the new total. Adjust advance before changing services.');
+    err.status = 400;
+    throw err;
+  }
+
+  const alreadyDeducted = !!job.directBill || !!job.productStockDeductedAt || job.status === 'DELIVERED';
+  job.services = existing;
+  job.totalPrice = totalPrice;
+  await job.save();
+
+  if (alreadyDeducted && removedQty > 0) {
+    await restoreServiceStock(businessId, [{ serviceId: removedSvc._id, quantity: removedQty }]);
   }
 
   await syncDraftInvoiceFromJob(invoice, job);

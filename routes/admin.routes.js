@@ -13,7 +13,7 @@ import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import Notification from '../models/Notification.model.js';
 import { generateTokenNumber, calculateETA, canAcceptNewJob, isValidStatusTransition } from '../utils/job.utils.js';
-import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, assertVariableVisitAmountsRequired } from '../utils/jobServiceLines.js';
+import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, removeProductLineFromOpenInvoice, assertVariableVisitAmountsRequired } from '../utils/jobServiceLines.js';
 import {
   assertDirectBillEligible,
   createInvoiceForJobRecord,
@@ -86,6 +86,8 @@ import {
   buildDeliveredJobSalesFilter,
   mapJobInvoiceForSalesReport,
   normalizeSalesReportSource,
+  parseCategoryIdsFromQuery,
+  resolveSalesReportServiceFilter,
   shouldIncludeJobSales,
   shouldIncludePackageSales
 } from '../utils/salesReportFilter.js';
@@ -1175,6 +1177,46 @@ router.get('/invoices/:id', async (req, res) => {
       invoice = { ...invoice, ...toPersist };
     }
     invoice = mergeInvoiceWithCompanySnapshot(invoice, companySnapshot);
+
+    // Repair placeholder "Service" names on open invoices (from older add-product sync)
+    const canRepairNames =
+      invoice.paymentStatus !== 'RECEIVED' &&
+      !(invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) &&
+      Array.isArray(invoice.items) &&
+      invoice.items.some((i) => !i.serviceName || i.serviceName === 'Service');
+    if (canRepairNames) {
+      const nameById = new Map();
+      for (const row of invoice.jobId?.services || []) {
+        const sid = String(row.serviceId?._id || row.serviceId || '');
+        const name = row.customName || row.serviceId?.name;
+        if (sid && name) nameById.set(sid, name);
+      }
+      const missingIds = (invoice.items || [])
+        .filter((i) => (!i.serviceName || i.serviceName === 'Service') && i.serviceId && !nameById.has(String(i.serviceId)))
+        .map((i) => i.serviceId);
+      if (missingIds.length) {
+        const catalog = await Service.find({ _id: { $in: missingIds }, businessId: req.businessId })
+          .select('name')
+          .lean();
+        for (const s of catalog) nameById.set(String(s._id), s.name);
+      }
+      let changed = false;
+      const repairedItems = (invoice.items || []).map((item) => {
+        if (item.serviceName && item.serviceName !== 'Service') return item;
+        const name = nameById.get(String(item.serviceId));
+        if (!name) return item;
+        changed = true;
+        return { ...item, serviceName: name };
+      });
+      if (changed) {
+        await Invoice.updateOne(
+          { _id: invoice._id, businessId: req.businessId },
+          { $set: { items: repairedItems } }
+        );
+        invoice.items = repairedItems;
+      }
+    }
+
     const jobCustomerId = invoice.jobId?.customerId?._id || invoice.jobId?.customerId;
     if (!invoice.customerId && jobCustomerId) {
       invoice.customerId = jobCustomerId;
@@ -1365,6 +1407,63 @@ router.post('/invoices/:id/add-products', [
     res.json({ success: true, invoice: updated });
   } catch (error) {
     console.error('Add invoice products error:', error);
+    const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
+    res.status(status).json({ success: false, message: error?.message || 'Server error' });
+  }
+});
+
+// POST /api/admin/invoices/:id/remove-product — remove a retail product line from an open job/sale invoice
+router.post('/invoices/:id/remove-product', [
+  body('serviceId').notEmpty().withMessage('Product is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    if (!isModuleEnabled(req.businessModules || await getBusinessModules(req.businessId), 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+
+    const invoiceDoc = await findScoped(Invoice, req, { _id: req.params.id });
+    if (!invoiceDoc) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    assertBranchAccess(req, invoiceDoc, { allowLegacyNull: true });
+    try {
+      await assertInvoiceCheckoutAccess(req, invoiceDoc);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ success: false, message: accessErr.message });
+    }
+
+    if (invoiceDoc.saleType === 'PACKAGE') {
+      return res.status(400).json({
+        success: false,
+        message: 'Products cannot be removed from a package invoice'
+      });
+    }
+
+    try {
+      await removeProductLineFromOpenInvoice(invoiceDoc, req.businessId, {
+        serviceId: req.body.serviceId
+      });
+    } catch (removeErr) {
+      return res.status(removeErr.status || 400).json({
+        success: false,
+        message: removeErr.message || 'Could not remove product'
+      });
+    }
+
+    const updated = await Invoice.findById(invoiceDoc._id)
+      .populate({
+        path: 'jobId',
+        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+      })
+      .lean();
+    res.json({ success: true, invoice: updated });
+  } catch (error) {
+    console.error('Remove invoice product error:', error);
     const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
     res.status(status).json({ success: false, message: error?.message || 'Server error' });
   }
@@ -1766,22 +1865,35 @@ router.get('/reports/expenses', adminPanelOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/reports/sales?range=...&from=&to=&source=all|wash|jobs|products|variable|packages&serviceIds=id1,id2
-// serviceIds: optional; limits job-linked invoices to jobs that include at least one selected service.
-// Package invoices are omitted when serviceIds is set (filter applies to job line items only).
+// GET /api/admin/reports/sales?range=...&from=&to=&source=all|wash|jobs|products|variable|packages&serviceIds=id1,id2&categoryId=
+// serviceIds / categoryId: optional; limits job-linked invoices to jobs that include at least one matching service.
+// Package invoices are omitted when a service or category filter is set (filter applies to job line items only).
 router.get('/reports/sales', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'daily', from, to, source = 'all' } = req.query;
     const salesSource = normalizeSalesReportSource(source);
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const deliveryRange = dateRangeQuery(start, end, exclusiveEnd);
-    const serviceObjectIds = await serviceObjectIdsForBusiness(
+    const explicitServiceIds = await serviceObjectIdsForBusiness(
       req.businessId,
       parseServiceIdsFromQuery(req.query)
     );
+    const categorySettings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled')
+      .lean();
+    const {
+      serviceObjectIds,
+      hasServiceFilter,
+      forceEmpty
+    } = await resolveSalesReportServiceFilter(req.businessId, {
+      serviceObjectIds: explicitServiceIds,
+      categoryIdStrings: parseCategoryIdsFromQuery(req.query),
+      serviceCategoriesEnabled: !!categorySettings?.serviceCategoriesEnabled,
+      ServiceModel: Service
+    });
 
     let invoices = [];
-    if (shouldIncludeJobSales(salesSource)) {
+    if (!forceEmpty && shouldIncludeJobSales(salesSource)) {
       const jobFilter = await buildDeliveredJobSalesFilter(req.businessId, {
         source: salesSource,
         deliveryRange,
@@ -1813,7 +1925,7 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
     }
 
     let packageSales = [];
-    if (shouldIncludePackageSales(salesSource, serviceObjectIds.length > 0)) {
+    if (!forceEmpty && shouldIncludePackageSales(salesSource, hasServiceFilter)) {
       packageSales = await Invoice.find(applyBranchScope({
         businessId: req.businessId,
         saleType: 'PACKAGE',
