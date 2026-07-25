@@ -175,17 +175,37 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
       .filter((i) => i?.serviceId && i?.serviceName && i.serviceName !== 'Service')
       .map((i) => [String(i.serviceId?._id || i.serviceId), String(i.serviceName)])
   );
+  // Keep variable/open amounts already set on the invoice when job lines still have 0
+  const previousPriceById = new Map(
+    (invoice.items || [])
+      .filter((i) => i?.serviceId && Number(i.servicePrice) > 0)
+      .map((i) => [
+        String(i.serviceId?._id || i.serviceId),
+        Math.round(Number(i.servicePrice) * 100) / 100
+      ])
+  );
 
   const items = jobLinesToInvoiceItems(job.services || [], nameByServiceId).map((item) => {
-    if (item.serviceName && item.serviceName !== 'Service') return item;
-    const prev = previousNameById.get(String(item.serviceId));
-    if (prev) return { ...item, serviceName: prev };
-    return item;
+    let next = { ...item };
+    if (!(next.serviceName && next.serviceName !== 'Service')) {
+      const prevName = previousNameById.get(String(next.serviceId));
+      if (prevName) next.serviceName = prevName;
+    }
+    const jobPrice = Number(next.servicePrice) || 0;
+    if (!(jobPrice > 0)) {
+      const prevPrice = previousPriceById.get(String(next.serviceId));
+      if (prevPrice > 0) next.servicePrice = prevPrice;
+    }
+    return next;
   });
-  const subtotal = job.totalPrice ?? items.reduce(
-    (sum, i) => sum + (Number(i.servicePrice) || 0) * lineQuantity(i.quantity),
-    0
-  );
+
+  // Always derive from merged items so preserved variable amounts are included
+  const subtotal = Math.round(
+    items.reduce(
+      (sum, i) => sum + (Number(i.servicePrice) || 0) * lineQuantity(i.quantity),
+      0
+    ) * 100
+  ) / 100;
 
   invoice.items = items;
   invoice.subtotal = subtotal;
@@ -197,6 +217,32 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
   invoice.finalAmount = Math.max(0, Math.round((afterDiscount + gst - loyaltyAmt) * 100) / 100);
 
   await invoice.save();
+
+  // Keep job line prices aligned (closed wash jobs often still have 0 for variable visits)
+  if (job && typeof job.save === 'function' && Array.isArray(job.services)) {
+    const priceBySid = new Map(
+      items.map((i) => [String(i.serviceId), Math.round((Number(i.servicePrice) || 0) * 100) / 100])
+    );
+    let changed = false;
+    for (let i = 0; i < job.services.length; i += 1) {
+      const row = job.services[i];
+      const sid = String(row.serviceId?._id || row.serviceId || '');
+      if (!priceBySid.has(sid)) continue;
+      const invPrice = priceBySid.get(sid);
+      const current = Math.round((Number(row.price) || 0) * 100) / 100;
+      if (current !== invPrice) {
+        job.services[i].price = invPrice;
+        changed = true;
+      }
+    }
+    const currentTotal = Math.round((Number(job.totalPrice) || 0) * 100) / 100;
+    if (changed || currentTotal !== subtotal) {
+      job.totalPrice = subtotal;
+      if (typeof job.markModified === 'function') job.markModified('services');
+      await job.save();
+    }
+  }
+
   return true;
 }
 
@@ -214,9 +260,8 @@ export async function syncJobFromInvoiceItems(jobId, businessId, items, subtotal
   if (!jobId) return false;
   const job = await Job.findOne({ _id: jobId, businessId });
   if (!job || job.status === 'CANCELLED') return false;
-  const editableDirectSale = job.directBill === true && job.status === 'DELIVERED';
-  const editableOpenJob = job.status !== 'DELIVERED';
-  if (!editableOpenJob && !editableDirectSale) return false;
+  // Allow price sync for DELIVERED wash jobs that still have an open invoice
+  // (variable amounts are often entered after delivery, before payment).
 
   const catalogIds = (items || []).map((i) => i.serviceId).filter(Boolean);
   const catalog = catalogIds.length

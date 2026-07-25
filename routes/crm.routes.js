@@ -27,6 +27,7 @@ import {
 import { createAdminBooking } from '../services/bookingService.js';
 import { isModuleEnabled } from '../services/businessModulesService.js';
 import { normalizePhone } from '../utils/customer.utils.js';
+import { parseBusinessDateRange, applyCreatedAtRange } from '../utils/businessDateRange.js';
 
 const router = express.Router();
 
@@ -205,6 +206,62 @@ router.put('/statuses/:id', [
   }
 });
 
+router.delete('/statuses/:id', async (req, res) => {
+  try {
+    const status = await LeadStatus.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+
+    const remaining = await LeadStatus.countDocuments({
+      businessId: req.businessId,
+      _id: { $ne: status._id }
+    });
+    if (remaining < 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete the last status. Create another status first.'
+      });
+    }
+
+    const leadCount = await Lead.countDocuments({
+      businessId: req.businessId,
+      statusId: status._id
+    });
+
+    if (leadCount > 0) {
+      const moveToStatusId = req.body?.moveToStatusId || req.query?.moveToStatusId;
+      if (!moveToStatusId || !mongoose.isValidObjectId(moveToStatusId)) {
+        return res.status(400).json({
+          success: false,
+          code: 'STATUS_IN_USE',
+          count: leadCount,
+          message: `${leadCount} lead(s) use this status. Choose another status to move them to, then delete.`
+        });
+      }
+      if (String(moveToStatusId) === String(status._id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Choose a different status to move leads into'
+        });
+      }
+      const target = await LeadStatus.findOne({ _id: moveToStatusId, businessId: req.businessId });
+      if (!target) {
+        return res.status(400).json({ success: false, message: 'Target status not found' });
+      }
+      await Lead.updateMany(
+        { businessId: req.businessId, statusId: status._id },
+        { $set: { statusId: target._id } }
+      );
+    }
+
+    await LeadStatus.deleteOne({ _id: status._id });
+    const statuses = await LeadStatus.find({ businessId: req.businessId }).sort({ sortOrder: 1, name: 1 });
+    res.json({ success: true, statuses, movedLeads: leadCount });
+  } catch (e) {
+    console.error('Delete lead status error:', e);
+    res.status(500).json({ success: false, message: e.message || 'Server error' });
+  }
+});
+
 // ---------- Sources ----------
 router.get('/sources', async (req, res) => {
   try {
@@ -255,6 +312,29 @@ router.put('/sources/:id', [
   }
 });
 
+router.delete('/sources/:id', async (req, res) => {
+  try {
+    const source = await LeadSource.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!source) return res.status(404).json({ success: false, message: 'Source not found' });
+
+    const cleared = await Lead.updateMany(
+      { businessId: req.businessId, sourceId: source._id },
+      { $set: { sourceId: null } }
+    );
+
+    await LeadSource.deleteOne({ _id: source._id });
+    const sources = await LeadSource.find({ businessId: req.businessId }).sort({ name: 1 });
+    res.json({
+      success: true,
+      sources,
+      clearedLeads: cleared?.modifiedCount || 0
+    });
+  } catch (e) {
+    console.error('Delete lead source error:', e);
+    res.status(500).json({ success: false, message: e.message || 'Server error' });
+  }
+});
+
 // ---------- Leads ----------
 router.get('/leads', async (req, res) => {
   try {
@@ -263,6 +343,9 @@ router.get('/leads', async (req, res) => {
       sourceId,
       search,
       followUpDue,
+      range = 'all',
+      from,
+      to,
       page = '1',
       limit = '50'
     } = req.query;
@@ -286,6 +369,30 @@ router.get('/leads', async (req, res) => {
         { location: { $regex: q, $options: 'i' } },
         { vehicleNumber: { $regex: q, $options: 'i' } }
       ];
+    }
+
+    // Date filter (same range tokens as Reports) — filters by lead createdAt
+    let rangeMeta = { rangeLabel: 'All time', start: null, end: null };
+    const rangeKey = String(range || 'all').toLowerCase();
+    if (rangeKey && rangeKey !== 'all') {
+      const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('timezone')
+        .lean();
+      try {
+        const { startUtc, endUtc, rangeLabel } = parseBusinessDateRange(
+          settings?.timezone,
+          rangeKey,
+          from,
+          to
+        );
+        applyCreatedAtRange(filter, startUtc, endUtc);
+        rangeMeta = { rangeLabel, start: startUtc, end: endUtc };
+      } catch (rangeErr) {
+        return res.status(rangeErr.statusCode || 400).json({
+          success: false,
+          message: rangeErr.message || 'Invalid date range'
+        });
+      }
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -313,7 +420,11 @@ router.get('/leads', async (req, res) => {
       pages: Math.ceil(total / lim) || 1,
       funnel: meta.funnel,
       statuses: meta.statuses,
-      sources: meta.sources
+      sources: meta.sources,
+      range: rangeKey,
+      rangeLabel: rangeMeta.rangeLabel,
+      start: rangeMeta.start,
+      end: rangeMeta.end
     });
   } catch (e) {
     console.error('List leads error:', e);
