@@ -22,6 +22,7 @@ const paymentCollectionSchema = new mongoose.Schema({
   collectionNumber: { type: String, required: true, trim: true },
   amount: { type: Number, required: true, min: 0 },
   paymentMethod: { type: String, enum: ['CASH', 'ONLINE', 'SPLIT'], required: true },
+  onlinePaymentMode: { type: String, enum: ['UPI', 'CARD'], default: 'UPI' },
   paymentCashAmount: { type: Number, default: 0, min: 0 },
   paymentOnlineAmount: { type: Number, default: 0, min: 0 },
   allocationMode: { type: String, enum: ['FIFO', 'MANUAL'], default: 'FIFO' },

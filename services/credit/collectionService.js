@@ -189,6 +189,8 @@ export async function recordCollection({
   paymentMethod,
   paymentCashAmount,
   paymentOnlineAmount,
+  onlinePaymentMode,
+  cardEnabled = false,
   allocationMode = 'FIFO',
   manualAllocations,
   preferInvoiceId,
@@ -205,8 +207,9 @@ export async function recordCollection({
 
   const payment = normalizeCollectionPayment(amount, paymentMethod, {
     paymentCashAmount,
-    paymentOnlineAmount
-  });
+    paymentOnlineAmount,
+    onlinePaymentMode
+  }, { cardEnabled: cardEnabled === true });
 
   if (idempotencyKey) {
     const existing = await PaymentCollection.findOne({ businessId, idempotencyKey }).lean();
@@ -311,6 +314,7 @@ export async function recordCollection({
       collectionNumber,
       amount: payment.amount,
       paymentMethod: payment.paymentMethod,
+      onlinePaymentMode: payment.onlinePaymentMode,
       paymentCashAmount: payment.paymentCashAmount,
       paymentOnlineAmount: payment.paymentOnlineAmount,
       allocationMode: mode,

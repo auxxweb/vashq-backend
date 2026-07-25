@@ -26,6 +26,7 @@ router.post('/collections', [
   body('paymentMethod').isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
   body('paymentOnlineAmount').optional().isFloat({ min: 0 }),
+  body('onlinePaymentMode').optional().isIn(['UPI', 'CARD']),
   body('allocationMode').optional().isIn(['FIFO', 'MANUAL']),
   body('preferInvoiceId').optional().trim(),
   body('manualAllocations').optional().isArray(),
@@ -39,6 +40,9 @@ router.post('/collections', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
+    const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
+    const cardEnabled = await getCardPaymentEnabled(req.businessId);
+
     const result = await recordCollection({
       businessId: req.businessId,
       customerId: req.body.customerId,
@@ -46,6 +50,8 @@ router.post('/collections', [
       paymentMethod: req.body.paymentMethod,
       paymentCashAmount: req.body.paymentCashAmount,
       paymentOnlineAmount: req.body.paymentOnlineAmount,
+      onlinePaymentMode: req.body.onlinePaymentMode,
+      cardEnabled,
       allocationMode: req.body.allocationMode || 'FIFO',
       manualAllocations: req.body.manualAllocations,
       preferInvoiceId: req.body.preferInvoiceId,

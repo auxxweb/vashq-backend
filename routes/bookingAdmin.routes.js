@@ -326,7 +326,8 @@ router.get('/availability', async (req, res) => {
 router.post('/', adminPanelOnly, [
   body('slotId').notEmpty().withMessage('Time slot is required'),
   body('bookingDate').notEmpty().withMessage('Booking date is required'),
-  body('serviceIds').isArray({ min: 1 }).withMessage('Select at least one service'),
+  body('serviceIds').optional().isArray({ min: 1 }),
+  body('services').optional().isArray({ min: 1 }),
   body('bayNumber').optional().isInt({ min: 1 }),
   body('customerId').optional().isMongoId(),
   body('carId').optional().isMongoId(),
@@ -338,6 +339,11 @@ router.post('/', adminPanelOnly, [
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;
+    const hasServices = (Array.isArray(req.body.services) && req.body.services.length)
+      || (Array.isArray(req.body.serviceIds) && req.body.serviceIds.length);
+    if (!hasServices) {
+      return res.status(400).json({ success: false, message: 'Select at least one service' });
+    }
     if (!req.body.customerId && (!req.body.customerName || !req.body.customerPhone)) {
       return res.status(400).json({ success: false, message: 'Customer name and phone are required' });
     }

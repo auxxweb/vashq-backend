@@ -3,6 +3,19 @@ import { roundMoney } from './invoicePayment.js';
 const EPS = 0.02;
 
 /**
+ * Split an online amount into UPI vs Card using onlinePaymentMode (default UPI).
+ * @returns {{ upi: number, card: number }}
+ */
+export function onlineAmountByMode(onlineAmount, onlinePaymentMode) {
+  const online = roundMoney(onlineAmount);
+  if (online <= EPS) return { upi: 0, card: 0 };
+  if (String(onlinePaymentMode || '').toUpperCase() === 'CARD') {
+    return { upi: 0, card: online };
+  }
+  return { upi: online, card: 0 };
+}
+
+/**
  * Cash + online for a credit payment collection row.
  * Legacy rows without split amounts infer from paymentMethod.
  *
@@ -26,6 +39,13 @@ export function collectionCashOnline(c) {
   return { cash: amt, online: 0 };
 }
 
+/** Cash + online + UPI/Card split for a collection row. */
+export function collectionCashOnlineByMode(c) {
+  const base = collectionCashOnline(c);
+  const modeSplit = onlineAmountByMode(base.online, c?.onlinePaymentMode);
+  return { ...base, ...modeSplit };
+}
+
 /**
  * Cash + online collected at credit checkout (excludes advance).
  * Uses stored split amounts when present; otherwise infers from paymentMethod.
@@ -45,6 +65,12 @@ export function creditCheckoutCashOnline(inv) {
   if (hasStored) return { cash: pc, online: po };
   if (pm === 'ONLINE') return { cash: 0, online: settled };
   return { cash: settled, online: 0 };
+}
+
+export function creditCheckoutCashOnlineByMode(inv) {
+  const base = creditCheckoutCashOnline(inv);
+  const modeSplit = onlineAmountByMode(base.online, inv?.onlinePaymentMode);
+  return { ...base, ...modeSplit };
 }
 
 /**
@@ -77,9 +103,15 @@ export function invoiceSettlementCashOnline(inv) {
   return { cash: balanceDue, online: 0 };
 }
 
+export function invoiceSettlementCashOnlineByMode(inv) {
+  const base = invoiceSettlementCashOnline(inv);
+  const modeSplit = onlineAmountByMode(base.online, inv?.onlinePaymentMode);
+  return { ...base, ...modeSplit };
+}
+
 /**
- * MongoDB aggregation stages: compute settleCash / settleOnline on each invoice doc.
- * Run after filters; expects fields finalAmount, advancePayment, paymentMethod, paymentCashAmount, paymentOnlineAmount, paymentStatus.
+ * MongoDB aggregation stages: compute settleCash / settleOnline / settleUpi / settleCard.
+ * Run after filters; expects fields finalAmount, advancePayment, paymentMethod, paymentCashAmount, paymentOnlineAmount, paymentStatus, onlinePaymentMode.
  */
 export function invoiceSettlementAggregationStages() {
   return [
@@ -146,6 +178,24 @@ export function invoiceSettlementAggregationStages() {
                 }
               ]
             }
+          ]
+        }
+      }
+    },
+    {
+      $addFields: {
+        settleUpi: {
+          $cond: [
+            { $eq: [{ $toUpper: { $ifNull: ['$onlinePaymentMode', 'UPI'] } }, 'CARD'] },
+            0,
+            '$settleOnline'
+          ]
+        },
+        settleCard: {
+          $cond: [
+            { $eq: [{ $toUpper: { $ifNull: ['$onlinePaymentMode', 'UPI'] } }, 'CARD'] },
+            '$settleOnline',
+            0
           ]
         }
       }

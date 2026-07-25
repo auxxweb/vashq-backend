@@ -129,13 +129,16 @@ export async function applyOpenInvoiceFinancialFields(invoice, body, businessId)
   const hasPaymentUpdate =
     body.paymentMethod !== undefined ||
     body.paymentCashAmount !== undefined ||
-    body.paymentOnlineAmount !== undefined;
+    body.paymentOnlineAmount !== undefined ||
+    body.onlinePaymentMode !== undefined;
 
   if (hasPaymentUpdate) {
+    const { getCardPaymentEnabled } = await import('./onlinePaymentMode.js');
+    const cardEnabled = await getCardPaymentEnabled(businessId);
     if (body.allowPartialCheckout === true) {
-      normalizeCreditCheckoutPayment(invoice, body);
+      normalizeCreditCheckoutPayment(invoice, body, { cardEnabled });
     } else {
-      normalizeInvoicePaymentFields(invoice, body);
+      normalizeInvoicePaymentFields(invoice, body, { cardEnabled });
     }
   }
 

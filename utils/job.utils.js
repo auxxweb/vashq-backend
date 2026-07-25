@@ -54,13 +54,18 @@ export const generateTokenNumber = async (businessId, branchId = null) => {
  * Uses maxTime when set, else minTime, else 60 min default per service.
  */
 export const calculateETA = (services) => {
-  if (!services || services.length === 0) {
+  // Products (skip work process) do not add bay time
+  const workServices = (services || []).filter(
+    (s) => !(s?.isVariable && s?.skipWorkProcess)
+  );
+
+  if (!workServices.length) {
     const eta = new Date();
     eta.setMinutes(eta.getMinutes() + 60); // Default 1 hour
     return eta;
   }
 
-  const totalMinutes = services.reduce((sum, service) => {
+  const totalMinutes = workServices.reduce((sum, service) => {
     const t = service.maxTime ?? service.minTime ?? 60;
     return sum + (Number(t) || 0);
   }, 0);

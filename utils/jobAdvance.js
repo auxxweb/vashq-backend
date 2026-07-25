@@ -1,4 +1,10 @@
 import { roundMoney } from './invoicePayment.js';
+import {
+  assertOnlinePaymentModeAllowed,
+  DEFAULT_ONLINE_PAYMENT_MODE,
+  paymentUsesOnlineChannel,
+  resolveOnlinePaymentMode
+} from './onlinePaymentMode.js';
 
 const EPS = 0.02;
 
@@ -6,15 +12,18 @@ const EPS = 0.02;
  * Normalize advance payment fields when creating a job (cash / online / split).
  * @param {object} body - req.body
  * @param {number} advanceTotal - non-negative total advance
+ * @param {{ cardEnabled?: boolean }} [opts]
  */
-export function normalizeJobAdvanceForCreate(body, advanceTotal) {
+export function normalizeJobAdvanceForCreate(body, advanceTotal, opts = {}) {
+  const allowCard = opts.cardEnabled === true;
   const adv = roundMoney(Math.max(0, Number(advanceTotal) || 0));
   if (adv <= 0) {
     return {
       advancePayment: 0,
       advancePaymentMethod: 'CASH',
       advanceCashAmount: 0,
-      advanceOnlineAmount: 0
+      advanceOnlineAmount: 0,
+      advanceOnlinePaymentMode: DEFAULT_ONLINE_PAYMENT_MODE
     };
   }
 
@@ -23,12 +32,22 @@ export function normalizeJobAdvanceForCreate(body, advanceTotal) {
     method = 'CASH';
   }
 
+  const resolveMode = () => {
+    if (!paymentUsesOnlineChannel(method)) return DEFAULT_ONLINE_PAYMENT_MODE;
+    const raw = body.advanceOnlinePaymentMode ?? body.onlinePaymentMode;
+    if (String(raw || '').toUpperCase() === 'CARD') {
+      assertOnlinePaymentModeAllowed('CARD', allowCard);
+    }
+    return resolveOnlinePaymentMode(raw, { cardEnabled: allowCard });
+  };
+
   if (method === 'CASH') {
     return {
       advancePayment: adv,
       advancePaymentMethod: 'CASH',
       advanceCashAmount: adv,
-      advanceOnlineAmount: 0
+      advanceOnlineAmount: 0,
+      advanceOnlinePaymentMode: DEFAULT_ONLINE_PAYMENT_MODE
     };
   }
   if (method === 'ONLINE') {
@@ -36,7 +55,8 @@ export function normalizeJobAdvanceForCreate(body, advanceTotal) {
       advancePayment: adv,
       advancePaymentMethod: 'ONLINE',
       advanceCashAmount: 0,
-      advanceOnlineAmount: adv
+      advanceOnlineAmount: adv,
+      advanceOnlinePaymentMode: resolveMode()
     };
   }
 
@@ -71,6 +91,7 @@ export function normalizeJobAdvanceForCreate(body, advanceTotal) {
     advancePayment: adv,
     advancePaymentMethod: 'SPLIT',
     advanceCashAmount: roundMoney(cash),
-    advanceOnlineAmount: roundMoney(online)
+    advanceOnlineAmount: roundMoney(online),
+    advanceOnlinePaymentMode: resolveMode()
   };
 }

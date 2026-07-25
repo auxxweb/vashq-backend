@@ -39,6 +39,19 @@ const jobServiceSchema = new mongoose.Schema({
   }
 }, { _id: false });
 
+const qualityCheckItemSchema = new mongoose.Schema({
+  itemId: { type: String, required: true },
+  label: { type: String, required: true, trim: true },
+  checked: { type: Boolean, default: true }
+}, { _id: false });
+
+const qualityCheckGroupSchema = new mongoose.Schema({
+  serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', required: true },
+  serviceName: { type: String, trim: true, default: '' },
+  checklistName: { type: String, trim: true, default: '' },
+  items: [qualityCheckItemSchema]
+}, { _id: false });
+
 const jobSchema = new mongoose.Schema({
   businessId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -86,6 +99,12 @@ const jobSchema = new mongoose.Schema({
     enum: ['CASH', 'ONLINE', 'SPLIT'],
     default: 'CASH'
   },
+  /** UPI or Card when advance includes online (ONLINE or SPLIT). */
+  advanceOnlinePaymentMode: {
+    type: String,
+    enum: ['UPI', 'CARD'],
+    default: 'UPI'
+  },
   advanceCashAmount: {
     type: Number,
     default: 0,
@@ -125,6 +144,13 @@ const jobSchema = new mongoose.Schema({
   },
   services: [jobServiceSchema],
   statusHistory: [jobStatusHistorySchema],
+  /**
+   * Snapshot of quality checklist answers when job was marked COMPLETED.
+   * Only set when quality check feature was on and checklists existed.
+   */
+  qualityChecks: [qualityCheckGroupSchema],
+  qualityCheckedAt: { type: Date, default: null },
+  qualityCheckedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   /** Set when job is created from an online booking. */
   sourceBookingId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -137,6 +163,14 @@ const jobSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
     index: true
+  },
+  /**
+   * When product lines on a wash job had inventory deducted (on DELIVERED).
+   * Direct-bill sales deduct at create and leave this null.
+   */
+  productStockDeductedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: true

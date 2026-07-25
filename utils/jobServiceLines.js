@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
 import Service from '../models/Service.model.js';
 import Job from '../models/Job.model.js';
-import { lineQuantity, shouldTrackInventory } from './serviceCatalog.js';
-import { assertSufficientStock } from './serviceInventory.js';
+import { lineQuantity } from './serviceCatalog.js';
+import { assertSufficientStock, deductServiceStockForSale } from './serviceInventory.js';
 
 /**
  * Build validated job service lines from either:
@@ -218,6 +218,37 @@ export async function syncJobFromInvoiceItems(jobId, businessId, items, subtotal
 }
 
 /**
+ * Variable visit services (not retail products) must have a positive amount on the invoice.
+ */
+export async function assertVariableVisitAmountsRequired(invoice, businessId) {
+  const items = invoice?.items || [];
+  if (!items.length) return;
+
+  const serviceIds = items.map((row) => row.serviceId).filter(Boolean);
+  if (!serviceIds.length) return;
+
+  const catalog = await Service.find({ _id: { $in: serviceIds }, businessId })
+    .select('name isVariable skipWorkProcess')
+    .lean();
+  const byId = new Map(catalog.map((s) => [s._id.toString(), s]));
+
+  for (const row of items) {
+    const sid = String(row.serviceId || '');
+    const svc = byId.get(sid);
+    const isVariableVisit = !!(svc?.isVariable && !svc?.skipWorkProcess);
+    if (!isVariableVisit) continue;
+
+    const price = Math.round((Number(row.servicePrice) || 0) * 100) / 100;
+    if (!Number.isFinite(price) || price <= 0) {
+      const label = row.serviceName || svc?.name || 'variable service';
+      const err = new Error(`Enter an amount for "${label}"`);
+      err.status = 400;
+      throw err;
+    }
+  }
+}
+
+/**
  * Update variable-service line prices on an open invoice (same line count; no add/remove).
  */
 export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, businessId) {
@@ -236,21 +267,37 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
 
   const serviceIds = existing.map((row) => row.serviceId).filter(Boolean);
   const catalog = serviceIds.length
-    ? await Service.find({ _id: { $in: serviceIds }, businessId }).select('isVariable').lean()
+    ? await Service.find({ _id: { $in: serviceIds }, businessId })
+      .select('name isVariable skipWorkProcess')
+      .lean()
     : [];
-  const variableById = new Map(catalog.map((s) => [s._id.toString(), !!s.isVariable]));
+  const catalogById = new Map(catalog.map((s) => [s._id.toString(), s]));
 
   const updatedItems = existing.map((row, index) => {
     const incoming = itemsInput[index] || {};
     const sid = String(row.serviceId || incoming.serviceId || '');
-    const isVariable = variableById.get(sid);
+    const svc = catalogById.get(sid);
+    const isVariable = !!svc?.isVariable;
+    const isVariableVisit = isVariable && !svc?.skipWorkProcess;
     const base = typeof row.toObject === 'function' ? row.toObject() : { ...row };
     if (!isVariable) return base;
 
     const raw = incoming.servicePrice;
+    if (isVariableVisit && (raw === '' || raw == null)) {
+      const label = base.serviceName || svc?.name || 'variable service';
+      const err = new Error(`Enter an amount for "${label}"`);
+      err.status = 400;
+      throw err;
+    }
     const price = Math.round((Number(raw) || 0) * 100) / 100;
     if (!Number.isFinite(price) || price < 0) {
       const err = new Error('Line item prices must be 0 or more');
+      err.status = 400;
+      throw err;
+    }
+    if (isVariableVisit && price <= 0) {
+      const label = base.serviceName || svc?.name || 'variable service';
+      const err = new Error(`Enter an amount for "${label}"`);
       err.status = 400;
       throw err;
     }
@@ -270,4 +317,108 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
     await syncJobFromInvoiceItems(invoice.jobId, businessId, updatedItems, invoice.subtotal);
   }
   return true;
+}
+
+/**
+ * Append product catalog lines to an open wash-job or product-sale invoice.
+ */
+export async function addProductLinesToOpenInvoice(invoice, businessId, productLinesInput = []) {
+  if (!invoice?.jobId) {
+    const err = new Error('Invoice is not linked to a job');
+    err.status = 400;
+    throw err;
+  }
+  if (invoice.paymentStatus === 'RECEIVED') {
+    const err = new Error('Cannot add products to a paid invoice');
+    err.status = 403;
+    throw err;
+  }
+  if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
+    const err = new Error('Cannot add products to a closed credit invoice');
+    err.status = 403;
+    throw err;
+  }
+  if (!Array.isArray(productLinesInput) || productLinesInput.length === 0) {
+    const err = new Error('Select at least one product');
+    err.status = 400;
+    throw err;
+  }
+
+  const job = await Job.findOne({ _id: invoice.jobId, businessId });
+  if (!job) {
+    const err = new Error('Job not found');
+    err.status = 404;
+    throw err;
+  }
+  if (job.status === 'CANCELLED') {
+    const err = new Error('Products cannot be added to a cancelled job');
+    err.status = 400;
+    throw err;
+  }
+
+  const { lines: newLines, catalogServices } = await resolveJobServiceLines(businessId, {
+    services: productLinesInput,
+    checkStock: true
+  });
+
+  const nonProducts = catalogServices.filter((s) => !(s.isVariable && s.skipWorkProcess));
+  if (nonProducts.length) {
+    const err = new Error('Only product catalog items can be added here');
+    err.status = 400;
+    throw err;
+  }
+
+  const existing = Array.isArray(job.services) ? [...job.services] : [];
+  // Merge quantity into an existing product line when same serviceId
+  for (const line of newLines) {
+    const sid = String(line.serviceId);
+    const idx = existing.findIndex((row) => String(row.serviceId?._id || row.serviceId) === sid);
+    if (idx >= 0) {
+      const prevQty = lineQuantity(existing[idx].quantity);
+      const addQty = lineQuantity(line.quantity);
+      const prev = typeof existing[idx].toObject === 'function' ? existing[idx].toObject() : { ...existing[idx] };
+      existing[idx] = {
+        ...prev,
+        serviceId: line.serviceId,
+        // Keep the unit price already on the job; only increase quantity
+        price: Number(prev.price) || line.price,
+        quantity: prevQty + addQty
+      };
+    } else {
+      existing.push(line);
+    }
+  }
+
+  const totalPrice = Math.round(
+    existing.reduce((sum, l) => sum + (Number(l.price) || 0) * lineQuantity(l.quantity), 0) * 100
+  ) / 100;
+
+  const advanceOnJob = Math.max(0, Number(job.advancePayment) || 0);
+  if (advanceOnJob > totalPrice + 1e-6) {
+    const err = new Error('Job advance exceeds the new total. Adjust advance before changing services.');
+    err.status = 400;
+    throw err;
+  }
+
+  // Stock: product sales (and wash jobs already delivered) deducted earlier —
+  // only assert/deduct the newly added lines. Open wash jobs assert full cart; deduct on delivery.
+  const alreadyDeducted = !!job.directBill || !!job.productStockDeductedAt || job.status === 'DELIVERED';
+  const allIds = existing.map((l) => l.serviceId).filter(Boolean);
+  const catalog = await Service.find({ _id: { $in: allIds }, businessId }).lean();
+  if (alreadyDeducted) {
+    assertSufficientStock(newLines, catalogServices);
+  } else {
+    assertSufficientStock(existing, catalog);
+  }
+
+  job.services = existing;
+  job.totalPrice = totalPrice;
+  await job.save();
+
+  if (alreadyDeducted) {
+    await deductServiceStockForSale(businessId, newLines, catalogServices);
+  }
+
+  await syncDraftInvoiceFromJob(invoice, job);
+  return { job, invoice };
 }

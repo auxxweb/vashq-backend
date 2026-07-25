@@ -1,4 +1,3 @@
-import Job from '../../models/Job.model.js';
 import { applyLoyaltySettlementForJob } from '../../utils/directBillJob.js';
 import {
   isCreditSettlementMode,
@@ -14,6 +13,7 @@ import { appendCreditLedgerEvent } from './creditLedgerService.js';
 import { sendPushNotification } from '../notificationService.js';
 import User from '../../models/User.model.js';
 import { invalidateDashboardForBusiness } from '../../utils/dashboardFinancialSync.js';
+import { getCardPaymentEnabled } from '../../utils/onlinePaymentMode.js';
 
 async function earnLoyaltyForJob(businessId, job, invoice, { earnPoints = true } = {}) {
   if (!job?.customerId) return;
@@ -43,14 +43,14 @@ async function notifyJobClosed(user, businessId, invoice, jobId) {
 /**
  * Apply credit close fields to an invoice document (does not save).
  */
-export function applyCreditCloseToInvoice(invoice, body = {}) {
+export function applyCreditCloseToInvoice(invoice, body = {}, opts = {}) {
   if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
     const err = new Error('Credit sale already recorded for this invoice');
     err.status = 409;
     throw err;
   }
 
-  normalizeCreditCheckoutPayment(invoice, body);
+  normalizeCreditCheckoutPayment(invoice, body, opts);
 
   invoice.settlementMode = 'CREDIT';
   invoice.saleConfirmedAt = new Date();
@@ -72,7 +72,17 @@ export async function closeJobOnCredit({ invoice, job, businessId, user, body })
     invoice.customerId = job.customerId;
   }
 
-  applyCreditCloseToInvoice(invoice, body);
+  const cardEnabled = await getCardPaymentEnabled(businessId);
+  applyCreditCloseToInvoice(invoice, body, { cardEnabled });
+
+  const Job = (await import('../../models/Job.model.js')).default;
+  const { deductProductStockOnWashJobDelivery } = await import('../../utils/jobProductStock.js');
+  const jobForStock = await Job.findOne({ _id: invoice.jobId, businessId });
+  if (jobForStock) {
+    await deductProductStockOnWashJobDelivery(jobForStock, businessId);
+    if (jobForStock.isModified()) await jobForStock.save();
+  }
+
   await invoice.save();
   invalidateDashboardForBusiness(businessId);
 
@@ -118,7 +128,8 @@ export async function closePackageOnCredit({ invoice, businessId, user, body, cu
     throw err;
   }
 
-  applyCreditCloseToInvoice(invoice, body);
+  const cardEnabled = await getCardPaymentEnabled(businessId);
+  applyCreditCloseToInvoice(invoice, body, { cardEnabled });
   await invoice.save();
   invalidateDashboardForBusiness(businessId);
 

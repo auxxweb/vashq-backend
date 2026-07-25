@@ -30,6 +30,16 @@ const bookingSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Service'
   }],
+  /**
+   * When mixed cart is enabled, stores price/qty for variable services and products.
+   * Kept in sync with serviceIds for listings and legacy convert paths.
+   */
+  serviceLines: [{
+    serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', required: true },
+    price: { type: Number, default: 0 },
+    quantity: { type: Number, default: 1, min: 1 },
+    customName: { type: String, trim: true, default: '' }
+  }],
   bookingDate: {
     type: Date,
     required: true,

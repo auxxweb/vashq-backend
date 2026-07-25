@@ -45,6 +45,8 @@ const invoiceSchema = new mongoose.Schema({
   advancePayment: { type: Number, default: 0, min: 0 },
   // Payment
   paymentMethod: { type: String, enum: ['CASH', 'ONLINE', 'SPLIT'], default: 'ONLINE' },
+  /** UPI or Card when payment includes an online channel (ONLINE or SPLIT). */
+  onlinePaymentMode: { type: String, enum: ['UPI', 'CARD'], default: 'UPI' },
   /** Amounts collected at settlement (balance due); SPLIT uses both. */
   paymentCashAmount: { type: Number, default: 0, min: 0 },
   paymentOnlineAmount: { type: Number, default: 0, min: 0 },

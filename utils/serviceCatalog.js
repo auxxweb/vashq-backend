@@ -59,12 +59,19 @@ export function buildCatalogTypeQuery(catalogType) {
 }
 
 /**
- * Combine branch scope, catalog type, and search without clobbering $or clauses.
+ * Combine branch scope, catalog type, category, and search without clobbering $or clauses.
  */
-export function buildServicesListQuery(baseFilter, { search, catalogType } = {}) {
+export function buildServicesListQuery(baseFilter, { search, catalogType, categoryId } = {}) {
   const clauses = [{ ...baseFilter }];
   const catalog = buildCatalogTypeQuery(catalogType);
   if (Object.keys(catalog).length) clauses.push(catalog);
+
+  if (categoryId && String(categoryId).trim() && String(categoryId).toUpperCase() !== 'ALL') {
+    const cid = String(categoryId).trim();
+    if (/^[a-f\d]{24}$/i.test(cid)) {
+      clauses.push({ categoryId: cid });
+    }
+  }
 
   if (search && typeof search === 'string' && search.trim()) {
     const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

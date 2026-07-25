@@ -9,11 +9,14 @@ import {
   getPeriodSalesReceivedBreakdown
 } from '../utils/dashboardTotalSales.js';
 import { getBusinessModules, isModuleEnabled } from './businessModulesService.js';
+import { expensePaidAmountAggregationExpr } from '../utils/expensePayment.js';
 
 const EMPTY_CASH = {
   todayCashReceived: 0,
   todayCashReceivedCash: 0,
   todayCashReceivedOnline: 0,
+  todayCashReceivedUpi: 0,
+  todayCashReceivedCard: 0,
   todayFullPayCheckout: 0,
   todayCreditCheckout: 0,
   todayCreditRecovery: 0,
@@ -199,13 +202,39 @@ export async function loadDashboardStats({
             }
           }
         },
-        { $group: { _id: null, cash: { $sum: '$advCashFinal' }, online: { $sum: '$advOnlineFinal' } } }
+        {
+          $addFields: {
+            advUpiFinal: {
+              $cond: [
+                { $eq: [{ $toUpper: { $ifNull: ['$advanceOnlinePaymentMode', 'UPI'] } }, 'CARD'] },
+                0,
+                '$advOnlineFinal'
+              ]
+            },
+            advCardFinal: {
+              $cond: [
+                { $eq: [{ $toUpper: { $ifNull: ['$advanceOnlinePaymentMode', 'UPI'] } }, 'CARD'] },
+                '$advOnlineFinal',
+                0
+              ]
+            }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            cash: { $sum: '$advCashFinal' },
+            online: { $sum: '$advOnlineFinal' },
+            upi: { $sum: '$advUpiFinal' },
+            card: { $sum: '$advCardFinal' }
+          }
+        }
       ]),
     isEmployee
       ? Promise.resolve([])
       : Expense.aggregate([
         { $match: { ...expenseMatch, expenseDate: { $gte: startUtc, $lt: endUtc } } },
-        { $group: { _id: null, total: { $sum: '$amount' } } }
+        { $group: { _id: null, total: { $sum: expensePaidAmountAggregationExpr() } } }
       ])
   ]);
 
@@ -229,6 +258,8 @@ export async function loadDashboardStats({
       todayCashReceived: 0,
       todayCashReceivedCash: 0,
       todayCashReceivedOnline: 0,
+      todayCashReceivedUpi: 0,
+      todayCashReceivedCard: 0,
       monthlyRevenue: 0,
       todayExpenses: 0,
       closingBalance: 0,
@@ -239,6 +270,8 @@ export async function loadDashboardStats({
 
   const advCashToday = todayAdvanceCollectedResult[0]?.cash ?? 0;
   const advOnlineToday = todayAdvanceCollectedResult[0]?.online ?? 0;
+  const advUpiToday = todayAdvanceCollectedResult[0]?.upi ?? advOnlineToday;
+  const advCardToday = todayAdvanceCollectedResult[0]?.card ?? 0;
   const todayExpenses = todayExpResult[0]?.total ?? 0;
   const monthBounds = parseBusinessDateRange(businessTz, 'month');
 
@@ -254,7 +287,16 @@ export async function loadDashboardStats({
     monthlyReceived
   ] = await Promise.all([
     safe(
-      getTodayCashReceived(businessId, startUtc, endUtc, advCashToday, advOnlineToday, scopedBranchId),
+      getTodayCashReceived(
+        businessId,
+        startUtc,
+        endUtc,
+        advCashToday,
+        advOnlineToday,
+        scopedBranchId,
+        advUpiToday,
+        advCardToday
+      ),
       EMPTY_CASH,
       'Today cash received stats error'
     ),

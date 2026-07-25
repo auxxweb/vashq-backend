@@ -13,7 +13,7 @@ import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import Notification from '../models/Notification.model.js';
 import { generateTokenNumber, calculateETA, canAcceptNewJob, isValidStatusTransition } from '../utils/job.utils.js';
-import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates } from '../utils/jobServiceLines.js';
+import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, assertVariableVisitAmountsRequired } from '../utils/jobServiceLines.js';
 import {
   assertDirectBillEligible,
   createInvoiceForJobRecord,
@@ -22,6 +22,11 @@ import {
   WASH_JOB_FILTER,
   applyLoyaltySettlementForJob
 } from '../utils/directBillJob.js';
+import { resolveDirectBillFromCatalog, workCatalogServices } from '../utils/jobCart.js';
+import {
+  assertProductStockForJobLines,
+  deductProductStockOnWashJobDelivery
+} from '../utils/jobProductStock.js';
 import { buildServicesListQuery } from '../utils/serviceCatalog.js';
 import { loadDashboardStats } from '../services/dashboardStatsService.js';
 import { getDashboardServicesDistribution } from '../utils/dashboardServicesDistribution.js';
@@ -41,6 +46,13 @@ import BranchSubscription from '../models/BranchSubscription.model.js';
 import BranchCreationRequest from '../models/BranchCreationRequest.model.js';
 import ExpenseType from '../models/ExpenseType.model.js';
 import Expense from '../models/Expense.model.js';
+import ServiceCategory from '../models/ServiceCategory.model.js';
+import {
+  ensureDefaultServiceCategory,
+  listServiceCategories,
+  normalizeCategoryName,
+  resolveServiceCategoryId,
+} from '../utils/serviceCategory.js';
 import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
 import CustomerPackage from '../models/CustomerPackage.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
@@ -51,9 +63,19 @@ import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, 
 import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
-import { normalizeJobImageUrls } from '../utils/jobImages.js';
+import {
+  assertJobImageCount,
+  JOB_IMAGES_HARD_MAX,
+  normalizeJobImageUrls,
+  resolveJobImageLimits
+} from '../utils/jobImages.js';
 import { invoiceSettlementCashOnline } from '../utils/paymentChannelAmounts.js';
-import { resolveExpensePaymentFields, sumExpenseChannelTotals } from '../utils/expensePayment.js';
+import { resolveExpensePaymentFields, sumExpenseChannelTotals, applyExpensePayablePayment, expensePaidAmountAggregationExpr, expensePaymentStatusQuery } from '../utils/expensePayment.js';
+import {
+  buildJobQualityChecklistGroups,
+  normalizeServiceQualityChecklist,
+  validateAndSnapshotQualityChecks,
+} from '../utils/qualityChecklist.js';
 import OwnerTask from '../models/OwnerTask.model.js';
 import SettlementChangeRequest from '../models/SettlementChangeRequest.model.js';
 import { applySettlementDateChange } from '../utils/settlementChange.js';
@@ -74,7 +96,7 @@ import {
 } from '../utils/customer.utils.js';
 import creditRoutes from './credit.routes.js';
 import { isCreditSettlementMode, closeJobOnCredit } from '../services/credit/creditInvoiceService.js';
-import { aggregateOutstandingByCustomer } from '../services/credit/outstandingService.js';
+import { aggregateOutstandingByCustomer, sumCustomerOutstanding } from '../services/credit/outstandingService.js';
 import { buildCollectionReport, buildOutstandingReport, getCreditDashboardStats, getTodayCashReceived } from '../services/credit/creditReportsService.js';
 import {
   getInvoiceCompanySnapshot,
@@ -171,6 +193,8 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p.startsWith('/cars') ||
       p.startsWith('/expenses') ||
       p === '/expense-types' ||
+      p === '/service-categories' ||
+      p.startsWith('/service-categories/') ||
       p === '/my-subscription' ||
       p === '/bootstrap' ||
       p === '/available-plans' ||
@@ -255,7 +279,7 @@ router.get('/bootstrap', async (req, res) => {
   }
 });
 
-// Multer: max 4 files, 20MB each (client compresses large images; this is a safety limit)
+// Multer: up to JOB_IMAGES_HARD_MAX files, 20MB each (client compresses; this is a safety limit)
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -268,10 +292,10 @@ const upload = multer({
 });
 
 // @route   POST /api/admin/upload/images
-// @desc    Upload job images to Cloudinary (before or after). Send multipart form with field "images" (max 4).
+// @desc    Upload job images to Cloudinary (before or after). Send multipart form with field "images".
 // @access  Private (Car Wash Admin, Employee)
 router.post('/upload/images', (req, res, next) => {
-  upload.array('images', 4)(req, res, (err) => {
+  upload.array('images', JOB_IMAGES_HARD_MAX)(req, res, (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ success: false, message: 'Image too large. Maximum 20MB per file.' });
@@ -522,6 +546,138 @@ router.delete('/expense-types/:id', adminPanelOnly, async (req, res) => {
   }
 });
 
+// ==================== SERVICE CATEGORIES (optional feature) ====================
+
+router.get('/service-categories', async (req, res) => {
+  try {
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled')
+      .lean();
+    const enabled = !!settings?.serviceCategoriesEnabled;
+    const categories = enabled
+      ? await listServiceCategories(req.businessId, { ensureDefault: true })
+      : await listServiceCategories(req.businessId, { ensureDefault: false });
+    res.json({
+      success: true,
+      serviceCategoriesEnabled: enabled,
+      categories,
+    });
+  } catch (error) {
+    console.error('List service categories error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.post('/service-categories', adminPanelOnly, [
+  body('name').notEmpty().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled')
+      .lean();
+    if (!settings?.serviceCategoriesEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'Enable service categories in Settings first',
+      });
+    }
+    await ensureDefaultServiceCategory(req.businessId);
+    const name = normalizeCategoryName(req.body.name);
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Enter a category name' });
+    }
+    const exists = await ServiceCategory.findOne({
+      businessId: req.businessId,
+      name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    }).lean();
+    if (exists) {
+      return res.status(400).json({ success: false, message: 'A category with this name already exists' });
+    }
+    const category = await ServiceCategory.create({
+      businessId: req.businessId,
+      name,
+      isDefault: false,
+      isActive: true,
+      sortOrder: 100,
+    });
+    res.status(201).json({ success: true, category });
+  } catch (error) {
+    console.error('Create service category error:', error);
+    if (error?.code === 11000) {
+      return res.status(400).json({ success: false, message: 'A category with this name already exists' });
+    }
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.put('/service-categories/:id', adminPanelOnly, [
+  body('name').optional().notEmpty().trim(),
+  body('isActive').optional().isBoolean()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const category = await ServiceCategory.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!category) {
+      return res.status(404).json({ success: false, message: 'Category not found' });
+    }
+    if (req.body.name != null) {
+      const name = normalizeCategoryName(req.body.name);
+      if (!name) {
+        return res.status(400).json({ success: false, message: 'Enter a category name' });
+      }
+      const clash = await ServiceCategory.findOne({
+        businessId: req.businessId,
+        _id: { $ne: category._id },
+        name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+      }).lean();
+      if (clash) {
+        return res.status(400).json({ success: false, message: 'A category with this name already exists' });
+      }
+      category.name = name;
+    }
+    if (req.body.isActive !== undefined && !category.isDefault) {
+      category.isActive = !!req.body.isActive;
+    }
+    await category.save();
+    res.json({ success: true, category });
+  } catch (error) {
+    console.error('Update service category error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.delete('/service-categories/:id', adminPanelOnly, async (req, res) => {
+  try {
+    const category = await ServiceCategory.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!category) {
+      return res.status(404).json({ success: false, message: 'Category not found' });
+    }
+    if (category.isDefault) {
+      return res.status(400).json({
+        success: false,
+        message: 'The Default category cannot be deleted',
+      });
+    }
+    const def = await ensureDefaultServiceCategory(req.businessId);
+    await Service.updateMany(
+      { businessId: req.businessId, categoryId: category._id },
+      { $set: { categoryId: def._id } }
+    );
+    await ServiceCategory.deleteOne({ _id: category._id });
+    res.json({ success: true, message: 'Category deleted. Services were moved to Default.' });
+  } catch (error) {
+    console.error('Delete service category error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ==================== EXPENSES (Car Wash Admin only) ====================
 
 async function loadBusinessDateRange(businessId, range, from = '', to = '') {
@@ -574,13 +730,16 @@ function parseExpenseDateRange(range, from, to, businessTz) {
 
 router.get('/expenses', async (req, res) => {
   try {
-    const { range = 'today', from, to, search, expenseTypeId } = req.query;
+    const { range = 'today', from, to, search, expenseTypeId, paymentStatus } = req.query;
     const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
     const { start, end, exclusiveEnd } = parseExpenseDateRange(range, from, to, settings?.timezone);
     const query = scopedFilter(req, { expenseDate: dateRangeQuery(start, end, exclusiveEnd) });
     if (expenseTypeId && String(expenseTypeId).trim()) {
       query.expenseTypeId = String(expenseTypeId).trim();
     }
+    const andClauses = [];
+    const statusFilter = expensePaymentStatusQuery(paymentStatus);
+    if (statusFilter) andClauses.push(statusFilter);
     if (search && typeof search === 'string' && search.trim()) {
       const termRaw = search.trim();
       const term = termRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -598,7 +757,12 @@ router.get('/expenses', async (req, res) => {
       if (typeIds?.length) {
         or.push({ expenseTypeId: { $in: typeIds } });
       }
-      query.$or = or;
+      andClauses.push({ $or: or });
+    }
+    if (andClauses.length === 1) {
+      Object.assign(query, andClauses[0]);
+    } else if (andClauses.length > 1) {
+      query.$and = andClauses;
     }
     const expenses = await Expense.find(query)
       .populate('expenseTypeId', 'expenseName')
@@ -612,6 +776,8 @@ router.get('/expenses', async (req, res) => {
       totalAmount: totals.totalAmount,
       totalCashAmount: totals.totalCashAmount,
       totalOnlineAmount: totals.totalOnlineAmount,
+      totalPaidAmount: totals.totalPaidAmount,
+      totalOutstandingPayable: totals.totalOutstandingPayable,
       start,
       end
     });
@@ -629,6 +795,9 @@ router.post('/expenses', [
   body('entries.*.amount').isFloat({ min: 0.01 }),
   body('entries.*.notes').optional().trim(),
   body('entries.*.billImage').optional().trim(),
+  body('entries.*.settlementMode').optional().isIn(['FULL', 'CREDIT']),
+  body('entries.*.amountPaidNow').optional().isFloat({ min: 0 }),
+  body('entries.*.creditDueDate').optional({ nullable: true, checkFalsy: true }).isISO8601(),
   body('entries.*.paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('entries.*.paymentCashAmount').optional().isFloat({ min: 0 }),
   body('entries.*.paymentOnlineAmount').optional().isFloat({ min: 0 })
@@ -644,6 +813,8 @@ router.post('/expenses', [
     }
     const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
     const expenseDate = parseBusinessCalendarDate(req.body.expenseDate, settings?.timezone);
+    const modules = req.businessModules || await getBusinessModules(req.businessId);
+    const creditEnabled = isModuleEnabled(modules, 'credit');
     const typeIds = [...new Set(req.body.entries.map((e) => String(e.expenseTypeId)))];
     const expenseTypes = await ExpenseType.find({
       _id: { $in: typeIds },
@@ -656,9 +827,16 @@ router.post('/expenses', [
       if (!expenseType) {
         return res.status(400).json({ success: false, message: 'Invalid expense type' });
       }
+      const wantsCredit = String(entry.settlementMode || '').toUpperCase() === 'CREDIT';
+      if (wantsCredit && !creditEnabled) {
+        return moduleDisabledResponse(res, 'credit');
+      }
       let paymentFields;
       try {
         paymentFields = resolveExpensePaymentFields(Number(entry.amount), {
+          settlementMode: wantsCredit ? 'CREDIT' : 'FULL',
+          amountPaidNow: entry.amountPaidNow,
+          creditDueDate: entry.creditDueDate,
           paymentMethod: entry.paymentMethod,
           paymentCashAmount: entry.paymentCashAmount,
           paymentOnlineAmount: entry.paymentOnlineAmount,
@@ -694,6 +872,9 @@ router.put('/expenses/:id', [
   body('notes').optional().trim(),
   body('billImage').optional().trim(),
   body('expenseDate').optional().isISO8601(),
+  body('settlementMode').optional().isIn(['FULL', 'CREDIT']),
+  body('amountPaidNow').optional().isFloat({ min: 0 }),
+  body('creditDueDate').optional({ nullable: true, checkFalsy: true }).isISO8601(),
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
   body('paymentOnlineAmount').optional().isFloat({ min: 0 })
@@ -724,12 +905,30 @@ router.put('/expenses/:id', [
       req.body.paymentMethod !== undefined ||
       req.body.paymentCashAmount !== undefined ||
       req.body.paymentOnlineAmount !== undefined ||
+      req.body.settlementMode !== undefined ||
+      req.body.amountPaidNow !== undefined ||
+      req.body.creditDueDate !== undefined ||
       req.body.amount != null;
     if (paymentTouched) {
+      const modules = req.businessModules || await getBusinessModules(req.businessId);
+      const creditEnabled = isModuleEnabled(modules, 'credit');
+      const existingIsCredit = String(expense.settlementMode || '').toUpperCase() === 'CREDIT';
+      const requestedMode = req.body.settlementMode !== undefined
+        ? String(req.body.settlementMode || '').toUpperCase()
+        : (existingIsCredit ? 'CREDIT' : 'FULL');
+      // New CREDIT only when credit module is on; existing pay-later expenses may stay CREDIT.
+      if (requestedMode === 'CREDIT' && !creditEnabled && !existingIsCredit) {
+        return moduleDisabledResponse(res, 'credit');
+      }
+      const settlementMode =
+        requestedMode === 'CREDIT' && (creditEnabled || existingIsCredit) ? 'CREDIT' : 'FULL';
       try {
         const paymentFields = resolveExpensePaymentFields(
           req.body.amount != null ? Number(req.body.amount) : expense.amount,
           {
+            settlementMode,
+            amountPaidNow: req.body.amountPaidNow,
+            creditDueDate: req.body.creditDueDate,
             paymentMethod: req.body.paymentMethod,
             paymentCashAmount: req.body.paymentCashAmount,
             paymentOnlineAmount: req.body.paymentOnlineAmount,
@@ -752,6 +951,41 @@ router.put('/expenses/:id', [
     res.json({ success: true, expense });
   } catch (error) {
     console.error('Update expense error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/admin/expenses/:id/pay — record payment toward pay-later outstanding
+router.post('/expenses/:id/pay', [
+  body('amount').optional().isFloat({ min: 0.01 }),
+  body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('paymentCashAmount').optional().isFloat({ min: 0 }),
+  body('paymentOnlineAmount').optional().isFloat({ min: 0 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: errors.array()[0]?.msg || 'Validation failed',
+        errors: errors.array()
+      });
+    }
+    const expense = await findScoped(Expense, req, { _id: req.params.id });
+    if (!expense) {
+      return res.status(404).json({ success: false, message: 'Expense not found' });
+    }
+    assertBranchAccess(req, expense);
+    try {
+      applyExpensePayablePayment(expense, req.body);
+    } catch (payErr) {
+      return res.status(payErr.status || 400).json({ success: false, message: payErr.message });
+    }
+    await expense.save();
+    await expense.populate('expenseTypeId', 'expenseName');
+    res.json({ success: true, expense });
+  } catch (error) {
+    console.error('Pay expense payable error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -941,14 +1175,35 @@ router.get('/invoices/:id', async (req, res) => {
       invoice = { ...invoice, ...toPersist };
     }
     invoice = mergeInvoiceWithCompanySnapshot(invoice, companySnapshot);
-    if (!invoice.customerId) {
-      const cid = invoice.jobId?.customerId?._id || invoice.jobId?.customerId;
-      if (cid) {
-        invoice.customerId = cid;
-        await Invoice.updateOne({ _id: invoice._id }, { $set: { customerId: cid } });
-      }
+    const jobCustomerId = invoice.jobId?.customerId?._id || invoice.jobId?.customerId;
+    if (!invoice.customerId && jobCustomerId) {
+      invoice.customerId = jobCustomerId;
+      await Invoice.updateOne({ _id: invoice._id }, { $set: { customerId: jobCustomerId } });
     }
-    res.json({ success: true, invoice, business: companySnapshot });
+
+    let customerOutstanding = 0;
+    let previousOutstanding = 0;
+    const modules = req.businessModules || await getBusinessModules(req.businessId);
+    const customerId = invoice.customerId?._id || invoice.customerId || jobCustomerId;
+    if (customerId && isModuleEnabled(modules, 'credit')) {
+      const creditInvoices = await Invoice.find(applyBranchScope({
+        businessId: req.businessId,
+        customerId,
+        settlementMode: 'CREDIT',
+        saleConfirmedAt: { $ne: null }
+      }, req)).select('_id finalAmount outstandingAmount amountCollectedAtCheckout amountCollectedLater paymentCashAmount paymentOnlineAmount advancePayment').lean();
+      customerOutstanding = sumCustomerOutstanding(creditInvoices);
+      const prior = creditInvoices.filter((inv) => String(inv._id) !== String(invoice._id));
+      previousOutstanding = sumCustomerOutstanding(prior);
+    }
+
+    res.json({
+      success: true,
+      invoice,
+      business: companySnapshot,
+      customerOutstanding,
+      previousOutstanding
+    });
   } catch (error) {
     console.error('Get invoice error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -972,6 +1227,7 @@ router.put('/invoices/:id', [
   body('loyaltyRedeemedPoints').optional().isInt({ min: 0 }),
   body('loyaltyRedeemedAmount').optional().isFloat({ min: 0 }),
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('onlinePaymentMode').optional().isIn(['UPI', 'CARD']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
   body('paymentOnlineAmount').optional().isFloat({ min: 0 }),
   body('allowPartialCheckout').optional().isBoolean(),
@@ -1030,8 +1286,15 @@ router.put('/invoices/:id', [
 
     if (!isLocked) {
       await applyOpenInvoiceFinancialFields(invoice, req.body, req.businessId);
-    } else if (req.body.paymentMethod !== undefined) {
-      relabelLockedInvoicePaymentMethod(invoice, req.body.paymentMethod);
+    } else if (req.body.paymentMethod !== undefined || req.body.onlinePaymentMode !== undefined) {
+      const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
+      const cardEnabled = await getCardPaymentEnabled(req.businessId);
+      relabelLockedInvoicePaymentMethod(
+        invoice,
+        req.body.paymentMethod ?? invoice.paymentMethod,
+        req.body.onlinePaymentMode,
+        { cardEnabled }
+      );
     }
 
     await invoice.save();
@@ -1044,6 +1307,64 @@ router.put('/invoices/:id', [
     res.json({ success: true, invoice: updated });
   } catch (error) {
     console.error('Update invoice error:', error);
+    const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
+    res.status(status).json({ success: false, message: error?.message || 'Server error' });
+  }
+});
+
+// POST /api/admin/invoices/:id/add-products — append retail products to an open job/sale invoice
+router.post('/invoices/:id/add-products', [
+  body('services').isArray({ min: 1 }).withMessage('Select at least one product'),
+  body('services.*.serviceId').notEmpty().withMessage('Product is required'),
+  body('services.*.quantity').optional().isFloat({ min: 0.01 }),
+  body('services.*.price').optional().isFloat({ min: 0 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    if (!isModuleEnabled(req.businessModules || await getBusinessModules(req.businessId), 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+
+    const invoiceDoc = await findScoped(Invoice, req, { _id: req.params.id });
+    if (!invoiceDoc) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    assertBranchAccess(req, invoiceDoc, { allowLegacyNull: true });
+    try {
+      await assertInvoiceCheckoutAccess(req, invoiceDoc);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ success: false, message: accessErr.message });
+    }
+
+    if (invoiceDoc.saleType === 'PACKAGE') {
+      return res.status(400).json({
+        success: false,
+        message: 'Products cannot be added to a package invoice'
+      });
+    }
+
+    try {
+      await addProductLinesToOpenInvoice(invoiceDoc, req.businessId, req.body.services);
+    } catch (addErr) {
+      return res.status(addErr.status || 400).json({
+        success: false,
+        message: addErr.message || 'Could not add products'
+      });
+    }
+
+    const updated = await Invoice.findById(invoiceDoc._id)
+      .populate({
+        path: 'jobId',
+        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+      })
+      .lean();
+    res.json({ success: true, invoice: updated });
+  } catch (error) {
+    console.error('Add invoice products error:', error);
     const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
     res.status(status).json({ success: false, message: error?.message || 'Server error' });
   }
@@ -1118,6 +1439,15 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
       invoice.customerId = job.customerId;
     }
 
+    try {
+      await assertVariableVisitAmountsRequired(invoice, req.businessId);
+    } catch (amountErr) {
+      return res.status(amountErr.status || 400).json({
+        success: false,
+        message: amountErr.message || 'Variable service amounts are required'
+      });
+    }
+
     if (isCreditSettlementMode(req.body)) {
       const modules = req.businessModules || await getBusinessModules(req.businessId);
       if (!isModuleEnabled(modules, 'credit')) {
@@ -1139,11 +1469,14 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
 
     const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
     try {
+      const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
+      const cardEnabled = await getCardPaymentEnabled(req.businessId);
       normalizeInvoicePaymentFields(invoice, {
         paymentMethod: req.body.paymentMethod ?? invoice.paymentMethod,
         paymentCashAmount: req.body.paymentCashAmount,
-        paymentOnlineAmount: req.body.paymentOnlineAmount
-      });
+        paymentOnlineAmount: req.body.paymentOnlineAmount,
+        onlinePaymentMode: req.body.onlinePaymentMode
+      }, { cardEnabled });
       assertSettlementMatchesDue(
         invoice.paymentMethod,
         due,
@@ -1152,6 +1485,20 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
       );
     } catch (e) {
       return res.status(400).json({ success: false, message: e.message || 'Invalid payment amount' });
+    }
+
+    // Deduct product stock on wash jobs before closing (idempotent)
+    try {
+      const jobForStock = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId });
+      if (jobForStock) {
+        await deductProductStockOnWashJobDelivery(jobForStock, req.businessId);
+        if (jobForStock.isModified()) await jobForStock.save();
+      }
+    } catch (stockErr) {
+      return res.status(stockErr.status || 409).json({
+        success: false,
+        message: stockErr.message || 'Insufficient product stock'
+      });
     }
 
     invoice.paymentStatus = 'RECEIVED';
@@ -1365,10 +1712,10 @@ router.get('/reports/employees', adminPanelOnly, async (req, res) => {
   }
 });
 
-// GET /api/admin/reports/expenses?range=...&from=&to=&expenseTypeId=
+// GET /api/admin/reports/expenses?range=...&from=&to=&expenseTypeId=&paymentStatus=
 router.get('/reports/expenses', adminPanelOnly, async (req, res) => {
   try {
-    const { range = 'daily', from, to, expenseTypeId } = req.query;
+    const { range = 'daily', from, to, expenseTypeId, paymentStatus } = req.query;
     const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, range, from, to);
     const query = applyBranchScope({
       businessId: req.businessId,
@@ -1384,6 +1731,10 @@ router.get('/reports/expenses', adminPanelOnly, async (req, res) => {
       }
       query.expenseTypeId = type._id;
     }
+    const statusFilter = expensePaymentStatusQuery(paymentStatus);
+    if (statusFilter) {
+      Object.assign(query, statusFilter);
+    }
     const expenses = await Expense.find(query)
       .populate('expenseTypeId', 'expenseName')
       .populate('createdBy', 'name email')
@@ -1396,11 +1747,15 @@ router.get('/reports/expenses', adminPanelOnly, async (req, res) => {
       totalAmount: totals.totalAmount,
       totalCashAmount: totals.totalCashAmount,
       totalOnlineAmount: totals.totalOnlineAmount,
+      totalPaidAmount: totals.totalPaidAmount,
+      totalOutstandingPayable: totals.totalOutstandingPayable,
       summary: {
         totalExpenses: expenses.length,
         totalAmount: totals.totalAmount,
         totalCashAmount: totals.totalCashAmount,
         totalOnlineAmount: totals.totalOnlineAmount,
+        totalPaidAmount: totals.totalPaidAmount,
+        totalOutstandingPayable: totals.totalOutstandingPayable,
       },
       start,
       end
@@ -1489,16 +1844,24 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
     const totalRevenue = data.reduce((s, inv) => s + (inv.finalAmount || 0), 0);
     let totalCashReceived = 0;
     let totalOnlineReceived = 0;
+    let totalUpiReceived = 0;
+    let totalCardReceived = 0;
     for (const inv of data) {
       const pc = roundMoney(Number(inv.paymentCashAmount) || 0);
       const po = roundMoney(Number(inv.paymentOnlineAmount) || 0);
       if (pc + po > 0.02) {
         totalCashReceived += pc;
         totalOnlineReceived += po;
+        const mode = String(inv.onlinePaymentMode || '').toUpperCase() === 'CARD' ? 'CARD' : 'UPI';
+        if (mode === 'CARD') totalCardReceived += po;
+        else totalUpiReceived += po;
       } else if (inv.paymentStatus === 'RECEIVED') {
         const ch = invoiceSettlementCashOnline(inv);
         totalCashReceived += ch.cash;
         totalOnlineReceived += ch.online;
+        const mode = String(inv.onlinePaymentMode || '').toUpperCase() === 'CARD' ? 'CARD' : 'UPI';
+        if (mode === 'CARD') totalCardReceived += ch.online;
+        else totalUpiReceived += ch.online;
       }
     }
     const totalDiscountAmount = invoices.reduce((s, inv) => {
@@ -1510,6 +1873,8 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
 
     const paymentAtDeliveryCash = Math.round(totalCashReceived * 100) / 100;
     const paymentAtDeliveryOnline = Math.round(totalOnlineReceived * 100) / 100;
+    const paymentAtDeliveryUpi = Math.round(totalUpiReceived * 100) / 100;
+    const paymentAtDeliveryCard = Math.round(totalCardReceived * 100) / 100;
     let amountDueOnDeliveredSales = 0;
     for (const inv of data) {
       if (inv.settlementMode === 'CREDIT') {
@@ -1551,11 +1916,48 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
           }
         }
       },
-      { $group: { _id: null, advCash: { $sum: '$advCash' }, advOnline: { $sum: '$advOnline' } } }
+      {
+        $addFields: {
+          advUpi: {
+            $cond: [
+              { $eq: [{ $toUpper: { $ifNull: ['$advanceOnlinePaymentMode', 'UPI'] } }, 'CARD'] },
+              0,
+              '$advOnline'
+            ]
+          },
+          advCard: {
+            $cond: [
+              { $eq: [{ $toUpper: { $ifNull: ['$advanceOnlinePaymentMode', 'UPI'] } }, 'CARD'] },
+              '$advOnline',
+              0
+            ]
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          advCash: { $sum: '$advCash' },
+          advOnline: { $sum: '$advOnline' },
+          advUpi: { $sum: '$advUpi' },
+          advCard: { $sum: '$advCard' }
+        }
+      }
     ]);
     const advCash = advanceRows[0]?.advCash ?? 0;
     const advOnline = advanceRows[0]?.advOnline ?? 0;
-    const moneyInRaw = await getTodayCashReceived(req.businessId, start, endExclusive, advCash, advOnline);
+    const advUpi = advanceRows[0]?.advUpi ?? advOnline;
+    const advCard = advanceRows[0]?.advCard ?? 0;
+    const moneyInRaw = await getTodayCashReceived(
+      req.businessId,
+      start,
+      endExclusive,
+      advCash,
+      advOnline,
+      null,
+      advUpi,
+      advCard
+    );
     const collectionReport = await buildCollectionReport(req.businessId, start, end, exclusiveEnd);
 
     res.json({
@@ -1569,6 +1971,8 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
         paymentAtDelivery: {
           cash: paymentAtDeliveryCash,
           online: paymentAtDeliveryOnline,
+          upi: paymentAtDeliveryUpi,
+          card: paymentAtDeliveryCard,
           total: Math.round((paymentAtDeliveryCash + paymentAtDeliveryOnline) * 100) / 100
         },
         amountDueOnDeliveredSales,
@@ -1576,6 +1980,8 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
           total: moneyInRaw.todayCashReceived,
           cash: moneyInRaw.todayCashReceivedCash,
           online: moneyInRaw.todayCashReceivedOnline,
+          upi: moneyInRaw.todayCashReceivedUpi,
+          card: moneyInRaw.todayCashReceivedCard,
           fullPayCheckout: moneyInRaw.todayFullPayCheckout,
           creditCheckout: moneyInRaw.todayCreditCheckout,
           creditRecovery: moneyInRaw.todayCreditRecovery,
@@ -2566,6 +2972,18 @@ router.get('/customers/:id', async (req, res) => {
       (p) => p.status === 'active' && (p.visitsRemaining ?? 0) > 0 && new Date(p.expiryDate) >= now
     );
 
+    let totalOutstanding = 0;
+    const modules = req.businessModules || await getBusinessModules(req.businessId);
+    if (isModuleEnabled(modules, 'credit')) {
+      const creditInvoices = await Invoice.find(applyBranchScope({
+        businessId: req.businessId,
+        customerId,
+        settlementMode: 'CREDIT',
+        saleConfirmedAt: { $ne: null }
+      }, req)).select('finalAmount outstandingAmount amountCollectedAtCheckout amountCollectedLater paymentCashAmount paymentOnlineAmount advancePayment').lean();
+      totalOutstanding = sumCustomerOutstanding(creditInvoices);
+    }
+
     res.json({
       success: true,
       customer,
@@ -2581,12 +2999,132 @@ router.get('/customers/:id', async (req, res) => {
         totalCars: cars.length,
         loyaltyPoints: customer.loyaltyPointsBalance ?? 0,
         hasActivePackage,
-        lastVisitAt
+        lastVisitAt,
+        totalOutstanding
       }
     });
   } catch (error) {
     console.error('Get customer detail error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/admin/customers/:id/history-export
+// @desc    Visit history or product sales for PDF export (date range)
+// @access  Private (Business owner / Branch admin)
+router.get('/customers/:id/history-export', adminPanelOnly, async (req, res) => {
+  try {
+    const type = String(req.query.type || 'visits').toLowerCase();
+    if (!['visits', 'products'].includes(type)) {
+      return res.status(400).json({ success: false, message: 'type must be visits or products' });
+    }
+
+    const customer = await findScoped(Customer, req, { _id: req.params.id });
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+    assertBranchAccess(req, customer);
+
+    const from = String(req.query.from || '').trim();
+    const to = String(req.query.to || '').trim();
+    if (!from || !to) {
+      return res.status(400).json({ success: false, message: 'from and to dates are required (YYYY-MM-DD)' });
+    }
+
+    const { start, end, exclusiveEnd } = await loadReportDateRange(req.businessId, 'custom', from, to);
+    const createdAt = dateRangeQuery(start, end, exclusiveEnd);
+
+    const isProducts = type === 'products';
+    const jobFilter = applyBranchScope({
+      businessId: req.businessId,
+      customerId: customer._id,
+      createdAt,
+      ...(isProducts ? { directBill: true } : { directBill: { $ne: true } })
+    }, req);
+
+    const jobs = await Job.find(jobFilter)
+      .populate('carId', 'carNumber brand model color')
+      .populate('branchId', 'name')
+      .populate({ path: 'services.serviceId', select: 'name isVariable skipWorkProcess' })
+      .sort({ createdAt: -1 })
+      .limit(2000)
+      .lean();
+
+    const [business, platform] = await Promise.all([
+      Business.findById(req.businessId).select('businessName').lean(),
+      PlatformSettings.findOne({}).select('defaultCurrency').lean()
+    ]);
+
+    const rows = jobs.map((job) => {
+      const serviceNames = (job.services || [])
+        .map((s) => {
+          const name = s.customName || s.serviceId?.name || 'Service';
+          const qty = Number(s.quantity) > 1 ? ` x${s.quantity}` : '';
+          return `${name}${qty}`;
+        })
+        .filter(Boolean)
+        .join(', ');
+      const totalQty = (job.services || []).reduce(
+        (sum, s) => sum + Math.max(1, Number(s.quantity) || 1),
+        0
+      );
+      return {
+        _id: job._id,
+        date: job.createdAt,
+        branchName: job.branchId?.name || null,
+        tokenNumber: job.tokenNumber || null,
+        vehicleNumber: job.carId?.carNumber || null,
+        services: serviceNames || '—',
+        quantity: totalQty,
+        status: job.status,
+        amount: Number(job.totalPrice) || 0
+      };
+    });
+
+    const totalAmount = rows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+    let totalOutstanding = 0;
+    const modules = req.businessModules || await getBusinessModules(req.businessId);
+    if (isModuleEnabled(modules, 'credit')) {
+      const creditInvoices = await Invoice.find(applyBranchScope({
+        businessId: req.businessId,
+        customerId: customer._id,
+        settlementMode: 'CREDIT',
+        saleConfirmedAt: { $ne: null }
+      }, req)).select('finalAmount outstandingAmount amountCollectedAtCheckout amountCollectedLater paymentCashAmount paymentOnlineAmount advancePayment').lean();
+      totalOutstanding = sumCustomerOutstanding(creditInvoices);
+    }
+
+    res.json({
+      success: true,
+      type: isProducts ? 'products' : 'visits',
+      customer: {
+        _id: customer._id,
+        name: customer.name,
+        phone: customer.phone,
+        whatsappNumber: customer.whatsappNumber || null,
+        email: customer.email || null
+      },
+      businessName: business?.businessName || '',
+      currency: platform?.defaultCurrency || 'INR',
+      from,
+      to,
+      start,
+      end,
+      rows,
+      summary: {
+        count: rows.length,
+        totalAmount,
+        totalOutstanding
+      }
+    });
+  } catch (error) {
+    console.error('Customer history export error:', error);
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
   }
 });
 
@@ -2663,7 +3201,20 @@ router.get('/customers/:id/visits', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
     const visits = await Job.countDocuments({ businessId: req.businessId, customerId: customer._id });
-    res.json({ success: true, visits });
+
+    let outstanding = 0;
+    const modules = req.businessModules || await getBusinessModules(req.businessId);
+    if (isModuleEnabled(modules, 'credit')) {
+      const creditInvoices = await Invoice.find(applyBranchScope({
+        businessId: req.businessId,
+        customerId: customer._id,
+        settlementMode: 'CREDIT',
+        saleConfirmedAt: { $ne: null }
+      }, req)).select('finalAmount outstandingAmount amountCollectedAtCheckout amountCollectedLater paymentCashAmount paymentOnlineAmount advancePayment').lean();
+      outstanding = sumCustomerOutstanding(creditInvoices);
+    }
+
+    res.json({ success: true, visits, outstanding });
   } catch (error) {
     console.error('Get customer visits error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -3125,17 +3676,20 @@ router.delete('/cars/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/services', async (req, res) => {
   try {
-    const { search, page = 1, limit = 20, all, catalogType } = req.query;
-    const query = buildServicesListQuery(scopedFilter(req), { search, catalogType });
+    const { search, page = 1, limit = 20, all, catalogType, categoryId } = req.query;
+    const query = buildServicesListQuery(scopedFilter(req), { search, catalogType, categoryId });
     const variableModuleOn = isModuleEnabled(req.businessModules, 'variableServices');
     const filterVariable = (list) => (
       variableModuleOn ? list : list.filter((s) => !s.isVariable)
     );
+    const serviceSelect =
+      'name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive categoryId qualityChecklist createdAt';
     const returnAll = all === '1' || all === 'true';
     if (returnAll) {
       const services = filterVariable(await Service.find(query)
         .sort({ name: 1 })
-        .select('name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive createdAt')
+        .select(serviceSelect)
+        .populate('categoryId', 'name isDefault')
         .lean());
       const total = services.length;
       return res.json({
@@ -3149,6 +3703,8 @@ router.get('/services', async (req, res) => {
       .sort({ createdAt: -1 })
       .skip((parseInt(page) - 1) * parseInt(limit))
       .limit(parseInt(limit))
+      .select(serviceSelect)
+      .populate('categoryId', 'name isDefault')
       .lean());
     res.json({
       success: true,
@@ -3222,6 +3778,20 @@ router.post('/services', adminPanelOnly, [
       ? Math.max(0, Math.floor(Number(req.body.lowStockThreshold ?? 5) || 5))
       : 5;
 
+    const settingsForCat = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled')
+      .lean();
+    let categoryId = null;
+    try {
+      categoryId = await resolveServiceCategoryId({
+        businessId: req.businessId,
+        categoryId: req.body.categoryId,
+        featureEnabled: !!settingsForCat?.serviceCategoriesEnabled,
+      });
+    } catch (catErr) {
+      return res.status(catErr.status || 400).json({ success: false, message: catErr.message });
+    }
+
     const service = await Service.create({
       name: req.body.name,
       description: req.body.description,
@@ -3235,9 +3805,15 @@ router.post('/services', adminPanelOnly, [
       maxTime: timeCheck.maxTime,
       loyaltyPointsEarned,
       isActive: req.body.isActive !== false,
+      categoryId,
+      qualityChecklist: skipWorkProcess
+        ? { name: '', items: [] }
+        : normalizeServiceQualityChecklist(req.body.qualityChecklist),
       businessId: req.businessId,
       branchId: branchIdForCreate(req)
     });
+
+    await service.populate('categoryId', 'name isDefault');
 
     res.status(201).json({
       success: true,
@@ -3350,11 +3926,32 @@ router.put('/services/:id', adminPanelOnly, [
       loyaltyPointsEarned,
       isActive: req.body.isActive !== undefined ? !!req.body.isActive : existing.isActive
     };
+    if (skipWorkProcess) {
+      update.qualityChecklist = { name: '', items: [] };
+    } else if (req.body.qualityChecklist !== undefined) {
+      update.qualityChecklist = normalizeServiceQualityChecklist(req.body.qualityChecklist);
+    }
+    const settingsForCat = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled')
+      .lean();
+    const categoriesOn = !!settingsForCat?.serviceCategoriesEnabled;
+    if (req.body.categoryId !== undefined || (categoriesOn && !existing.categoryId)) {
+      try {
+        update.categoryId = await resolveServiceCategoryId({
+          businessId: req.businessId,
+          categoryId: req.body.categoryId !== undefined ? req.body.categoryId : null,
+          featureEnabled: categoriesOn,
+          existingCategoryId: existing.categoryId,
+        });
+      } catch (catErr) {
+        return res.status(catErr.status || 400).json({ success: false, message: catErr.message });
+      }
+    }
     const service = await Service.findOneAndUpdate(
       scopedFilter(req, { _id: req.params.id }),
       update,
       { new: true, runValidators: true }
-    );
+    ).populate('categoryId', 'name isDefault');
     if (!service) {
       return res.status(404).json({
         success: false,
@@ -3424,7 +4021,7 @@ router.get('/jobs/:id', async (req, res) => {
     assertBranchAccess(req, job, { allowLegacyNull: true });
 
     const invoiceForJob = await Invoice.findOne({ businessId: req.businessId, jobId: job._id })
-      .select('finalAmount advancePayment paymentMethod paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber createdAt paymentReceivedAt')
+      .select('finalAmount advancePayment paymentMethod onlinePaymentMode paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber createdAt paymentReceivedAt')
       .lean();
 
     const pendingSettlementRequest = invoiceForJob
@@ -3566,6 +4163,7 @@ router.get('/jobs', async (req, res) => {
           invoiceId: inv._id,
           finalAmount: inv.finalAmount,
           paymentMethod: inv.paymentMethod,
+          onlinePaymentMode: inv.onlinePaymentMode,
           paymentStatus: inv.paymentStatus
         };
       });
@@ -3577,6 +4175,7 @@ router.get('/jobs', async (req, res) => {
         out.invoiceId = inv.invoiceId;
         out.invoiceFinalAmount = inv.finalAmount;
         out.invoicePaymentMethod = inv.paymentMethod;
+        out.invoiceOnlinePaymentMode = inv.onlinePaymentMode || 'UPI';
         out.invoicePaymentStatus = inv.paymentStatus;
       }
       return out;
@@ -3617,11 +4216,13 @@ router.post('/jobs', [
   body('customerPackageId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid package'),
   body('advancePayment').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('Advance must be a non-negative number'),
   body('advancePaymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('advanceOnlinePaymentMode').optional().isIn(['UPI', 'CARD']),
   body('advanceCashAmount').optional().isFloat({ min: 0 }),
   body('advanceOnlineAmount').optional().isFloat({ min: 0 }),
   body('directBill').optional().toBoolean(),
   body('collectPaymentNow').optional().toBoolean(),
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
+  body('onlinePaymentMode').optional().isIn(['UPI', 'CARD']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
   body('paymentOnlineAmount').optional().isFloat({ min: 0 })
 ], async (req, res) => {
@@ -3638,12 +4239,7 @@ router.post('/jobs', [
     }
 
     const { customerId, carId, serviceIds, services: servicesBody, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId, advancePayment: advanceBody } = req.body;
-    const directBill = !!req.body.directBill;
     const collectPaymentNow = req.body.collectPaymentNow === true;
-
-    if (directBill && !isModuleEnabled(req.businessModules, 'variableServices')) {
-      return moduleDisabledResponse(res, 'variableServices');
-    }
 
     const hasServicesArray = Array.isArray(servicesBody) && servicesBody.length > 0;
     const hasServiceIds = Array.isArray(serviceIds) && serviceIds.length > 0;
@@ -3659,6 +4255,80 @@ router.post('/jobs', [
         success: false,
         message: 'Select an active branch before creating a job or sale'
       });
+    }
+
+    // Fetch and validate services first so directBill is derived from cart composition
+    let lines;
+    let catalogServices;
+    let totalPrice;
+    try {
+      ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(req.businessId, {
+        serviceIds: hasServiceIds ? serviceIds : undefined,
+        services: hasServicesArray ? servicesBody : undefined
+      }));
+    } catch (svcErr) {
+      return res.status(svcErr.status || 400).json({
+        success: false,
+        message: svcErr.message || 'Invalid services',
+        ...(svcErr.missingServiceIds ? { missingServiceIds: svcErr.missingServiceIds } : {})
+      });
+    }
+
+    const settingsForCart = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('mixedCartEnabled')
+      .lean();
+    const mixedCartEnabled = !!settingsForCart?.mixedCartEnabled;
+
+    const directBill = mixedCartEnabled
+      ? resolveDirectBillFromCatalog(catalogServices)
+      : !!req.body.directBill;
+
+    if (directBill && !isModuleEnabled(req.businessModules, 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+
+    if (directBill) {
+      try {
+        assertDirectBillEligible(catalogServices);
+      } catch (billErr) {
+        return res.status(billErr.status || 400).json({ success: false, message: billErr.message });
+      }
+    } else if (!mixedCartEnabled) {
+      const productSalesOnJob = catalogServices.filter((s) => s.isVariable && s.skipWorkProcess);
+      if (productSalesOnJob.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'Product sale services (skip work process) must be sold as direct sales from the Variable Service tab. Enable “Mixed cart on jobs” in Settings to combine products with wash jobs.'
+        });
+      }
+    } else {
+      try {
+        await assertProductStockForJobLines(req.businessId, lines, catalogServices);
+      } catch (stockErr) {
+        return res.status(stockErr.status || 400).json({ success: false, message: stockErr.message });
+      }
+    }
+
+    if (!directBill) {
+      const createWithoutImages = !!req.body.createWithoutImages;
+      const settingsForImages = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('jobImagesMin jobImagesMax')
+        .lean();
+      const imageLimits = resolveJobImageLimits(settingsForImages);
+      try {
+        assertJobImageCount(beforeImages, imageLimits, {
+          allowEmpty: createWithoutImages,
+          label: 'before images'
+        });
+        if (createWithoutImages && normalizeJobImageUrls(beforeImages).length > 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'Remove uploaded images or uncheck submit without images'
+          });
+        }
+      } catch (imgErr) {
+        return res.status(imgErr.status || 400).json({ success: false, message: imgErr.message });
+      }
     }
 
     // Check capacity (direct bill skips bay — job is created as DELIVERED)
@@ -3707,39 +4377,6 @@ router.post('/jobs', [
       });
     }
 
-    // Fetch and validate services (supports variable pricing via services[] body)
-    let lines;
-    let catalogServices;
-    let totalPrice;
-    try {
-      ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(req.businessId, {
-        serviceIds: hasServiceIds ? serviceIds : undefined,
-        services: hasServicesArray ? servicesBody : undefined
-      }));
-    } catch (svcErr) {
-      return res.status(svcErr.status || 400).json({
-        success: false,
-        message: svcErr.message || 'Invalid services',
-        ...(svcErr.missingServiceIds ? { missingServiceIds: svcErr.missingServiceIds } : {})
-      });
-    }
-
-    if (directBill) {
-      try {
-        assertDirectBillEligible(catalogServices);
-      } catch (billErr) {
-        return res.status(billErr.status || 400).json({ success: false, message: billErr.message });
-      }
-    } else {
-      const productSalesOnJob = catalogServices.filter((s) => s.isVariable && s.skipWorkProcess);
-      if (productSalesOnJob.length) {
-        return res.status(400).json({
-          success: false,
-          message: 'Product sale services (skip work process) must be sold as direct sales from the Variable Service tab'
-        });
-      }
-    }
-
     const advancePayment = directBill
       ? 0
       : (advanceBody != null && advanceBody !== '' ? Math.max(0, Number(advanceBody)) : 0);
@@ -3751,9 +4388,11 @@ router.post('/jobs', [
     }
     let advanceFields;
     try {
+      const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
+      const cardEnabled = await getCardPaymentEnabled(req.businessId);
       advanceFields = directBill
-        ? normalizeJobAdvanceForCreate({ ...req.body, advancePayment: 0 }, 0)
-        : normalizeJobAdvanceForCreate(req.body, advancePayment);
+        ? normalizeJobAdvanceForCreate({ ...req.body, advancePayment: 0 }, 0, { cardEnabled })
+        : normalizeJobAdvanceForCreate(req.body, advancePayment, { cardEnabled });
     } catch (advErr) {
       return res.status(advErr.status || 400).json({ success: false, message: advErr.message || 'Invalid advance split' });
     }
@@ -3762,7 +4401,7 @@ router.post('/jobs', [
       ? now
       : ((estimatedDeliveryBody && !isNaN(Date.parse(estimatedDeliveryBody)))
         ? new Date(estimatedDeliveryBody)
-        : calculateETA(catalogServices));
+        : calculateETA(workCatalogServices(catalogServices)));
 
     // Create job with retry logic for duplicate token numbers
     let job;
@@ -3955,13 +4594,55 @@ router.post('/jobs', [
   }
 });
 
+// @route   GET /api/admin/jobs/:id/quality-checklist
+// @desc    Required quality checklist groups for Mark Completed (empty when feature off / no items)
+// @access  Private
+router.get('/jobs/:id/quality-checklist', async (req, res) => {
+  try {
+    const jobFilter = jobAccessFilter(req, { _id: req.params.id });
+    const job = await Job.findOne(jobFilter).select('services status directBill businessId branchId').lean();
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Job not found' });
+    }
+    assertBranchAccess(req, job, { allowLegacyNull: true });
+
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('qualityCheckEnabled')
+      .lean();
+    if (!settings?.qualityCheckEnabled || job.directBill) {
+      return res.json({ success: true, required: false, groups: [], qualityCheckEnabled: !!settings?.qualityCheckEnabled });
+    }
+
+    const serviceIds = (job.services || [])
+      .map((s) => s.serviceId)
+      .filter(Boolean);
+    const serviceDocs = serviceIds.length
+      ? await Service.find({ _id: { $in: serviceIds }, businessId: req.businessId })
+        .select('name qualityChecklist skipWorkProcess')
+        .lean()
+      : [];
+    const byId = new Map(serviceDocs.map((s) => [String(s._id), s]));
+    const { required, groups } = buildJobQualityChecklistGroups(job, byId);
+    return res.json({
+      success: true,
+      required,
+      groups,
+      qualityCheckEnabled: true,
+    });
+  } catch (error) {
+    console.error('Job quality checklist error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   PATCH /api/admin/jobs/:id/status
 // @desc    Update job status
 // @access  Private (Car Wash Admin)
 router.patch('/jobs/:id/status', [
   body('status').isIn(['RECEIVED', 'WORK_STARTED', 'COMPLETED', 'DELIVERED', 'CANCELLED']),
   body('notes').optional().isString(),
-  body('afterImages').optional().isArray()
+  body('afterImages').optional().isArray(),
+  body('qualityChecks').optional().isArray()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -3990,10 +4671,72 @@ router.patch('/jobs/:id/status', [
       });
     }
 
+    // Quality checklist gate — only when marking COMPLETED and feature is enabled
+    if (status === 'COMPLETED' && !job.directBill) {
+      const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('qualityCheckEnabled')
+        .lean();
+      if (settings?.qualityCheckEnabled) {
+        const serviceIds = (job.services || []).map((s) => s.serviceId).filter(Boolean);
+        const serviceDocs = serviceIds.length
+          ? await Service.find({ _id: { $in: serviceIds }, businessId: req.businessId })
+            .select('name qualityChecklist skipWorkProcess')
+            .lean()
+          : [];
+        const byId = new Map(serviceDocs.map((s) => [String(s._id), s]));
+        const { required, groups } = buildJobQualityChecklistGroups(job, byId);
+        if (required) {
+          const check = validateAndSnapshotQualityChecks(groups, req.body.qualityChecks);
+          if (!check.ok) {
+            return res.status(400).json({
+              success: false,
+              message: check.message,
+              code: 'QUALITY_CHECK_REQUIRED',
+              groups,
+            });
+          }
+          job.qualityChecks = check.snapshot.map((g) => ({
+            serviceId: g.serviceId,
+            serviceName: g.serviceName,
+            checklistName: g.checklistName,
+            items: g.items,
+          }));
+          job.qualityCheckedAt = new Date();
+          job.qualityCheckedBy = req.user?._id || null;
+        }
+      }
+    }
+
+    // Mixed wash jobs: deduct product inventory when delivering (idempotent)
+    if (status === 'DELIVERED' && !job.directBill) {
+      try {
+        await deductProductStockOnWashJobDelivery(job, req.businessId);
+      } catch (stockErr) {
+        return res.status(stockErr.status || 409).json({
+          success: false,
+          message: stockErr.message || 'Insufficient product stock'
+        });
+      }
+    }
+
     // Update job
     job.status = status;
     if (req.body.afterImages !== undefined) {
-      job.afterImages = normalizeJobImageUrls(afterImages);
+      const afterUrls = normalizeJobImageUrls(afterImages);
+      const settingsForImages = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('jobImagesMin jobImagesMax')
+        .lean();
+      const imageLimits = resolveJobImageLimits(settingsForImages);
+      try {
+        // Empty after images allowed when delivering without photos (frontend checkbox).
+        assertJobImageCount(afterUrls, imageLimits, {
+          allowEmpty: true,
+          label: 'after images'
+        });
+      } catch (imgErr) {
+        return res.status(imgErr.status || 400).json({ success: false, message: imgErr.message });
+      }
+      job.afterImages = afterUrls;
       job.markModified('afterImages');
     }
     if (status === 'DELIVERED') job.actualDelivery = new Date();
@@ -4142,7 +4885,18 @@ router.put('/jobs/:id', [
     }
 
     if (req.body.beforeImages !== undefined) {
-      job.beforeImages = normalizeJobImageUrls(req.body.beforeImages);
+      const beforeUrls = normalizeJobImageUrls(req.body.beforeImages);
+      const settingsForImages = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('jobImagesMin jobImagesMax')
+        .lean();
+      const imageLimits = resolveJobImageLimits(settingsForImages);
+      if (beforeUrls.length > imageLimits.max) {
+        return res.status(400).json({
+          success: false,
+          message: `Maximum ${imageLimits.max} before images allowed`
+        });
+      }
+      job.beforeImages = beforeUrls;
       job.markModified('beforeImages');
     }
 
@@ -4166,6 +4920,42 @@ router.put('/jobs/:id', [
         });
       }
 
+      if (job.directBill) {
+        try {
+          assertDirectBillEligible(catalogServices);
+        } catch (billErr) {
+          return res.status(billErr.status || 400).json({ success: false, message: billErr.message });
+        }
+      } else {
+        const settingsForCart = await BusinessSettings.findOne({ businessId: req.businessId })
+          .select('mixedCartEnabled')
+          .lean();
+        const mixedCartEnabled = !!settingsForCart?.mixedCartEnabled;
+        const productLines = catalogServices.filter((s) => s.isVariable && s.skipWorkProcess);
+
+        if (!mixedCartEnabled && productLines.length) {
+          return res.status(400).json({
+            success: false,
+            message: 'Product sale services must be sold as direct sales. Enable “Mixed cart on jobs” in Settings to add products to a wash job.'
+          });
+        }
+
+        const { cartIsProductsOnly } = await import('../utils/jobCart.js');
+        if (cartIsProductsOnly(catalogServices)) {
+          return res.status(400).json({
+            success: false,
+            message: 'A wash job must include at least one wash or visit service. Remove work services only by cancelling the job.'
+          });
+        }
+        if (mixedCartEnabled) {
+          try {
+            await assertProductStockForJobLines(req.businessId, lines, catalogServices);
+          } catch (stockErr) {
+            return res.status(stockErr.status || 400).json({ success: false, message: stockErr.message });
+          }
+        }
+      }
+
       job.services = lines;
       job.totalPrice = totalPrice;
 
@@ -4179,7 +4969,7 @@ router.put('/jobs/:id', [
 
       job.estimatedDelivery = (estimatedDelivery && !isNaN(Date.parse(estimatedDelivery)))
         ? new Date(estimatedDelivery)
-        : calculateETA(catalogServices);
+        : calculateETA(workCatalogServices(catalogServices));
 
       const draftInvoice = await Invoice.findOne({
         businessId: req.businessId,
@@ -4528,6 +5318,13 @@ router.put('/settings', [
   body('paymentMobileNumber').optional().trim().isString(),
   body('gstNumber').optional({ nullable: true }).trim().isString(),
   body('taxPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+  body('jobImagesMin').optional({ nullable: true }).isInt({ min: 0, max: 20 }),
+  body('jobImagesMax').optional({ nullable: true }).isInt({ min: 1, max: 20 }),
+  body('cardPaymentEnabled').optional().isBoolean(),
+  body('qualityCheckEnabled').optional().isBoolean(),
+  body('serviceCategoriesEnabled').optional().isBoolean(),
+  body('mixedCartEnabled').optional().isBoolean(),
+  body('crmEnabled').optional().isBoolean(),
   body('loyaltyPointValueInr').optional({ nullable: true }).isFloat({ min: 0 }),
   body('loyaltyMaxRedeemPointsPerJob').optional({ nullable: true }).isInt({ min: 0 })
 ], async (req, res) => {
@@ -4565,6 +5362,29 @@ router.put('/settings', [
       if (!updateFields.gstNumber) updateFields.taxPercentage = null;
     }
     if (req.body.taxPercentage !== undefined) updateFields.taxPercentage = req.body.taxPercentage;
+    if (req.body.jobImagesMin !== undefined || req.body.jobImagesMax !== undefined) {
+      const resolved = resolveJobImageLimits({
+        jobImagesMin: req.body.jobImagesMin !== undefined ? Number(req.body.jobImagesMin) : settings?.jobImagesMin,
+        jobImagesMax: req.body.jobImagesMax !== undefined ? Number(req.body.jobImagesMax) : settings?.jobImagesMax
+      });
+      updateFields.jobImagesMin = resolved.min;
+      updateFields.jobImagesMax = resolved.max;
+    }
+    if (req.body.cardPaymentEnabled !== undefined) {
+      updateFields.cardPaymentEnabled = !!req.body.cardPaymentEnabled;
+    }
+    if (req.body.qualityCheckEnabled !== undefined) {
+      updateFields.qualityCheckEnabled = !!req.body.qualityCheckEnabled;
+    }
+    if (req.body.serviceCategoriesEnabled !== undefined) {
+      updateFields.serviceCategoriesEnabled = !!req.body.serviceCategoriesEnabled;
+    }
+    if (req.body.mixedCartEnabled !== undefined) {
+      updateFields.mixedCartEnabled = !!req.body.mixedCartEnabled;
+    }
+    if (req.body.crmEnabled !== undefined) {
+      updateFields.crmEnabled = !!req.body.crmEnabled;
+    }
     if (req.body.loyaltyPointValueInr !== undefined) updateFields.loyaltyPointValueInr = req.body.loyaltyPointValueInr === '' ? 0 : Number(req.body.loyaltyPointValueInr);
     if (req.body.loyaltyMaxRedeemPointsPerJob !== undefined) updateFields.loyaltyMaxRedeemPointsPerJob = req.body.loyaltyMaxRedeemPointsPerJob === '' ? 0 : Number(req.body.loyaltyMaxRedeemPointsPerJob);
     if (req.body.onlineBookingEnabled !== undefined) updateFields.onlineBookingEnabled = !!req.body.onlineBookingEnabled;
@@ -4611,6 +5431,21 @@ router.put('/settings', [
     }
     const settingsObj = settings.toObject ? settings.toObject() : settings;
     settingsObj.whatsappTemplates = normalizeWhatsappTemplates(settingsObj.whatsappTemplates);
+    if (settingsObj.serviceCategoriesEnabled) {
+      try {
+        await ensureDefaultServiceCategory(req.businessId);
+      } catch (catErr) {
+        console.warn('ensureDefaultServiceCategory on settings save:', catErr?.message || catErr);
+      }
+    }
+    if (settingsObj.crmEnabled) {
+      try {
+        const { ensureCrmDefaults } = await import('../utils/crmPipeline.js');
+        await ensureCrmDefaults(req.businessId);
+      } catch (crmErr) {
+        console.warn('ensureCrmDefaults on settings save:', crmErr?.message || crmErr);
+      }
+    }
     res.json({
       success: true,
       settings: settingsObj

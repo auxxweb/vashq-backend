@@ -89,9 +89,11 @@ async function listBranchesPayload(businessId) {
  * Single bootstrap payload for admin shell (modules, subscription, branches, unread count).
  */
 export async function loadAdminBootstrap({ businessId, user }) {
-  const [subscriptionPayload, unreadCount] = await Promise.all([
+  const BusinessSettings = (await import('../models/BusinessSettings.model.js')).default;
+  const [subscriptionPayload, unreadCount, settings] = await Promise.all([
     getMySubscriptionPayload(businessId),
-    Notification.countDocuments({ businessId, isRead: false })
+    Notification.countDocuments({ businessId, isRead: false }),
+    BusinessSettings.findOne({ businessId }).select('crmEnabled mixedCartEnabled').lean()
   ]);
 
   let branches = null;
@@ -103,6 +105,8 @@ export async function loadAdminBootstrap({ businessId, user }) {
     businessId: String(businessId),
     ...subscriptionPayload,
     unreadCount,
-    branches
+    branches,
+    crmEnabled: !!settings?.crmEnabled,
+    mixedCartEnabled: !!settings?.mixedCartEnabled
   };
 }

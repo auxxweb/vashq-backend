@@ -21,9 +21,7 @@ import {
 } from '../utils/booking.utils.js';
 import { applyCreatedAtRange } from '../utils/businessDateRange.js';
 import { findOrCreateCustomer, normalizePhone } from '../utils/customer.utils.js';
-import { normalizeJobImageUrls } from '../utils/jobImages.js';
-
-const MIN_JOB_BEFORE_IMAGES = 2;
+import { assertJobImageCount, normalizeJobImageUrls, resolveJobImageLimits } from '../utils/jobImages.js';
 
 async function findOrCreateCar(businessId, customerId, vehicle) {
   const carNumber = String(vehicle.vehicleNumber || '').trim().toUpperCase();
@@ -123,7 +121,7 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
   };
 }
 
-async function createBookingRecord(businessId, payload, { status = 'PENDING', slotOpts = {}, branchId = null } = {}) {
+async function createBookingRecord(businessId, payload, { status = 'PENDING', slotOpts = {}, branchId = null, allowMixedCart = false } = {}) {
   const { slot, bookingDate, bayNumber } = await validateSlotBooking(
     businessId,
     payload.slotId,
@@ -132,24 +130,72 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
     slotOpts
   );
 
-  const rawServiceIds = Array.isArray(payload.serviceIds) ? payload.serviceIds : [];
-  const uniqueServiceIds = [...new Set(rawServiceIds.map(String))];
-  if (!uniqueServiceIds.length) throw new Error('Select at least one service');
+  let serviceIdsToStore = [];
+  let serviceLinesToStore = undefined;
 
-  const services = await Service.find({
-    _id: { $in: uniqueServiceIds },
-    businessId,
-    isActive: { $ne: false }
-  }).lean();
-  if (services.length !== uniqueServiceIds.length) {
-    throw new Error('One or more selected services are not available');
-  }
+  const hasLinePayload = Array.isArray(payload.services) && payload.services.length > 0;
 
-  const variableServices = services.filter((s) => s.isVariable);
-  if (variableServices.length) {
-    throw new Error(
-      `Variable-price services cannot be booked online (${variableServices.map((s) => s.name).join(', ')}). Add them when creating the job instead.`
-    );
+  if (allowMixedCart && hasLinePayload) {
+    let lines;
+    let catalogServices;
+    try {
+      ({ lines, catalogServices } = await resolveJobServiceLines(businessId, {
+        services: payload.services,
+        checkStock: true
+      }));
+    } catch (svcErr) {
+      const err = new Error(svcErr.message || 'Invalid services');
+      err.status = svcErr.status || 400;
+      throw err;
+    }
+
+    const hasWork = catalogServices.some((s) => !(s.isVariable && s.skipWorkProcess));
+    if (!hasWork) {
+      const err = new Error(
+        'Bookings need at least one wash or visit service. Sell products-only from Create Job.'
+      );
+      err.status = 400;
+      throw err;
+    }
+
+    serviceLinesToStore = lines.map((l) => ({
+      serviceId: l.serviceId,
+      price: Number(l.price) || 0,
+      quantity: Math.max(1, Math.floor(Number(l.quantity) || 1)),
+      ...(l.customName ? { customName: l.customName } : {})
+    }));
+    serviceIdsToStore = lines.map((l) => l.serviceId);
+  } else {
+    const rawServiceIds = Array.isArray(payload.serviceIds) ? payload.serviceIds : [];
+    const uniqueServiceIds = [...new Set(rawServiceIds.map(String))];
+    if (!uniqueServiceIds.length) throw new Error('Select at least one service');
+
+    const services = await Service.find({
+      _id: { $in: uniqueServiceIds },
+      businessId,
+      isActive: { $ne: false }
+    }).lean();
+    if (services.length !== uniqueServiceIds.length) {
+      throw new Error('One or more selected services are not available');
+    }
+
+    if (!allowMixedCart) {
+      const variableServices = services.filter((s) => s.isVariable);
+      if (variableServices.length) {
+        throw new Error(
+          `Variable-price services cannot be booked online (${variableServices.map((s) => s.name).join(', ')}). Add them when creating the job instead.`
+        );
+      }
+    } else {
+      const hasWork = services.some((s) => !(s.isVariable && s.skipWorkProcess));
+      if (!hasWork) {
+        throw new Error(
+          'Bookings need at least one wash or visit service. Sell products-only from Create Job.'
+        );
+      }
+    }
+
+    serviceIdsToStore = services.map((s) => s._id);
   }
 
   const { customer, car, pickupAddress, customerName, customerPhone } = await resolveBookingCustomerAndCar(
@@ -166,7 +212,8 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
       branchId: branchId || undefined,
       customerId: customer._id,
       carId: car?._id || undefined,
-      serviceIds: services.map((s) => s._id),
+      serviceIds: serviceIdsToStore,
+      ...(serviceLinesToStore ? { serviceLines: serviceLinesToStore } : {}),
       bookingDate,
       slotId: slot._id,
       bayNumber,
@@ -233,10 +280,15 @@ export async function createPublicBooking(businessId, payload) {
 
 export async function createAdminBooking(businessId, payload, branchId = null) {
   const autoConfirm = payload.autoConfirm !== false;
+  const settings = await BusinessSettings.findOne({ businessId })
+    .select('mixedCartEnabled')
+    .lean();
+  const allowMixedCart = !!settings?.mixedCartEnabled;
   const { booking } = await createBookingRecord(businessId, payload, {
     status: autoConfirm ? 'CONFIRMED' : 'PENDING',
     slotOpts: ADMIN_BOOKING_OPTS,
-    branchId
+    branchId,
+    allowMixedCart
   });
   return booking;
 }
@@ -448,9 +500,22 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
   let totalPrice;
   let catalogServices;
   try {
-    ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(businessId, {
-      serviceIds: (booking.serviceIds || []).map(String)
-    }));
+    const storedLines = Array.isArray(booking.serviceLines) ? booking.serviceLines : [];
+    if (storedLines.length) {
+      ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(businessId, {
+        services: storedLines.map((l) => ({
+          serviceId: String(l.serviceId?._id || l.serviceId),
+          price: l.price,
+          quantity: l.quantity,
+          customName: l.customName
+        })),
+        checkStock: true
+      }));
+    } else {
+      ({ lines, totalPrice, catalogServices } = await resolveJobServiceLines(businessId, {
+        serviceIds: (booking.serviceIds || []).map(String)
+      }));
+    }
   } catch (svcErr) {
     throw new Error(svcErr.message || 'Services on this booking are no longer valid');
   }
@@ -462,9 +527,11 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
   let beforeImages = [];
   if (!createWithoutImages) {
     beforeImages = normalizeJobImageUrls(payload.beforeImages);
-    if (beforeImages.length < MIN_JOB_BEFORE_IMAGES) {
-      throw new Error(`Please upload at least ${MIN_JOB_BEFORE_IMAGES} before photos or choose submit without images`);
-    }
+    const settingsForImages = await BusinessSettings.findOne({ businessId })
+      .select('jobImagesMin jobImagesMax')
+      .lean();
+    const imageLimits = resolveJobImageLimits(settingsForImages);
+    assertJobImageCount(beforeImages, imageLimits, { label: 'before photos' });
   }
 
   let assignedTo = payload.assignedTo || null;

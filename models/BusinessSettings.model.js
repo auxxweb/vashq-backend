@@ -82,6 +82,32 @@ const businessSettingsSchema = new mongoose.Schema({
   // GST (optional) - shown on invoice when set
   gstNumber: { type: String, trim: true },
   taxPercentage: { type: Number, min: 0, max: 100 },
+  /** Minimum before/after photos required on a job (unless "without images"). */
+  jobImagesMin: { type: Number, min: 0, max: 20, default: 2 },
+  /** Maximum before/after photos allowed on a job. */
+  jobImagesMax: { type: Number, min: 1, max: 20, default: 4 },
+  /** When true, checkout can choose Card under Online (and Split online portion). */
+  cardPaymentEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Mark Completed requires quality checklist for services that have one defined.
+   * Off by default — existing job completion flow unchanged.
+   */
+  qualityCheckEnabled: { type: Boolean, default: false },
+  /**
+   * When true, owner can manage service categories and assign them on Services / Variable / Products.
+   * Off by default — existing catalog UX unchanged.
+   */
+  serviceCategoriesEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Create Job allows mixing wash services, variable visits, and products in one cart.
+   * Off by default — classic Job / Variable Service tabs remain.
+   */
+  mixedCartEnabled: { type: Boolean, default: false },
+  /**
+   * When true, CRM / Leads menu and APIs are available for this business.
+   * Off by default — existing workflows unchanged.
+   */
+  crmEnabled: { type: Boolean, default: false },
   // Loyalty program (optional)
   loyaltyPointValueInr: { type: Number, min: 0, default: 0 }, // 1 point = ₹X
   loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 }, // 0 = no redeem allowed

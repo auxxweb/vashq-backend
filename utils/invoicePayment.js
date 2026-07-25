@@ -1,5 +1,12 @@
 /** Invoice balance: advance is capped by final amount; balance due is what customer pays at settlement. */
 
+import {
+  assertOnlinePaymentModeAllowed,
+  DEFAULT_ONLINE_PAYMENT_MODE,
+  paymentUsesOnlineChannel,
+  resolveOnlinePaymentMode
+} from './onlinePaymentMode.js';
+
 export function roundMoney(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -46,7 +53,13 @@ export function assertSettlementMatchesDue(paymentMethod, balance, cash, online)
   }
 }
 
-export function normalizeInvoicePaymentFields(invoice, body) {
+/**
+ * @param {object} invoice
+ * @param {object} body
+ * @param {{ cardEnabled?: boolean }} [opts]
+ */
+export function normalizeInvoicePaymentFields(invoice, body, opts = {}) {
+  const allowCard = opts.cardEnabled === true;
   const final = roundMoney(invoice.finalAmount);
   const adv = Number(invoice.advancePayment) || 0;
   const due = balanceDue(final, adv);
@@ -95,11 +108,24 @@ export function normalizeInvoicePaymentFields(invoice, body) {
   invoice.paymentMethod = method;
   invoice.paymentCashAmount = roundMoney(pCash);
   invoice.paymentOnlineAmount = roundMoney(pOnline);
+
+  if (paymentUsesOnlineChannel(method)) {
+    const rawMode = body.onlinePaymentMode !== undefined
+      ? body.onlinePaymentMode
+      : invoice.onlinePaymentMode;
+    if (String(rawMode || '').toUpperCase() === 'CARD') {
+      assertOnlinePaymentModeAllowed('CARD', allowCard);
+    }
+    invoice.onlinePaymentMode = resolveOnlinePaymentMode(rawMode, { cardEnabled: allowCard });
+  } else {
+    invoice.onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
+  }
 }
 
 /** Relabel cash vs online on a closed invoice without changing totals (reporting correction). */
-export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod) {
+export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod, onlinePaymentMode, opts = {}) {
   const method = paymentMethod || invoice.paymentMethod;
+  const allowCard = opts.cardEnabled === true;
   const total = roundMoney(
     (Number(invoice.paymentCashAmount) || 0) + (Number(invoice.paymentOnlineAmount) || 0)
   );
@@ -110,6 +136,13 @@ export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod) {
     invoice.paymentMethod = 'ONLINE';
     invoice.paymentCashAmount = 0;
     invoice.paymentOnlineAmount = total;
+    if (String(onlinePaymentMode || '').toUpperCase() === 'CARD') {
+      assertOnlinePaymentModeAllowed('CARD', allowCard);
+    }
+    invoice.onlinePaymentMode = resolveOnlinePaymentMode(
+      onlinePaymentMode ?? invoice.onlinePaymentMode,
+      { cardEnabled: allowCard }
+    );
     return;
   }
   if (method === 'SPLIT') {
@@ -117,20 +150,33 @@ export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod) {
       invoice.paymentMethod = 'SPLIT';
       invoice.paymentCashAmount = cash;
       invoice.paymentOnlineAmount = online;
+      if (String(onlinePaymentMode || '').toUpperCase() === 'CARD') {
+        assertOnlinePaymentModeAllowed('CARD', allowCard);
+      }
+      invoice.onlinePaymentMode = resolveOnlinePaymentMode(
+        onlinePaymentMode ?? invoice.onlinePaymentMode,
+        { cardEnabled: allowCard }
+      );
       return;
     }
     if (online > EPS) {
       invoice.paymentMethod = 'ONLINE';
       invoice.paymentCashAmount = 0;
       invoice.paymentOnlineAmount = total;
+      invoice.onlinePaymentMode = resolveOnlinePaymentMode(
+        onlinePaymentMode ?? invoice.onlinePaymentMode,
+        { cardEnabled: allowCard }
+      );
       return;
     }
     invoice.paymentMethod = 'CASH';
     invoice.paymentCashAmount = total;
     invoice.paymentOnlineAmount = 0;
+    invoice.onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
     return;
   }
   invoice.paymentMethod = 'CASH';
   invoice.paymentCashAmount = total;
   invoice.paymentOnlineAmount = 0;
+  invoice.onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
 }

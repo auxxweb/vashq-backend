@@ -1,8 +1,8 @@
 const TEMPLATE_META = {
   received: {
     label: 'Received',
-    placeholders: ['{{name}}', '{{vehicleNumber}}', '{{token}}'],
-    purpose: 'Sent when a vehicle is received at the shop'
+    placeholders: ['{{name}}', '{{vehicleNumber}}', '{{token}}', '{{beforeImagesLink}}'],
+    purpose: 'Sent when a vehicle is received at the shop; include before photo links when uploaded'
   },
   workStarted: {
     label: 'Work Started (In Progress)',

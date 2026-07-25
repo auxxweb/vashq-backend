@@ -1,5 +1,6 @@
 export const DEFAULT_WHATSAPP_TEMPLATES = {
-  received: 'Hello {{name}}, your vehicle {{vehicleNumber}} has been received. Token: {{token}}',
+  received:
+    'Hello {{name}}, your vehicle {{vehicleNumber}} has been received. Token: {{token}}\n\nBefore photos: {{beforeImagesLink}}',
   workStarted: 'Your car {{vehicleNumber}} – work is in progress.',
   completed: '✅ Your vehicle {{vehicleNumber}} is ready for delivery. Token: {{token}}',
   delivered:

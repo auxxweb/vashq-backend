@@ -591,11 +591,14 @@ export async function closePackageSale(req, res) {
 
     const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
     try {
+      const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
+      const cardEnabled = await getCardPaymentEnabled(req.businessId);
       normalizeInvoicePaymentFields(invoice, {
         paymentMethod: req.body.paymentMethod ?? invoice.paymentMethod,
         paymentCashAmount: req.body.paymentCashAmount,
-        paymentOnlineAmount: req.body.paymentOnlineAmount
-      });
+        paymentOnlineAmount: req.body.paymentOnlineAmount,
+        onlinePaymentMode: req.body.onlinePaymentMode
+      }, { cardEnabled });
       assertSettlementMatchesDue(
         invoice.paymentMethod,
         due,

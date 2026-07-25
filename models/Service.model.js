@@ -75,6 +75,27 @@ const serviceSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  /**
+   * Optional category (when BusinessSettings.serviceCategoriesEnabled).
+   * Legacy / unset rows are backfilled to the business Default category when the feature is enabled.
+   */
+  categoryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ServiceCategory',
+    default: null,
+    index: true
+  },
+  /**
+   * Optional quality checklist for wash workflow (Mark Completed).
+   * Only enforced when BusinessSettings.qualityCheckEnabled is true.
+   * Multiple checkbox lines under one checklist name per service.
+   */
+  qualityChecklist: {
+    name: { type: String, trim: true, default: '' },
+    items: [{
+      label: { type: String, trim: true, required: true }
+    }]
   }
 }, {
   timestamps: true
@@ -83,5 +104,6 @@ const serviceSchema = new mongoose.Schema({
 // Indexes
 serviceSchema.index({ businessId: 1 });
 serviceSchema.index({ isActive: 1 });
+serviceSchema.index({ businessId: 1, categoryId: 1 });
 
 export default mongoose.model('Service', serviceSchema);

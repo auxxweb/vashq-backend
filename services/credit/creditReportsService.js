@@ -5,8 +5,8 @@ import Customer from '../../models/Customer.model.js';
 import User from '../../models/User.model.js';
 import { roundMoney } from '../../utils/creditPayment.js';
 import {
-  collectionCashOnline,
-  creditCheckoutCashOnline,
+  collectionCashOnlineByMode,
+  creditCheckoutCashOnlineByMode,
   invoiceSettlementAggregationStages
 } from '../../utils/paymentChannelAmounts.js';
 import { deriveCollectionDisplayStatus, getTotalCollected } from './outstandingService.js';
@@ -59,13 +59,13 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
         { paymentOnlineAmount: { $gt: 0.01 } }
       ]
     })
-      .select('invoiceNumber customerId customerName customerPhone saleConfirmedAt amountCollectedAtCheckout paymentMethod paymentCashAmount paymentOnlineAmount finalAmount outstandingAmount advancePayment')
+      .select('invoiceNumber customerId customerName customerPhone saleConfirmedAt amountCollectedAtCheckout paymentMethod onlinePaymentMode paymentCashAmount paymentOnlineAmount finalAmount outstandingAmount advancePayment')
       .sort({ saleConfirmedAt: -1 })
       .lean()
   ]);
 
   const recoveryRows = collections.map((c) => {
-    const channels = collectionCashOnline(c);
+    const channels = collectionCashOnlineByMode(c);
     return {
       rowType: 'credit_recovery',
       _id: c._id,
@@ -75,6 +75,7 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
       customerPhone: c.customerId?.phone || '',
       amount: roundMoney(c.amount),
       paymentMethod: c.paymentMethod,
+      onlinePaymentMode: c.onlinePaymentMode || 'UPI',
       paymentCashAmount: channels.cash,
       paymentOnlineAmount: channels.online,
       allocationMode: c.allocationMode,
@@ -85,7 +86,7 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
   });
 
   const checkoutRows = creditCheckouts.map((inv) => {
-    const channels = creditCheckoutCashOnline(inv);
+    const channels = creditCheckoutCashOnlineByMode(inv);
     return {
       rowType: 'credit_checkout',
       _id: inv._id,
@@ -95,6 +96,7 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
       customerPhone: inv.customerPhone || '',
       amount: roundMoney(channels.cash + channels.online),
       paymentMethod: inv.paymentMethod,
+      onlinePaymentMode: inv.onlinePaymentMode || 'UPI',
       paymentCashAmount: channels.cash,
       paymentOnlineAmount: channels.online,
       allocationMode: 'CHECKOUT',
@@ -110,21 +112,27 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
 
   let totalCash = 0;
   let totalOnline = 0;
+  let totalUpi = 0;
+  let totalCard = 0;
   let creditRecovery = 0;
   let checkoutCollection = 0;
 
   for (const c of collections) {
     creditRecovery += Number(c.amount) || 0;
-    const channels = collectionCashOnline(c);
+    const channels = collectionCashOnlineByMode(c);
     totalCash += channels.cash;
     totalOnline += channels.online;
+    totalUpi += channels.upi;
+    totalCard += channels.card;
   }
   for (const inv of creditCheckouts) {
-    const channels = creditCheckoutCashOnline(inv);
+    const channels = creditCheckoutCashOnlineByMode(inv);
     const settled = roundMoney(channels.cash + channels.online);
     checkoutCollection += settled;
     totalCash += channels.cash;
     totalOnline += channels.online;
+    totalUpi += channels.upi;
+    totalCard += channels.card;
   }
 
   const totalCollection = creditRecovery + checkoutCollection;
@@ -136,6 +144,8 @@ export async function buildCollectionReport(businessId, start, end, exclusiveEnd
       totalCollection: roundSummary(totalCollection),
       totalCash: roundSummary(totalCash),
       totalOnline: roundSummary(totalOnline),
+      totalUpi: roundSummary(totalUpi),
+      totalCard: roundSummary(totalCard),
       creditRecovery: roundSummary(creditRecovery),
       checkoutCollection: roundSummary(checkoutCollection)
     },
@@ -262,8 +272,21 @@ export async function buildOutstandingReport(businessId, filters = {}) {
   };
 }
 
-/** Unified cash-in for the period: advances + full-pay checkout + credit checkout + credit recovery (no double count). */
-export async function getTodayCashReceived(businessId, startUtc, endUtc, advanceCash = 0, advanceOnline = 0, branchId = null) {
+/**
+ * Unified cash-in for the period: advances + full-pay checkout + credit checkout + credit recovery (no double count).
+ * @param {number} [advanceUpi] - online advance portion via UPI (defaults to all advanceOnline as UPI when omitted)
+ * @param {number} [advanceCard] - online advance portion via Card
+ */
+export async function getTodayCashReceived(
+  businessId,
+  startUtc,
+  endUtc,
+  advanceCash = 0,
+  advanceOnline = 0,
+  branchId = null,
+  advanceUpi = null,
+  advanceCard = null
+) {
   const bizOid = new mongoose.Types.ObjectId(String(businessId));
   const branchOid = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
   const jobBranchMatch = branchOid ? { branchId: branchOid } : {};
@@ -313,7 +336,15 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
       },
       { $match: { job: { $ne: [] } } },
       ...invoiceSettlementAggregationStages(),
-      { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
+      {
+        $group: {
+          _id: null,
+          cash: { $sum: '$settleCash' },
+          online: { $sum: '$settleOnline' },
+          upi: { $sum: '$settleUpi' },
+          card: { $sum: '$settleCard' }
+        }
+      }
     ]),
     Invoice.aggregate([
       {
@@ -325,7 +356,15 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
         }
       },
       ...invoiceSettlementAggregationStages(),
-      { $group: { _id: null, cash: { $sum: '$settleCash' }, online: { $sum: '$settleOnline' } } }
+      {
+        $group: {
+          _id: null,
+          cash: { $sum: '$settleCash' },
+          online: { $sum: '$settleOnline' },
+          upi: { $sum: '$settleUpi' },
+          card: { $sum: '$settleCard' }
+        }
+      }
     ]),
     loadCollectionsInRange(businessId, { $gte: startUtc, $lt: endUtc }, branchId),
     Invoice.find({
@@ -338,41 +377,61 @@ export async function getTodayCashReceived(businessId, startUtc, endUtc, advance
         { paymentOnlineAmount: { $gt: 0.01 } }
       ]
     })
-      .select('paymentMethod paymentCashAmount paymentOnlineAmount')
+      .select('paymentMethod onlinePaymentMode paymentCashAmount paymentOnlineAmount')
       .lean()
   ]);
 
   let todayCreditRecovery = 0;
   let recoveryCash = 0;
   let recoveryOnline = 0;
+  let recoveryUpi = 0;
+  let recoveryCard = 0;
   for (const c of collections) {
     todayCreditRecovery += Number(c.amount) || 0;
-    const channels = collectionCashOnline(c);
+    const channels = collectionCashOnlineByMode(c);
     recoveryCash += channels.cash;
     recoveryOnline += channels.online;
+    recoveryUpi += channels.upi;
+    recoveryCard += channels.card;
   }
 
   const fullPayCash = (fullPayJobAgg[0]?.cash ?? 0) + (fullPayPackageAgg[0]?.cash ?? 0);
   const fullPayOnline = (fullPayJobAgg[0]?.online ?? 0) + (fullPayPackageAgg[0]?.online ?? 0);
+  const fullPayUpi = (fullPayJobAgg[0]?.upi ?? 0) + (fullPayPackageAgg[0]?.upi ?? 0);
+  const fullPayCard = (fullPayJobAgg[0]?.card ?? 0) + (fullPayPackageAgg[0]?.card ?? 0);
   let creditCheckoutCash = 0;
   let creditCheckoutOnline = 0;
+  let creditCheckoutUpi = 0;
+  let creditCheckoutCard = 0;
   let creditCheckoutTotal = 0;
   for (const inv of creditCheckoutInvoices) {
-    const channels = creditCheckoutCashOnline(inv);
+    const channels = creditCheckoutCashOnlineByMode(inv);
     creditCheckoutCash += channels.cash;
     creditCheckoutOnline += channels.online;
+    creditCheckoutUpi += channels.upi;
+    creditCheckoutCard += channels.card;
     creditCheckoutTotal += roundSummary(channels.cash + channels.online);
   }
 
   const advCash = roundSummary(advanceCash);
   const advOnline = roundSummary(advanceOnline);
+  const advUpiResolved = advanceUpi == null && advanceCard == null
+    ? advOnline
+    : roundSummary(advanceUpi);
+  const advCardResolved = advanceUpi == null && advanceCard == null
+    ? 0
+    : roundSummary(advanceCard);
   const todayCashReceivedCash = roundSummary(advCash + fullPayCash + creditCheckoutCash + recoveryCash);
   const todayCashReceivedOnline = roundSummary(advOnline + fullPayOnline + creditCheckoutOnline + recoveryOnline);
+  const todayCashReceivedUpi = roundSummary(advUpiResolved + fullPayUpi + creditCheckoutUpi + recoveryUpi);
+  const todayCashReceivedCard = roundSummary(advCardResolved + fullPayCard + creditCheckoutCard + recoveryCard);
 
   return {
     todayCashReceived: roundSummary(todayCashReceivedCash + todayCashReceivedOnline),
     todayCashReceivedCash,
     todayCashReceivedOnline,
+    todayCashReceivedUpi,
+    todayCashReceivedCard,
     todayFullPayCheckout: roundSummary(fullPayCash + fullPayOnline),
     todayCreditCheckout: roundSummary(creditCheckoutTotal),
     todayCreditRecovery: roundSummary(todayCreditRecovery),

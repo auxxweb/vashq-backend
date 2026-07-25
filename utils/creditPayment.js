@@ -1,4 +1,10 @@
 import { balanceDue, effectiveAdvance, roundMoney } from './invoicePayment.js';
+import {
+  assertOnlinePaymentModeAllowed,
+  DEFAULT_ONLINE_PAYMENT_MODE,
+  paymentUsesOnlineChannel,
+  resolveOnlinePaymentMode
+} from './onlinePaymentMode.js';
 
 export { roundMoney, effectiveAdvance, balanceDue };
 
@@ -49,8 +55,12 @@ export function assertPartialSettlementValid(paymentMethod, balance, cash, onlin
 
 /**
  * Normalize checkout settlement fields for credit close (partial allowed).
+ * @param {object} invoice
+ * @param {object} body
+ * @param {{ cardEnabled?: boolean }} [opts]
  */
-export function normalizeCreditCheckoutPayment(invoice, body = {}) {
+export function normalizeCreditCheckoutPayment(invoice, body = {}, opts = {}) {
+  const allowCard = opts.cardEnabled === true;
   const final = roundMoney(invoice.finalAmount);
   const adv = Number(invoice.advancePayment) || 0;
   const due = balanceDue(final, adv);
@@ -104,6 +114,18 @@ export function normalizeCreditCheckoutPayment(invoice, body = {}) {
     invoice.paymentMethod = method;
   }
 
+  if (paymentUsesOnlineChannel(invoice.paymentMethod)) {
+    const rawMode = body.onlinePaymentMode !== undefined
+      ? body.onlinePaymentMode
+      : invoice.onlinePaymentMode;
+    if (String(rawMode || '').toUpperCase() === 'CARD') {
+      assertOnlinePaymentModeAllowed('CARD', allowCard);
+    }
+    invoice.onlinePaymentMode = resolveOnlinePaymentMode(rawMode, { cardEnabled: allowCard });
+  } else {
+    invoice.onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
+  }
+
   assertPartialSettlementValid(
     invoice.paymentMethod,
     due,
@@ -114,8 +136,13 @@ export function normalizeCreditCheckoutPayment(invoice, body = {}) {
 
 /**
  * Normalize collection payment fields (amount applied to outstanding invoices).
+ * @param {number} amount
+ * @param {string} paymentMethod
+ * @param {object} body
+ * @param {{ cardEnabled?: boolean }} [opts]
  */
-export function normalizeCollectionPayment(amount, paymentMethod, body = {}) {
+export function normalizeCollectionPayment(amount, paymentMethod, body = {}, opts = {}) {
+  const allowCard = opts.cardEnabled === true;
   const total = roundMoney(amount);
   if (total <= EPS) {
     const err = new Error('Collection amount must be greater than zero');
@@ -144,10 +171,20 @@ export function normalizeCollectionPayment(amount, paymentMethod, body = {}) {
 
   assertPartialSettlementValid(paymentMethod, total, pCash, pOnline);
 
+  let onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
+  if (paymentUsesOnlineChannel(paymentMethod)) {
+    const rawMode = body.onlinePaymentMode;
+    if (String(rawMode || '').toUpperCase() === 'CARD') {
+      assertOnlinePaymentModeAllowed('CARD', allowCard);
+    }
+    onlinePaymentMode = resolveOnlinePaymentMode(rawMode, { cardEnabled: allowCard });
+  }
+
   return {
     paymentMethod,
     paymentCashAmount: roundMoney(pCash),
     paymentOnlineAmount: roundMoney(pOnline),
+    onlinePaymentMode,
     amount: total
   };
 }

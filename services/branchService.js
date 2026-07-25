@@ -19,6 +19,7 @@ import User from '../models/User.model.js';
 import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import { getBranchPlatformConfig, normalizeBranchCode, suggestBranchCode } from '../utils/branchConfig.js';
 import { getBusinessModules, isModuleEnabled } from './businessModulesService.js';
+import { expensePaidAmountAggregationExpr } from '../utils/expensePayment.js';
 import { cacheGetOrSet, cacheDelete } from '../utils/cache.js';
 import { syncDefaultBranchWhatsAppToBusiness } from '../utils/whatsappSettingsMerge.js';
 
@@ -683,7 +684,7 @@ export async function getBranchOverviewStats(businessId, startUtc, endUtc) {
             expenseDate: { $gte: startUtc, $lt: endUtc }
           }
         },
-        { $group: { _id: null, total: { $sum: '$amount' } } }
+        { $group: { _id: null, total: { $sum: expensePaidAmountAggregationExpr() } } }
       ]),
       isBranchOperational(branch)
     ]);

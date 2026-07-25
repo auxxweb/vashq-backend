@@ -208,7 +208,9 @@ export async function settleDirectBillInvoice(invoice, job, businessId, paymentB
   }
 
   invoice.paymentMethod = paymentBody.paymentMethod;
-  normalizeInvoicePaymentFields(invoice, paymentBody);
+  const { getCardPaymentEnabled } = await import('./onlinePaymentMode.js');
+  const cardEnabled = await getCardPaymentEnabled(businessId);
+  normalizeInvoicePaymentFields(invoice, paymentBody, { cardEnabled });
 
   const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
   try {

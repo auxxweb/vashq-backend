@@ -178,11 +178,48 @@ async function gatherPeriodFinancials(businessId, start, end) {
         }
       }
     },
-    { $group: { _id: null, advCash: { $sum: '$advCash' }, advOnline: { $sum: '$advOnline' } } }
+    {
+      $addFields: {
+        advUpi: {
+          $cond: [
+            { $eq: [{ $toUpper: { $ifNull: ['$advanceOnlinePaymentMode', 'UPI'] } }, 'CARD'] },
+            0,
+            '$advOnline'
+          ]
+        },
+        advCard: {
+          $cond: [
+            { $eq: [{ $toUpper: { $ifNull: ['$advanceOnlinePaymentMode', 'UPI'] } }, 'CARD'] },
+            '$advOnline',
+            0
+          ]
+        }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        advCash: { $sum: '$advCash' },
+        advOnline: { $sum: '$advOnline' },
+        advUpi: { $sum: '$advUpi' },
+        advCard: { $sum: '$advCard' }
+      }
+    }
   ]);
   const advCash = advanceRows[0]?.advCash ?? 0;
   const advOnline = advanceRows[0]?.advOnline ?? 0;
-  const moneyInRaw = await getTodayCashReceived(businessId, start, endExclusive, advCash, advOnline);
+  const advUpi = advanceRows[0]?.advUpi ?? advOnline;
+  const advCard = advanceRows[0]?.advCard ?? 0;
+  const moneyInRaw = await getTodayCashReceived(
+    businessId,
+    start,
+    endExclusive,
+    advCash,
+    advOnline,
+    null,
+    advUpi,
+    advCard
+  );
 
   const cashInPeriod = roundMoney(moneyInRaw.todayCashReceivedCash);
   const bankInPeriod = roundMoney(moneyInRaw.todayCashReceivedOnline);
