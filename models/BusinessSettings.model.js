@@ -108,6 +108,12 @@ const businessSettingsSchema = new mongoose.Schema({
    * Off by default — existing workflows unchanged.
    */
   crmEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Create Job / job edit can assign multiple employees to one job.
+   * All assignees see it under My Jobs and can edit / complete checkout.
+   * Off by default — single-employee assign remains the default UX.
+   */
+  multiEmployeeAssignEnabled: { type: Boolean, default: false },
   // Loyalty program (optional)
   loyaltyPointValueInr: { type: Number, min: 0, default: 0 }, // 1 point = ₹X
   loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 }, // 0 = no redeem allowed
@@ -122,7 +128,35 @@ const businessSettingsSchema = new mongoose.Schema({
     start: { type: String, default: '09:00' },
     end: { type: String, default: '18:00' }
   }],
-  bookingAdvanceDays: { type: Number, min: 1, max: 365, default: 30 }
+  bookingAdvanceDays: { type: Number, min: 1, max: 365, default: 30 },
+  /**
+   * Dynamic public booking contact form (step “You”).
+   * Defaults applied in bookingContactForm utils when empty.
+   */
+  bookingContactFormFields: [{
+    id: { type: String, trim: true },
+    key: { type: String, trim: true, required: true },
+    label: { type: String, trim: true, required: true },
+    type: {
+      type: String,
+      enum: ['text', 'tel', 'email', 'textarea', 'number', 'date', 'time', 'datetime', 'select', 'chips'],
+      default: 'text'
+    },
+    required: { type: Boolean, default: false },
+    placeholder: { type: String, trim: true, default: '' },
+    options: [{ type: String, trim: true }],
+    optionLabels: { type: mongoose.Schema.Types.Mixed },
+    locked: { type: Boolean, default: false },
+    section: {
+      type: String,
+      enum: ['contact', 'vehicle', 'visit', 'other'],
+      default: 'other'
+    },
+    showWhen: {
+      key: { type: String, trim: true },
+      equals: { type: String, trim: true }
+    }
+  }]
 }, {
   timestamps: true
 });

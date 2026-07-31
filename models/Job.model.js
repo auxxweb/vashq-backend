@@ -135,6 +135,12 @@ const jobSchema = new mongoose.Schema({
     ref: 'User',
     default: null
   },
+  /** All employees assigned to this job (includes primary assignedTo when set). */
+  assignedToUsers: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+
   // Optional package linkage (prepaid package). Do NOT deduct on job creation; only on completion.
   customerPackageId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -179,6 +185,7 @@ const jobSchema = new mongoose.Schema({
 // Indexes
 jobSchema.index({ businessId: 1, branchId: 1 });
 jobSchema.index({ assignedTo: 1 });
+jobSchema.index({ assignedToUsers: 1 });
 jobSchema.index({ customerId: 1 });
 jobSchema.index({ carId: 1 });
 jobSchema.index({ status: 1 });
@@ -187,6 +194,7 @@ jobSchema.index({ businessId: 1, branchId: 1, tokenNumber: 1 }, { unique: true }
 jobSchema.index({ createdAt: -1 });
 jobSchema.index({ businessId: 1, status: 1, createdAt: -1 });
 jobSchema.index({ businessId: 1, assignedTo: 1, status: 1, createdAt: -1 });
+jobSchema.index({ businessId: 1, assignedToUsers: 1, status: 1, createdAt: -1 });
 jobSchema.index({ businessId: 1, status: 1, actualDelivery: -1 });
 jobSchema.index({ businessId: 1, customerId: 1 });
 

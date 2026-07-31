@@ -120,7 +120,8 @@ router.get('/book/:businessId', async (req, res) => {
         bookingAdvanceDays: bookingSettingsFull.bookingAdvanceDays,
         bookingAllowedDays: bookingSettingsFull.bookingAllowedDays,
         weeklyOperatingSchedule: bookingSettingsFull.weeklyOperatingSchedule,
-        bookingWeeklySchedule: bookingSettingsFull.weeklyOperatingSchedule
+        bookingWeeklySchedule: bookingSettingsFull.weeklyOperatingSchedule,
+        bookingContactFormFields: bookingSettingsFull.bookingContactFormFields
       }
     });
   } catch (error) {

@@ -118,6 +118,7 @@ import { ensureDefaultBranchForBusiness, getBranchOverviewStats, getBranchUsageS
 import { getBranchPlatformConfig } from '../utils/branchConfig.js';
 import { applyBranchScopeOid, applyBranchScope } from '../utils/branchQuery.js';
 import { scopedFilter, assertBranchAccess, assertInvoiceCheckoutAccess, findScoped, branchIdForCreate, jobAccessFilter } from '../utils/branchAccess.js';
+import { resolveJobAssignees, applyEmployeeJobScope, toIdString } from '../utils/jobAssignment.js';
 import { isAdminPanelRole, isBranchAdmin, isBusinessOwner } from '../utils/adminRoles.js';
 import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
 import { generateEmployeeCode } from '../utils/employeeAccount.js';
@@ -133,6 +134,7 @@ import { getBusinessTimezone } from '../utils/businessTimezone.js';
 import { getCachedDashboardStats, getCachedDashboardCharts } from '../utils/dashboardCache.js';
 import { invalidateDashboardForBusiness } from '../utils/dashboardFinancialSync.js';
 import { getMySubscriptionPayload, loadAdminBootstrap } from '../services/adminBootstrapService.js';
+import { auditSensitive } from '../middleware/auditLog.middleware.js';
 
 const router = express.Router();
 
@@ -2312,7 +2314,7 @@ router.get('/dashboard', async (req, res) => {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
     const baseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
-    if (isEmployee) baseMatch.assignedTo = req.user._id;
+    if (isEmployee) applyEmployeeJobScope(baseMatch, req.user._id);
 
     const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
     const expenseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
@@ -2414,7 +2416,7 @@ router.get('/dashboard/charts', async (req, res) => {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
     const baseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
-    if (isEmployee) baseMatch.assignedTo = req.user._id;
+    if (isEmployee) applyEmployeeJobScope(baseMatch, req.user._id);
 
     const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
     const invoiceMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
@@ -2966,15 +2968,22 @@ router.put('/employees/:id', [
 // @route   DELETE /api/admin/employees/:id
 // @desc    Delete employee (business owner only)
 // @access  Private (Car Wash Admin)
-router.delete('/employees/:id', async (req, res) => {
+router.delete('/employees/:id', auditSensitive('EMPLOYEE_DELETE', {
+  severity: 'CRITICAL',
+  targetType: 'User',
+  targetLabel: (req) => req.auditTargetLabel || null,
+  meta: (req) => ({ email: req.auditTargetEmail || null })
+}), async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
       return res.status(403).json({ success: false, message: 'Access denied.' });
     }
-    const user = await User.findOneAndDelete(findManagedEmployee(req, req.params.id, true));
+    const user = await User.findOneAndDelete(await findManagedEmployee(req, req.params.id, true));
     if (!user) {
       return res.status(404).json({ success: false, message: 'Employee not found' });
     }
+    req.auditTargetLabel = user.name || user.email || null;
+    req.auditTargetEmail = user.email || null;
     res.json({ success: true, message: 'Employee deleted' });
   } catch (error) {
     console.error('Delete employee error:', error);
@@ -2988,7 +2997,10 @@ router.delete('/employees/:id', async (req, res) => {
 router.post('/employees/:id/reset-password', [
   body('newPassword').isLength({ min: 6 }),
   body('confirmPassword').notEmpty()
-], async (req, res) => {
+], auditSensitive('EMPLOYEE_RESET_PASSWORD', {
+  severity: 'CRITICAL',
+  targetType: 'User'
+}), async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
       return res.status(403).json({ success: false, message: 'Access denied.' });
@@ -3590,7 +3602,11 @@ router.put('/customers/:id', [
 // @route   DELETE /api/admin/customers/:id
 // @desc    Delete customer
 // @access  Private (Car Wash Admin)
-router.delete('/customers/:id', adminPanelOnly, async (req, res) => {
+router.delete('/customers/:id', adminPanelOnly, auditSensitive('CUSTOMER_DELETE', {
+  severity: 'HIGH',
+  targetType: 'Customer',
+  targetLabel: (req) => req.auditTargetLabel || null
+}), async (req, res) => {
   try {
     const customer = await Customer.findOneAndDelete({
       _id: req.params.id,
@@ -3603,6 +3619,8 @@ router.delete('/customers/:id', adminPanelOnly, async (req, res) => {
         message: 'Customer not found'
       });
     }
+
+    req.auditTargetLabel = customer.name || customer.phone || null;
 
     res.json({
       success: true,
@@ -4122,7 +4140,8 @@ router.get('/jobs/:id', async (req, res) => {
       .populate('customerId', 'name phone whatsappNumber')
       .populate('carId', 'carNumber brand model color')
       .populate('services.serviceId', 'name')
-      .populate('assignedTo', 'name employeeCode email');
+      .populate('assignedTo', 'name employeeCode email')
+      .populate('assignedToUsers', 'name employeeCode email');
 
     if (!job) {
       return res.status(404).json({
@@ -4170,9 +4189,9 @@ router.get('/jobs', async (req, res) => {
   try {
     const { status, page = 1, limit = 20, search, from, to, range } = req.query;
     const query = { ...branchFilter(req) };
-    // Employee sees only jobs assigned to them
+    // Employee sees only jobs assigned to them (single or multi)
     if (req.user.role === 'EMPLOYEE') {
-      query.assignedTo = req.user._id;
+      applyEmployeeJobScope(query, req.user._id);
     }
     if (status && status !== 'ALL') {
       query.status = status;
@@ -4257,6 +4276,7 @@ router.get('/jobs', async (req, res) => {
         .populate('carId', 'carNumber brand model color')
         .populate('services.serviceId', 'name')
         .populate('assignedTo', 'name employeeCode email')
+        .populate('assignedToUsers', 'name employeeCode email')
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit)
@@ -4325,6 +4345,8 @@ router.post('/jobs', [
   body('notes').optional().trim(),
   body('estimatedDelivery').optional().isISO8601(),
   body('assignedTo').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid employee'),
+  body('assignedToUsers').optional().isArray(),
+  body('assignedToUsers.*').optional().isMongoId().withMessage('Invalid employee in assignedToUsers'),
   body('customerPackageId').optional({ checkFalsy: true }).isMongoId().withMessage('Invalid package'),
   body('advancePayment').optional({ checkFalsy: true }).isFloat({ min: 0 }).withMessage('Advance must be a non-negative number'),
   body('advancePaymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
@@ -4350,7 +4372,7 @@ router.post('/jobs', [
       });
     }
 
-    const { customerId, carId, serviceIds, services: servicesBody, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, customerPackageId, advancePayment: advanceBody } = req.body;
+    const { customerId, carId, serviceIds, services: servicesBody, beforeImages, notes, estimatedDelivery: estimatedDeliveryBody, assignedTo: assignedToBody, assignedToUsers: assignedToUsersBody, customerPackageId, advancePayment: advanceBody } = req.body;
     const collectPaymentNow = req.body.collectPaymentNow === true;
 
     const hasServicesArray = Array.isArray(servicesBody) && servicesBody.length > 0;
@@ -4515,6 +4537,26 @@ router.post('/jobs', [
         ? new Date(estimatedDeliveryBody)
         : calculateETA(workCatalogServices(catalogServices)));
 
+    const settingsForAssign = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('multiEmployeeAssignEnabled')
+      .lean();
+    let assignedTo;
+    let assignedToUsers;
+    try {
+      ({ assignedTo, assignedToUsers } = await resolveJobAssignees({
+        businessId: req.businessId,
+        assignedToBody,
+        assignedToUsersBody,
+        multiEnabled: !!settingsForAssign?.multiEmployeeAssignEnabled,
+        actorUser: req.user
+      }));
+    } catch (assignErr) {
+      return res.status(assignErr.status || 400).json({
+        success: false,
+        message: assignErr.message || 'Invalid employee assignment'
+      });
+    }
+
     // Create job with retry logic for duplicate token numbers
     let job;
     let attempts = 0;
@@ -4524,16 +4566,6 @@ router.post('/jobs', [
       try {
         // Generate token number
         const tokenNumber = await generateTokenNumber(req.businessId, req.branchId);
-
-        // assignedTo: optional; if employee creates without specifying, can assign to self
-        let assignedTo = assignedToBody || null;
-        if (req.user.role === 'EMPLOYEE' && !assignedTo) {
-          assignedTo = req.user._id;
-        }
-        if (assignedTo) {
-          const emp = await User.findOne({ _id: assignedTo, businessId: req.businessId, role: 'EMPLOYEE' });
-          if (!emp) assignedTo = null;
-        }
 
         // Create job
         job = await Job.create({
@@ -4548,6 +4580,7 @@ router.post('/jobs', [
           beforeImages: directBill ? [] : normalizeJobImageUrls(beforeImages),
           notes,
           assignedTo,
+          assignedToUsers,
           customerPackageId: customerPackageId || null,
           services: lines,
           ...(directBill
@@ -4684,10 +4717,16 @@ router.post('/jobs', [
         console.log('Push job_received:', pushRes);
       }
 
-      // If job is assigned, notify that employee too
-      if (job.assignedTo) {
+      // Notify every assigned employee
+      const assigneeIds = [
+        ...new Set([
+          ...(Array.isArray(job.assignedToUsers) ? job.assignedToUsers.map((id) => toIdString(id)) : []),
+          toIdString(job.assignedTo)
+        ].filter(Boolean))
+      ];
+      for (const empId of assigneeIds) {
         const pushEmp = await sendPushNotification({
-          businessOwnerId: job.assignedTo,
+          businessOwnerId: empId,
           title: 'New job assigned',
           body: `Token ${job.tokenNumber} · ${customer?.name || 'Customer'}`,
           data: { type: 'job_received', bookingId: job._id, url: `/employee/jobs/${job._id}` }
@@ -4967,7 +5006,10 @@ router.put('/jobs/:id', [
   body('services').optional().isArray({ min: 1 }),
   body('notes').optional().isString(),
   body('estimatedDelivery').optional().isISO8601(),
-  body('beforeImages').optional().isArray()
+  body('beforeImages').optional().isArray(),
+  body('assignedTo').optional({ nullable: true, checkFalsy: true }).isMongoId(),
+  body('assignedToUsers').optional().isArray(),
+  body('assignedToUsers.*').optional().isMongoId()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -4994,6 +5036,30 @@ router.put('/jobs/:id', [
 
     if (typeof notes === 'string') {
       job.notes = notes.trim();
+    }
+
+    const wantsAssignUpdate =
+      req.body.assignedTo !== undefined || req.body.assignedToUsers !== undefined;
+    if (wantsAssignUpdate) {
+      if (!isAdminPanelRole(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only admins can change job assignment'
+        });
+      }
+      const settingsForAssign = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('multiEmployeeAssignEnabled')
+        .lean();
+      const resolved = await resolveJobAssignees({
+        businessId: req.businessId,
+        assignedToBody: req.body.assignedTo,
+        assignedToUsersBody: req.body.assignedToUsers,
+        multiEnabled: !!settingsForAssign?.multiEmployeeAssignEnabled,
+        actorUser: null
+      });
+      job.assignedTo = resolved.assignedTo;
+      job.assignedToUsers = resolved.assignedToUsers;
+      job.markModified('assignedToUsers');
     }
 
     if (req.body.beforeImages !== undefined) {
@@ -5103,6 +5169,7 @@ router.put('/jobs/:id', [
     await job.populate('carId', 'carNumber brand model color');
     await job.populate('services.serviceId', 'name isVariable');
     await job.populate('assignedTo', 'name employeeCode email');
+    await job.populate('assignedToUsers', 'name employeeCode email');
 
     res.json({ success: true, job });
   } catch (error) {
@@ -5114,7 +5181,11 @@ router.put('/jobs/:id', [
 // @route   DELETE /api/admin/jobs/:id
 // @desc    Permanently delete a job (business owner only). Not allowed for DELIVERED or if an invoice exists.
 // @access  Private — CAR_WASH_ADMIN only
-router.delete('/jobs/:id', async (req, res) => {
+router.delete('/jobs/:id', auditSensitive('JOB_DELETE', {
+  severity: 'HIGH',
+  targetType: 'Job',
+  targetLabel: (req) => req.auditTargetLabel || null
+}), async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
       return res.status(403).json({
@@ -5143,6 +5214,8 @@ router.delete('/jobs/:id', async (req, res) => {
         message: 'This job has an invoice and cannot be deleted.'
       });
     }
+
+    req.auditTargetLabel = job.tokenNumber || String(job._id);
 
     await WhatsAppMessage.deleteMany({ businessId: req.businessId, jobId: job._id });
     await Job.deleteOne({ _id: job._id });
@@ -5437,6 +5510,7 @@ router.put('/settings', [
   body('serviceCategoriesEnabled').optional().isBoolean(),
   body('mixedCartEnabled').optional().isBoolean(),
   body('crmEnabled').optional().isBoolean(),
+  body('multiEmployeeAssignEnabled').optional().isBoolean(),
   body('loyaltyPointValueInr').optional({ nullable: true }).isFloat({ min: 0 }),
   body('loyaltyMaxRedeemPointsPerJob').optional({ nullable: true }).isInt({ min: 0 })
 ], async (req, res) => {
@@ -5496,6 +5570,9 @@ router.put('/settings', [
     }
     if (req.body.crmEnabled !== undefined) {
       updateFields.crmEnabled = !!req.body.crmEnabled;
+    }
+    if (req.body.multiEmployeeAssignEnabled !== undefined) {
+      updateFields.multiEmployeeAssignEnabled = !!req.body.multiEmployeeAssignEnabled;
     }
     if (req.body.loyaltyPointValueInr !== undefined) updateFields.loyaltyPointValueInr = req.body.loyaltyPointValueInr === '' ? 0 : Number(req.body.loyaltyPointValueInr);
     if (req.body.loyaltyMaxRedeemPointsPerJob !== undefined) updateFields.loyaltyMaxRedeemPointsPerJob = req.body.loyaltyMaxRedeemPointsPerJob === '' ? 0 : Number(req.body.loyaltyMaxRedeemPointsPerJob);
@@ -5874,7 +5951,7 @@ router.post('/upgrade-request', [
 async function loadJobInvoiceForSettlementRequest(req, jobId) {
   const jobFilter = { _id: jobId, businessId: req.businessId, status: 'DELIVERED' };
   if (req.user.role === 'EMPLOYEE') {
-    jobFilter.assignedTo = req.user._id;
+    applyEmployeeJobScope(jobFilter, req.user._id);
   }
   const job = await Job.findOne(jobFilter);
   if (!job) return { error: { status: 404, message: 'Delivered job not found or not assigned to you' } };

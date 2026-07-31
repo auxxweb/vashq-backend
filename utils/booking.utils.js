@@ -42,6 +42,7 @@ export async function getBookingSettings(businessId) {
     fallbackEnd: workingHours.end,
     legacyAllowedDays: settings?.bookingAllowedDays
   });
+  const { normalizeBookingContactFormFields } = await import('./bookingContactForm.js');
   return {
     onlineBookingEnabled: settings?.onlineBookingEnabled !== false,
     bookingAllowedDays: Array.isArray(settings?.bookingAllowedDays) ? settings.bookingAllowedDays : null,
@@ -51,7 +52,8 @@ export async function getBookingSettings(businessId) {
     bookingAdvanceDays: Number(settings?.bookingAdvanceDays) || 30,
     timezone: settings?.timezone || 'Asia/Kolkata',
     currency: settings?.currency || 'INR',
-    workingHours
+    workingHours,
+    bookingContactFormFields: normalizeBookingContactFormFields(settings?.bookingContactFormFields)
   };
 }
 

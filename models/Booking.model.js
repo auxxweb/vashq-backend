@@ -76,6 +76,12 @@ const bookingSchema = new mongoose.Schema({
   vehicleModel: { type: String, trim: true },
   vehicleType: { type: String, trim: true },
   notes: { type: String, trim: true },
+  /** Extra answers from custom booking contact form fields (key → value). */
+  contactAnswers: {
+    type: Map,
+    of: String,
+    default: undefined
+  },
   jobId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Job',

@@ -22,6 +22,8 @@ import { normalizeEnabledModules } from '../constants/businessModules.js';
 import { getBusinessModules, updateBusinessModules } from '../services/businessModulesService.js';
 import { createDefaultShopSubscription, invalidateSubscriptionCache } from '../services/subscriptionService.js';
 import bcrypt from 'bcryptjs';
+import AuditLog from '../models/AuditLog.model.js';
+import { auditSensitive } from '../middleware/auditLog.middleware.js';
 
 const router = express.Router();
 
@@ -225,7 +227,12 @@ router.post('/businesses', [
   body('carHandlingCapacity').isIn(['SINGLE', 'MULTIPLE']),
   body('adminEmail').optional().isEmail().normalizeEmail(),
   body('adminPassword').optional().isLength({ min: 6 })
-], async (req, res) => {
+], auditSensitive('BUSINESS_CREATE', {
+  severity: 'HIGH',
+  targetType: 'Business',
+  targetLabel: (req) => req.body?.businessName || req.body?.email || null,
+  meta: (req) => ({ email: req.body?.email, adminEmail: req.body?.adminEmail || req.body?.email })
+}), async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -334,7 +341,11 @@ router.post('/businesses', [
 // @route   PUT /api/super-admin/businesses/:id
 // @desc    Update business (currency is set only via Super Admin Settings and applies platform-wide)
 // @access  Private (Super Admin)
-router.put('/businesses/:id', async (req, res) => {
+router.put('/businesses/:id', auditSensitive('BUSINESS_UPDATE', {
+  severity: 'HIGH',
+  targetType: 'Business',
+  meta: (req) => ({ fields: Object.keys(req.body || {}).filter((k) => k !== 'adminPassword' && k !== 'password') })
+}), async (req, res) => {
   try {
     const allowed = ['businessName', 'ownerName', 'phone', 'email', 'whatsappNumber', 'address', 'location', 'workingHoursStart', 'workingHoursEnd', 'carHandlingCapacity', 'maxConcurrentJobs', 'defaultLanguage', 'logo', 'googleReviewLink', 'status'];
     const update = {};
@@ -370,7 +381,15 @@ router.put('/businesses/:id', async (req, res) => {
 // @route   DELETE /api/super-admin/businesses/:id
 // @desc    Delete business and related data
 // @access  Private (Super Admin)
-router.delete('/businesses/:id', async (req, res) => {
+router.delete('/businesses/:id', auditSensitive('BUSINESS_DELETE', {
+  severity: 'CRITICAL',
+  targetType: 'Business',
+  targetLabel: (req) => req.auditTargetLabel || req.params?.id || null,
+  meta: (req) => ({
+    businessEmail: req.auditTargetEmail || null,
+    businessName: req.auditTargetLabel || null
+  })
+}), async (req, res) => {
   try {
     const businessId = req.params.id;
     const business = await Business.findById(businessId);
@@ -380,6 +399,8 @@ router.delete('/businesses/:id', async (req, res) => {
         message: 'Business not found'
       });
     }
+    req.auditTargetLabel = business.businessName || null;
+    req.auditTargetEmail = business.email || null;
     await Job.deleteMany({ businessId });
     await Customer.deleteMany({ businessId });
     await Car.deleteMany({ businessId });
@@ -406,7 +427,10 @@ router.delete('/businesses/:id', async (req, res) => {
 // @route   POST /api/super-admin/businesses/:id/reset-password
 // @desc    Reset business admin password
 // @access  Private (Super Admin)
-router.post('/businesses/:id/reset-password', async (req, res) => {
+router.post('/businesses/:id/reset-password', auditSensitive('BUSINESS_ADMIN_RESET_PASSWORD', {
+  severity: 'CRITICAL',
+  targetType: 'Business'
+}), async (req, res) => {
   try {
     const business = await Business.findById(req.params.id);
     if (!business) {
@@ -445,7 +469,11 @@ router.post('/businesses/:id/reset-password', async (req, res) => {
 // @route   POST /api/super-admin/businesses/:id/suspend
 // @desc    Suspend or activate business
 // @access  Private (Super Admin)
-router.post('/businesses/:id/suspend', async (req, res) => {
+router.post('/businesses/:id/suspend', auditSensitive('BUSINESS_SUSPEND', {
+  severity: 'CRITICAL',
+  targetType: 'Business',
+  meta: (req) => ({ status: req.body?.status })
+}), async (req, res) => {
   try {
     const { status } = req.body;
     if (!['ACTIVE', 'SUSPENDED'].includes(status)) {
@@ -1336,6 +1364,98 @@ router.put('/settings', [
       success: false,
       message: 'Server error'
     });
+  }
+});
+
+// @route   GET /api/super-admin/security-alerts/summary
+// @desc    Counts of CRITICAL/HIGH alerts for last 24h and 7d
+// @access  Private (Super Admin)
+router.get('/security-alerts/summary', async (req, res) => {
+  try {
+    const now = Date.now();
+    const since24h = new Date(now - 24 * 60 * 60 * 1000);
+    const since7d = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+    const [critical24h, high24h, critical7d, high7d, total7d] = await Promise.all([
+      AuditLog.countDocuments({ severity: 'CRITICAL', createdAt: { $gte: since24h } }),
+      AuditLog.countDocuments({ severity: 'HIGH', createdAt: { $gte: since24h } }),
+      AuditLog.countDocuments({ severity: 'CRITICAL', createdAt: { $gte: since7d } }),
+      AuditLog.countDocuments({ severity: 'HIGH', createdAt: { $gte: since7d } }),
+      AuditLog.countDocuments({ createdAt: { $gte: since7d } })
+    ]);
+
+    res.json({
+      success: true,
+      summary: {
+        last24h: { critical: critical24h, high: high24h },
+        last7d: { critical: critical7d, high: high7d, total: total7d }
+      }
+    });
+  } catch (error) {
+    console.error('Security alerts summary error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/super-admin/security-alerts
+// @desc    Paginated security activity feed
+// @access  Private (Super Admin)
+router.get('/security-alerts', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+    if (req.query.severity && ['CRITICAL', 'HIGH', 'MEDIUM'].includes(String(req.query.severity).toUpperCase())) {
+      filter.severity = String(req.query.severity).toUpperCase();
+    }
+    if (req.query.action) {
+      filter.action = String(req.query.action).trim().toUpperCase();
+    }
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {};
+      if (req.query.from) {
+        const from = new Date(req.query.from);
+        if (!Number.isNaN(from.getTime())) filter.createdAt.$gte = from;
+      }
+      if (req.query.to) {
+        const to = new Date(req.query.to);
+        if (!Number.isNaN(to.getTime())) filter.createdAt.$lte = to;
+      }
+      if (!Object.keys(filter.createdAt).length) delete filter.createdAt;
+    }
+    const q = String(req.query.q || '').trim();
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { actorEmail: rx },
+        { ip: rx },
+        { targetLabel: rx },
+        { targetId: rx },
+        { action: rx },
+        { deviceSummary: rx }
+      ];
+    }
+
+    const [alerts, total] = await Promise.all([
+      AuditLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      AuditLog.countDocuments(filter)
+    ]);
+
+    res.json({
+      success: true,
+      alerts,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.max(1, Math.ceil(total / limit))
+      }
+    });
+  } catch (error) {
+    console.error('Security alerts list error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

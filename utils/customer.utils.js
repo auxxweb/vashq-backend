@@ -67,6 +67,10 @@ export async function findOrCreateCustomer(businessId, { name, phone, address, e
       customer.address = address;
       changed = true;
     }
+    if (email && !customer.email) {
+      customer.email = email;
+      changed = true;
+    }
     if (changed) await customer.save();
     return customer;
   }

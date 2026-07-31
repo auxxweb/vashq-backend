@@ -98,7 +98,8 @@ router.get('/settings', async (req, res) => {
 
 router.put('/settings', adminPanelOnly, [
   body('onlineBookingEnabled').optional().isBoolean(),
-  body('bookingAdvanceDays').optional().isInt({ min: 1, max: 365 })
+  body('bookingAdvanceDays').optional().isInt({ min: 1, max: 365 }),
+  body('bookingContactFormFields').optional().isArray()
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;
@@ -109,6 +110,10 @@ router.put('/settings', adminPanelOnly, [
     }
     if (req.body.bookingAdvanceDays !== undefined) {
       update.bookingAdvanceDays = Number(req.body.bookingAdvanceDays);
+    }
+    if (req.body.bookingContactFormFields !== undefined) {
+      const { normalizeBookingContactFormFields } = await import('../utils/bookingContactForm.js');
+      update.bookingContactFormFields = normalizeBookingContactFormFields(req.body.bookingContactFormFields);
     }
 
     if (Object.keys(update).length) {

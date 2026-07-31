@@ -13,6 +13,7 @@ import { isBranchOperational } from '../services/branchService.js';
 import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
 import { invalidateUserAuthCache } from '../utils/authCache.js';
 import { isAdminPanelRole } from '../utils/adminRoles.js';
+import { writeAuditLog, clientMetaFromRequest } from '../utils/auditLog.js';
 
 async function assertBranchesModuleForBusiness(businessId) {
   const modules = await getBusinessModules(businessId);
@@ -229,6 +230,28 @@ router.post('/login', [
     invalidateUserAuthCache(user._id);
 
     const token = generateToken(user._id);
+
+    if (user.role === 'SUPER_ADMIN') {
+      const { ip, userAgent, deviceSummary } = clientMetaFromRequest(req);
+      writeAuditLog({
+        actorId: user._id,
+        actorEmail: user.email,
+        actorRole: user.role,
+        action: 'SUPER_ADMIN_LOGIN',
+        severity: 'HIGH',
+        channel: 'APP',
+        method: 'POST',
+        path: req.originalUrl || '/api/auth/login',
+        targetType: 'User',
+        targetId: String(user._id),
+        targetLabel: user.email,
+        success: true,
+        statusCode: 200,
+        ip,
+        userAgent,
+        deviceSummary
+      });
+    }
 
     const userResponse = {
       id: user._id,

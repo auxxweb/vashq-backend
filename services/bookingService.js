@@ -104,7 +104,8 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
   const customer = await findOrCreateCustomer(businessId, {
     name: payload.customerName,
     phone: payload.customerPhone,
-    address: pickupAddress || undefined
+    address: pickupAddress || undefined,
+    email: payload.customerEmail || undefined
   });
 
   let car = null;
@@ -229,7 +230,10 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
       vehicleBrand: payload.vehicleBrand || car?.brand,
       vehicleModel: payload.vehicleModel || car?.model,
       vehicleType: payload.vehicleType || car?.vehicleType,
-      notes: payload.notes || undefined
+      notes: payload.notes || undefined,
+      ...(payload.contactAnswers && Object.keys(payload.contactAnswers).length
+        ? { contactAnswers: payload.contactAnswers }
+        : {})
     });
   } catch (err) {
     if (err?.code === 11000) throw new Error('This time slot was just booked. Please choose another slot.');
@@ -246,7 +250,19 @@ export async function createPublicBooking(businessId, payload) {
   const { ensureDefaultBranchForBusiness } = await import('./branchService.js');
   const defaultBranch = await ensureDefaultBranchForBusiness(businessId);
 
-  const { booking, slot, payloadDate } = await createBookingRecord(businessId, payload, {
+  const bookingSettings = await getBookingSettings(businessId);
+  const { validateBookingContactAnswers } = await import('../utils/bookingContactForm.js');
+  const { mapped, contactAnswers } = validateBookingContactAnswers(
+    bookingSettings.bookingContactFormFields,
+    payload
+  );
+  const mergedPayload = {
+    ...payload,
+    ...mapped,
+    contactAnswers
+  };
+
+  const { booking, slot, payloadDate } = await createBookingRecord(businessId, mergedPayload, {
     status: 'PENDING',
     branchId: defaultBranch?._id || null
   });

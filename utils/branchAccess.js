@@ -3,6 +3,7 @@ import Job from '../models/Job.model.js';
 import { branchFilter } from '../middleware/branchContext.middleware.js';
 import { applyBranchScope, applyBranchScopeOid } from './branchQuery.js';
 import { isAdminPanelRole } from './adminRoles.js';
+import { employeeAssignedMatch, isEmployeeAssignedToJob } from './jobAssignment.js';
 
 /** Merge business + optional branch filter from request context. */
 export function scopedFilter(req, extra = {}) {
@@ -13,7 +14,13 @@ export function scopedFilter(req, extra = {}) {
 export function jobAccessFilter(req, extra = {}) {
   const filter = { ...scopedFilter(req, extra) };
   if (req.user?.role === 'EMPLOYEE') {
-    filter.assignedTo = req.user._id;
+    const empMatch = employeeAssignedMatch(req.user._id);
+    if (filter.$or) {
+      filter.$and = [...(filter.$and || []), { $or: filter.$or }, empMatch];
+      delete filter.$or;
+    } else {
+      Object.assign(filter, empMatch);
+    }
   }
   return filter;
 }
@@ -88,8 +95,10 @@ export async function assertInvoiceCheckoutAccess(req, invoice) {
     err.status = 403;
     throw err;
   }
-  const job = await Job.findOne({ _id: jobId, businessId: req.businessId }).select('assignedTo').lean();
-  if (!job || String(job.assignedTo) !== String(req.user._id)) {
+  const job = await Job.findOne({ _id: jobId, businessId: req.businessId })
+    .select('assignedTo assignedToUsers')
+    .lean();
+  if (!job || !isEmployeeAssignedToJob(job, req.user._id)) {
     const err = new Error('You can only complete checkout on jobs assigned to you');
     err.status = 403;
     throw err;

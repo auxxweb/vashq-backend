@@ -25,6 +25,7 @@ import { ROLES, isBusinessOwner, isBranchAdmin, isAdminPanelRole } from '../util
 import { enforceActiveSubscription } from '../middleware/subscription.middleware.js';
 import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
 import { moduleDisabledResponse } from '../middleware/businessModules.middleware.js';
+import { auditSensitive } from '../middleware/auditLog.middleware.js';
 
 const router = express.Router();
 
@@ -424,7 +425,12 @@ router.put('/:id/logins/:userId', [
 });
 
 // POST /api/admin/branches/:id/logins/:userId/reset-password
-router.post('/:id/logins/:userId/reset-password', async (req, res) => {
+router.post('/:id/logins/:userId/reset-password', auditSensitive('EMPLOYEE_RESET_PASSWORD', {
+  severity: 'CRITICAL',
+  targetType: 'User',
+  targetId: (req) => req.params.userId,
+  meta: (req) => ({ branchId: req.params.id })
+}), async (req, res) => {
   try {
     await loadBranchForBusiness(req.businessId, req.params.id);
     const user = await User.findOne({
