@@ -5,7 +5,7 @@ import PackageVisit from '../models/PackageVisit.model.js';
 import Customer from '../models/Customer.model.js';
 import Car from '../models/Car.model.js';
 import Service from '../models/Service.model.js';
-import Invoice, { generateInvoiceNumber, generateShareToken } from '../models/Invoice.model.js';
+import Invoice, { generateInvoiceNumberForBusiness, generateShareToken } from '../models/Invoice.model.js';
 import User from '../models/User.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
 import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, roundMoney } from '../utils/invoicePayment.js';
@@ -357,10 +357,7 @@ export async function purchasePackage(req, res) {
       status: 'active'
     });
 
-    let invoiceNumber = generateInvoiceNumber();
-    while (await Invoice.findOne({ businessId: req.businessId, invoiceNumber })) {
-      invoiceNumber = generateInvoiceNumber();
-    }
+    let invoiceNumber = await generateInvoiceNumberForBusiness(req.businessId);
 
     const company = await getInvoiceCompanySnapshot(req.businessId);
     const subtotal = roundMoney(template.price);

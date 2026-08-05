@@ -1,5 +1,11 @@
 import mongoose from 'mongoose';
 import crypto from 'crypto';
+import {
+  buildScopeKey,
+  formatSequentialNumber,
+  loadNumberingSettings,
+  nextSequenceValue
+} from '../utils/numbering.utils.js';
 
 const invoiceItemSchema = new mongoose.Schema({
   serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service' },
@@ -93,6 +99,62 @@ export function generateInvoiceNumber() {
   const bytes = crypto.randomBytes(10);
   for (let i = 0; i < 10; i++) s += chars[bytes[i] % chars.length];
   return s;
+}
+
+async function allocateSystemInvoiceNumber(businessId) {
+  let invoiceNumber = generateInvoiceNumber();
+  let attempts = 0;
+  const InvoiceModel = mongoose.models.Invoice || mongoose.model('Invoice', invoiceSchema);
+  while (attempts < 12) {
+    const exists = await InvoiceModel.findOne({ businessId, invoiceNumber }).select('_id').lean();
+    if (!exists) return invoiceNumber;
+    invoiceNumber = generateInvoiceNumber();
+    attempts++;
+  }
+  return `${generateInvoiceNumber()}-${Date.now().toString(36).toUpperCase().slice(-3)}`;
+}
+
+async function allocateCustomInvoiceNumber(businessId, numbering) {
+  const cfg = numbering.invoiceNumberSettings;
+  const timezone = numbering.timezone;
+  const scopeKey = buildScopeKey(cfg.sequenceScope, timezone);
+  let attempts = 0;
+  const InvoiceModel = mongoose.models.Invoice || mongoose.model('Invoice', invoiceSchema);
+
+  while (attempts < 8) {
+    const seq = await nextSequenceValue({
+      businessId,
+      branchId: null,
+      kind: 'INVOICE',
+      scopeKey
+    });
+    const invoiceNumber = formatSequentialNumber(cfg, seq, timezone);
+    const exists = await InvoiceModel.findOne({ businessId, invoiceNumber }).select('_id').lean();
+    if (!exists) return invoiceNumber;
+    attempts++;
+  }
+  throw new Error('Unable to allocate unique custom invoice number');
+}
+
+/**
+ * Business-aware invoice number.
+ * Default: random INV-…. When customInvoiceNumberEnabled: sequential format from settings.
+ */
+export async function generateInvoiceNumberForBusiness(businessId) {
+  if (!businessId) return allocateSystemInvoiceNumber(null);
+  try {
+    const numbering = await loadNumberingSettings(businessId);
+    if (numbering.customInvoiceNumberEnabled) {
+      try {
+        return await allocateCustomInvoiceNumber(businessId, numbering);
+      } catch (err) {
+        console.warn('Custom invoice number failed, falling back to system:', err?.message || err);
+      }
+    }
+  } catch (err) {
+    console.warn('Load invoice number settings failed, using system:', err?.message || err);
+  }
+  return allocateSystemInvoiceNumber(businessId);
 }
 
 export default mongoose.model('Invoice', invoiceSchema);

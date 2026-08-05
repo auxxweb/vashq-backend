@@ -119,6 +119,30 @@ const businessSettingsSchema = new mongoose.Schema({
    * Off by default — single-employee assign remains the default UX.
    */
   multiEmployeeAssignEnabled: { type: Boolean, default: false },
+  /**
+   * When true, new job tokens use sequential custom format (prefix/date/counter).
+   * Off by default — keeps system YYYYMMDD-RANDOM tokens.
+   */
+  customJobTokenEnabled: { type: Boolean, default: false },
+  jobTokenSettings: {
+    prefix: { type: String, default: '', trim: true, maxlength: 10 },
+    datePart: { type: String, enum: ['NONE', 'DDMM', 'YYYYMMDD'], default: 'NONE' },
+    sequenceScope: { type: String, enum: ['DAILY', 'MONTHLY', 'GLOBAL'], default: 'DAILY' },
+    padLength: { type: Number, default: 3, min: 1, max: 6 },
+    separator: { type: String, default: '-', maxlength: 2 }
+  },
+  /**
+   * When true, new invoice numbers use sequential custom format.
+   * Off by default — keeps system random INV-… numbers.
+   */
+  customInvoiceNumberEnabled: { type: Boolean, default: false },
+  invoiceNumberSettings: {
+    prefix: { type: String, default: 'INV', trim: true, maxlength: 10 },
+    datePart: { type: String, enum: ['NONE', 'DDMM', 'YYYYMMDD'], default: 'NONE' },
+    sequenceScope: { type: String, enum: ['DAILY', 'MONTHLY', 'GLOBAL'], default: 'GLOBAL' },
+    padLength: { type: Number, default: 4, min: 1, max: 8 },
+    separator: { type: String, default: '-', maxlength: 2 }
+  },
   // Loyalty program (optional)
   loyaltyPointValueInr: { type: Number, min: 0, default: 0 }, // 1 point = ₹X
   loyaltyMaxRedeemPointsPerJob: { type: Number, min: 0, default: 0 }, // 0 = no redeem allowed

@@ -1,5 +1,11 @@
 import Job from '../models/Job.model.js';
 import Business from '../models/Business.model.js';
+import {
+  buildScopeKey,
+  formatSequentialNumber,
+  loadNumberingSettings,
+  nextSequenceValue
+} from './numbering.utils.js';
 
 /**
  * Generate a random alphanumeric string
@@ -13,40 +19,83 @@ const generateRandomString = (length = 6) => {
   return result;
 };
 
-/**
- * Generate unique random token number for a job
- * Format: YYYYMMDD-RANDOM6 (e.g., 20260208-A3K9M2)
- * 100% random to eliminate duplicate key issues
- */
-export const generateTokenNumber = async (businessId, branchId = null) => {
+/** Legacy / default system token: YYYYMMDD-RANDOM6 (UTC date for backward compatibility). */
+async function generateSystemTokenNumber(businessId, branchId = null) {
   const today = new Date();
   const dateStr = today.toISOString().split('T')[0].replace(/-/g, '');
-  
-  // Generate random token with retry logic for extremely rare collisions
+
   let attempts = 0;
   const maxAttempts = 10;
-  
+
   while (attempts < maxAttempts) {
-    // Generate random 6-character alphanumeric suffix
     const randomSuffix = generateRandomString(6);
     const tokenNumber = `${dateStr}-${randomSuffix}`;
-    
+
     const existsQuery = { businessId, tokenNumber };
     if (branchId) existsQuery.branchId = branchId;
-    const exists = await Job.findOne(existsQuery);
-    
+    const exists = await Job.findOne(existsQuery).select('_id').lean();
+
     if (!exists) {
       return tokenNumber;
     }
-    
-    // If collision (extremely rare), try again
+
     attempts++;
   }
-  
-  // Fallback: use timestamp + random if somehow all attempts failed
+
   const timestamp = Date.now().toString(36).toUpperCase().slice(-4);
   const randomSuffix = generateRandomString(4);
   return `${dateStr}-${timestamp}${randomSuffix}`;
+}
+
+async function generateCustomTokenNumber(businessId, branchId, numbering) {
+  const cfg = numbering.jobTokenSettings;
+  const timezone = numbering.timezone;
+  const scopeKey = buildScopeKey(cfg.sequenceScope, timezone);
+  let attempts = 0;
+  const maxAttempts = 8;
+
+  while (attempts < maxAttempts) {
+    const seq = await nextSequenceValue({
+      businessId,
+      branchId: branchId || null,
+      kind: 'JOB_TOKEN',
+      scopeKey
+    });
+    const tokenNumber = formatSequentialNumber(cfg, seq, timezone);
+    if (!tokenNumber) {
+      attempts++;
+      continue;
+    }
+
+    const existsQuery = { businessId, tokenNumber };
+    if (branchId) existsQuery.branchId = branchId;
+    const exists = await Job.findOne(existsQuery).select('_id').lean();
+    if (!exists) return tokenNumber;
+    attempts++;
+  }
+
+  throw new Error('Unable to allocate unique custom job token');
+}
+
+/**
+ * Generate unique token number for a job.
+ * Default: YYYYMMDD-RANDOM6.
+ * When customJobTokenEnabled: sequential format from BusinessSettings.
+ */
+export const generateTokenNumber = async (businessId, branchId = null) => {
+  try {
+    const numbering = await loadNumberingSettings(businessId);
+    if (numbering.customJobTokenEnabled) {
+      try {
+        return await generateCustomTokenNumber(businessId, branchId, numbering);
+      } catch (err) {
+        console.warn('Custom job token failed, falling back to system token:', err?.message || err);
+      }
+    }
+  } catch (err) {
+    console.warn('Load job token settings failed, using system token:', err?.message || err);
+  }
+  return generateSystemTokenNumber(businessId, branchId);
 };
 
 /**

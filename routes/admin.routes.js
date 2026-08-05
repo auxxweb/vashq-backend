@@ -53,7 +53,7 @@ import {
   normalizeCategoryName,
   resolveServiceCategoryId,
 } from '../utils/serviceCategory.js';
-import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
+import Invoice, { generateShareToken } from '../models/Invoice.model.js';
 import CustomerPackage from '../models/CustomerPackage.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
 import { sendPushNotification } from '../services/notificationService.js';
@@ -5549,6 +5549,10 @@ router.put('/settings', [
   body('crmEnabled').optional().isBoolean(),
   body('internationalPhoneEnabled').optional().isBoolean(),
   body('multiEmployeeAssignEnabled').optional().isBoolean(),
+  body('customJobTokenEnabled').optional().isBoolean(),
+  body('jobTokenSettings').optional().isObject(),
+  body('customInvoiceNumberEnabled').optional().isBoolean(),
+  body('invoiceNumberSettings').optional().isObject(),
   body('loyaltyPointValueInr').optional({ nullable: true }).isFloat({ min: 0 }),
   body('loyaltyMaxRedeemPointsPerJob').optional({ nullable: true }).isInt({ min: 0 })
 ], async (req, res) => {
@@ -5614,6 +5618,20 @@ router.put('/settings', [
     }
     if (req.body.multiEmployeeAssignEnabled !== undefined) {
       updateFields.multiEmployeeAssignEnabled = !!req.body.multiEmployeeAssignEnabled;
+    }
+    if (req.body.customJobTokenEnabled !== undefined) {
+      updateFields.customJobTokenEnabled = !!req.body.customJobTokenEnabled;
+    }
+    if (req.body.jobTokenSettings !== undefined && typeof req.body.jobTokenSettings === 'object') {
+      const { normalizeJobTokenSettings } = await import('../utils/numbering.utils.js');
+      updateFields.jobTokenSettings = normalizeJobTokenSettings(req.body.jobTokenSettings);
+    }
+    if (req.body.customInvoiceNumberEnabled !== undefined) {
+      updateFields.customInvoiceNumberEnabled = !!req.body.customInvoiceNumberEnabled;
+    }
+    if (req.body.invoiceNumberSettings !== undefined && typeof req.body.invoiceNumberSettings === 'object') {
+      const { normalizeInvoiceNumberSettings } = await import('../utils/numbering.utils.js');
+      updateFields.invoiceNumberSettings = normalizeInvoiceNumberSettings(req.body.invoiceNumberSettings);
     }
     if (req.body.loyaltyPointValueInr !== undefined) updateFields.loyaltyPointValueInr = req.body.loyaltyPointValueInr === '' ? 0 : Number(req.body.loyaltyPointValueInr);
     if (req.body.loyaltyMaxRedeemPointsPerJob !== undefined) updateFields.loyaltyMaxRedeemPointsPerJob = req.body.loyaltyMaxRedeemPointsPerJob === '' ? 0 : Number(req.body.loyaltyMaxRedeemPointsPerJob);

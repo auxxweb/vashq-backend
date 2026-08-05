@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import Invoice, { generateShareToken, generateInvoiceNumber } from '../models/Invoice.model.js';
+import Invoice, { generateShareToken, generateInvoiceNumberForBusiness } from '../models/Invoice.model.js';
 import Job from '../models/Job.model.js';
 import Service from '../models/Service.model.js';
 import Customer from '../models/Customer.model.js';
@@ -67,10 +67,7 @@ export async function createInvoiceForJobRecord({
   const existing = await Invoice.findOne({ jobId: job._id });
   if (existing) return existing;
 
-  let invoiceNumber = generateInvoiceNumber();
-  while (await Invoice.findOne({ businessId, invoiceNumber })) {
-    invoiceNumber = generateInvoiceNumber();
-  }
+  let invoiceNumber = await generateInvoiceNumberForBusiness(businessId);
 
   const nameByServiceId = await serviceNameMapForJobLines(businessId, job.services, catalogServices);
   const items = jobLinesToInvoiceItems(job.services || [], nameByServiceId);
