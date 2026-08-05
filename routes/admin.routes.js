@@ -94,6 +94,7 @@ import {
 import {
   assertCustomerPhoneAvailable,
   normalizePhone,
+  phonesEquivalent,
   isDuplicatePhoneError
 } from '../utils/customer.utils.js';
 import creditRoutes from './credit.routes.js';
@@ -189,6 +190,7 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p.startsWith('/upload') ||
       p === '/leaderboard' ||
       p === '/customers' ||
+      p.startsWith('/customers/') ||
       p === '/services' ||
       p === '/settings' ||
       p.startsWith('/packages') ||
@@ -3551,50 +3553,85 @@ router.put('/customers/:id', [
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
     assertBranchAccess(req, existing);
-    const branchId = existing.branchId || req.branchId;
-    if (req.body.phone) {
-      const normalizedPhone = await assertCustomerPhoneAvailable(
-        req.businessId,
-        req.body.phone,
-        req.params.id,
-        branchId
-      );
-      req.body.phone = normalizedPhone;
-      if (!req.body.whatsappNumber) {
-        req.body.whatsappNumber = normalizedPhone;
+    const branchId = existing.branchId || req.branchId || null;
+    const customerId = existing._id;
+
+    // Skip uniqueness when phone is unchanged (including 10-digit ↔ +91 form)
+    if (req.body.phone !== undefined) {
+      const incomingPhone = normalizePhone(req.body.phone);
+      if (!incomingPhone) {
+        return res.status(400).json({ success: false, message: 'Valid phone number is required' });
+      }
+      if (phonesEquivalent(incomingPhone, existing.phone)) {
+        // Keep stored format unless user explicitly sent a different representation they want saved
+        req.body.phone = incomingPhone.startsWith('+') ? incomingPhone : existing.phone;
+      } else {
+        req.body.phone = await assertCustomerPhoneAvailable(
+          req.businessId,
+          incomingPhone,
+          customerId,
+          branchId
+        );
+      }
+      if (req.body.whatsappNumber === undefined || req.body.whatsappNumber === '') {
+        req.body.whatsappNumber = req.body.phone;
       }
     }
-    if (req.body.whatsappNumber) {
-      req.body.whatsappNumber = await assertCustomerPhoneAvailable(
-        req.businessId,
-        req.body.whatsappNumber,
-        req.params.id,
-        branchId
-      );
+
+    if (req.body.whatsappNumber !== undefined && req.body.whatsappNumber !== '') {
+      const wa = normalizePhone(req.body.whatsappNumber);
+      const phoneNorm = normalizePhone(req.body.phone !== undefined ? req.body.phone : existing.phone);
+      if (phonesEquivalent(wa, phoneNorm) || phonesEquivalent(wa, existing.whatsappNumber || existing.phone)) {
+        // Same as phone or unchanged WhatsApp — no second uniqueness check
+        if (phonesEquivalent(wa, existing.whatsappNumber || existing.phone) && !wa.startsWith('+')) {
+          req.body.whatsappNumber = existing.whatsappNumber || existing.phone;
+        } else {
+          req.body.whatsappNumber = wa || phoneNorm;
+        }
+      } else {
+        req.body.whatsappNumber = await assertCustomerPhoneAvailable(
+          req.businessId,
+          wa,
+          customerId,
+          branchId
+        );
+      }
     }
-    const customer = await Customer.findOneAndUpdate(
-      scopedFilter(req, { _id: req.params.id }),
-      req.body,
-      { new: true, runValidators: true }
-    );
+
+    // Load + save so pre-validate has a real document _id (avoids false "already exists")
+    const customer = await Customer.findOne(scopedFilter(req, { _id: customerId }));
     if (!customer) {
       return res.status(404).json({
         success: false,
         message: 'Customer not found'
       });
     }
+    if (req.body.name !== undefined) customer.name = req.body.name;
+    if (req.body.phone !== undefined) customer.phone = req.body.phone;
+    if (req.body.whatsappNumber !== undefined) customer.whatsappNumber = req.body.whatsappNumber;
+    if (req.body.email !== undefined) customer.email = req.body.email;
+    if (req.body.address !== undefined) customer.address = req.body.address;
+    if (req.body.notes !== undefined) customer.notes = req.body.notes;
+    await customer.save();
+
     res.json({
       success: true,
       customer
     });
   } catch (error) {
-    if (isDuplicatePhoneError(error) || /already exists/i.test(error.message)) {
+    if (isDuplicatePhoneError(error) || /already exists/i.test(error.message || '')) {
       return res.status(400).json({ success: false, message: 'Mobile number already exists' });
     }
+    if (error?.name === 'ValidationError') {
+      const msg = Object.values(error.errors || {}).map((e) => e.message).filter(Boolean)[0]
+        || error.message
+        || 'Validation failed';
+      return res.status(400).json({ success: false, message: msg });
+    }
     console.error('Update customer error:', error);
-    res.status(500).json({
+    res.status(error?.status || 500).json({
       success: false,
-      message: 'Server error'
+      message: error?.message || 'Server error'
     });
   }
 });

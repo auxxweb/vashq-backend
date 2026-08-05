@@ -54,7 +54,7 @@ export function defaultBookingContactFormFields() {
       label: 'Mobile number',
       type: 'tel',
       required: true,
-      placeholder: '10-digit mobile number',
+      placeholder: 'Mobile number',
       options: [],
       locked: true,
       section: 'contact'

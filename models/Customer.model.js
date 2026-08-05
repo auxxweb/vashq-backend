@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { normalizePhone, customerPhoneFilter } from '../utils/customer.utils.js';
+import { normalizePhone, phoneMatchVariants } from '../utils/customer.utils.js';
 
 const customerSchema = new mongoose.Schema({
   businessId: {
@@ -66,11 +66,27 @@ customerSchema.pre('validate', async function validateUniquePhone(next) {
       return next(new Error('Phone is required'));
     }
 
-    const filter = customerPhoneFilter(this.businessId, this.phone, this.branchId);
-    if (!this.isNew) filter._id = { $ne: this._id };
+    const variants = phoneMatchVariants(this.phone);
+    const filter = {
+      businessId: this.businessId,
+      $or: [
+        { phone: { $in: variants } },
+        { whatsappNumber: { $in: variants } }
+      ]
+    };
+    if (this.branchId) filter.branchId = this.branchId;
+
+    const selfId = this._id;
+    if (selfId && !this.isNew) {
+      filter._id = { $ne: selfId };
+    }
 
     const duplicate = await this.constructor.findOne(filter).select('_id').lean();
     if (duplicate) {
+      // Never flag the same record as a duplicate (findOneAndUpdate validator edge cases)
+      if (selfId && String(duplicate._id) === String(selfId)) {
+        return next();
+      }
       return next(new Error('Mobile number already exists'));
     }
 
