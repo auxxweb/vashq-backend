@@ -26,7 +26,7 @@ import {
 } from '../utils/crmService.js';
 import { createAdminBooking } from '../services/bookingService.js';
 import { isModuleEnabled } from '../services/businessModulesService.js';
-import { normalizePhone } from '../utils/customer.utils.js';
+import { normalizePhone, applyDefaultCountryCode } from '../utils/customer.utils.js';
 import { parseBusinessDateRange, applyCreatedAtRange } from '../utils/businessDateRange.js';
 
 const router = express.Router();
@@ -546,7 +546,7 @@ router.put('/leads/:id', async (req, res) => {
       }
     }
     if (req.body.phone !== undefined) {
-      const phone = normalizePhone(req.body.phone);
+      const phone = applyDefaultCountryCode(normalizePhone(req.body.phone));
       if (!phone) return res.status(400).json({ success: false, message: 'Invalid phone' });
       lead.phone = phone;
     }
@@ -694,7 +694,7 @@ router.post('/leads/:id/prepare-customer', async (req, res) => {
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     const overrides = req.body || {};
     const name = String(overrides.name || lead.name || '').trim();
-    const phone = normalizePhone(overrides.phone || lead.phone);
+    const phone = applyDefaultCountryCode(normalizePhone(overrides.phone || lead.phone));
     if (!name || !phone) {
       return res.status(400).json({
         success: false,
@@ -778,7 +778,7 @@ router.post('/leads/:id/convert-booking', async (req, res) => {
 
     const overrides = req.body || {};
     const name = String(overrides.name || lead.name || '').trim();
-    const phone = normalizePhone(overrides.phone || lead.phone);
+    const phone = applyDefaultCountryCode(normalizePhone(overrides.phone || lead.phone));
     if (!name || !phone) {
       return res.status(400).json({
         success: false,
@@ -868,7 +868,7 @@ router.post('/leads/:id/convert-job', async (req, res) => {
 
     const overrides = req.body || {};
     const name = String(overrides.name || lead.name || '').trim();
-    const phone = normalizePhone(overrides.phone || lead.phone);
+    const phone = applyDefaultCountryCode(normalizePhone(overrides.phone || lead.phone));
     const plate = String(overrides.vehicleNumber || lead.vehicleNumber || '').trim();
     const missing = [];
     if (!name) missing.push('name');

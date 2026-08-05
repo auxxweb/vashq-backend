@@ -5547,6 +5547,7 @@ router.put('/settings', [
   body('serviceCategoriesEnabled').optional().isBoolean(),
   body('mixedCartEnabled').optional().isBoolean(),
   body('crmEnabled').optional().isBoolean(),
+  body('internationalPhoneEnabled').optional().isBoolean(),
   body('multiEmployeeAssignEnabled').optional().isBoolean(),
   body('loyaltyPointValueInr').optional({ nullable: true }).isFloat({ min: 0 }),
   body('loyaltyMaxRedeemPointsPerJob').optional({ nullable: true }).isInt({ min: 0 })
@@ -5607,6 +5608,9 @@ router.put('/settings', [
     }
     if (req.body.crmEnabled !== undefined) {
       updateFields.crmEnabled = !!req.body.crmEnabled;
+    }
+    if (req.body.internationalPhoneEnabled !== undefined) {
+      updateFields.internationalPhoneEnabled = !!req.body.internationalPhoneEnabled;
     }
     if (req.body.multiEmployeeAssignEnabled !== undefined) {
       updateFields.multiEmployeeAssignEnabled = !!req.body.multiEmployeeAssignEnabled;

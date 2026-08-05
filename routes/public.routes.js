@@ -121,6 +121,7 @@ router.get('/book/:businessId', async (req, res) => {
         bookingAllowedDays: bookingSettingsFull.bookingAllowedDays,
         weeklyOperatingSchedule: bookingSettingsFull.weeklyOperatingSchedule,
         bookingWeeklySchedule: bookingSettingsFull.weeklyOperatingSchedule,
+        internationalPhoneEnabled: bookingSettingsFull.internationalPhoneEnabled === true,
         bookingContactFormFields: bookingSettingsFull.bookingContactFormFields
       }
     });

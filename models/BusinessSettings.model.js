@@ -109,6 +109,11 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   crmEnabled: { type: Boolean, default: false },
   /**
+   * When true, customer phone fields show a country-code selector (international numbers).
+   * Off by default — classic local mobile input remains (server defaults missing codes to +91).
+   */
+  internationalPhoneEnabled: { type: Boolean, default: false },
+  /**
    * When true, Create Job / job edit can assign multiple employees to one job.
    * All assignees see it under My Jobs and can edit / complete checkout.
    * Off by default — single-employee assign remains the default UX.

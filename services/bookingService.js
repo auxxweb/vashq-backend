@@ -20,7 +20,7 @@ import {
   isDateAllowedForBooking
 } from '../utils/booking.utils.js';
 import { applyCreatedAtRange } from '../utils/businessDateRange.js';
-import { findOrCreateCustomer, normalizePhone } from '../utils/customer.utils.js';
+import { findOrCreateCustomer, normalizePhone, applyDefaultCountryCode } from '../utils/customer.utils.js';
 import { assertJobImageCount, normalizeJobImageUrls, resolveJobImageLimits } from '../utils/jobImages.js';
 
 async function findOrCreateCar(businessId, customerId, vehicle) {
@@ -93,7 +93,7 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
       car,
       pickupAddress,
       customerName: String(payload.customerName || customer.name).trim(),
-      customerPhone: normalizePhone(payload.customerPhone || customer.phone)
+      customerPhone: applyDefaultCountryCode(normalizePhone(payload.customerPhone || customer.phone))
     };
   }
 
@@ -118,7 +118,7 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
     car,
     pickupAddress,
     customerName: String(payload.customerName).trim(),
-    customerPhone: normalizePhone(payload.customerPhone)
+    customerPhone: applyDefaultCountryCode(normalizePhone(payload.customerPhone))
   };
 }
 

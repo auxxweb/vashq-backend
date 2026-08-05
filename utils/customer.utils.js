@@ -5,6 +5,28 @@ export function normalizePhone(phone) {
   return String(phone || '').trim().replace(/[^\d+]/g, '');
 }
 
+export const DEFAULT_STORAGE_DIAL_CODE = '+91';
+
+/**
+ * If the number has no country code, prefix default dial (+91).
+ * Numbers that already start with + are left as-is.
+ */
+export function applyDefaultCountryCode(phone, defaultDial = DEFAULT_STORAGE_DIAL_CODE) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return normalized;
+  if (normalized.startsWith('+')) return normalized;
+
+  let digits = normalized.replace(/\D/g, '');
+  if (!digits) return normalized;
+  if (digits.startsWith('0')) digits = digits.replace(/^0+/, '');
+
+  const dial = String(defaultDial || DEFAULT_STORAGE_DIAL_CODE).replace(/\D/g, '') || '91';
+  if (digits.startsWith(dial) && digits.length > dial.length + 5) {
+    return `+${digits}`;
+  }
+  return `+${dial}${digits}`;
+}
+
 /** Digits only (no +). */
 export function phoneDigits(phone) {
   return normalizePhone(phone).replace(/\D/g, '');
@@ -95,7 +117,7 @@ export function customerPhoneFilter(businessId, normalizedPhone, branchId = null
 }
 
 export async function findCustomerByPhone(businessId, phone, branchId = null) {
-  const normalized = normalizePhone(phone);
+  const normalized = applyDefaultCountryCode(normalizePhone(phone));
   if (!normalized) return null;
   return Customer.findOne(customerPhoneFilter(businessId, normalized, branchId));
 }
@@ -105,7 +127,7 @@ export async function findCustomerByPhone(businessId, phone, branchId = null) {
  * @throws Error with status 400 when duplicate exists
  */
 export async function assertCustomerPhoneAvailable(businessId, phone, excludeCustomerId = null, branchId = null) {
-  const normalized = normalizePhone(phone);
+  const normalized = applyDefaultCountryCode(normalizePhone(phone));
   if (!normalized) {
     const err = new Error('Valid phone number is required');
     err.status = 400;
@@ -137,7 +159,7 @@ export async function assertCustomerPhoneAvailable(businessId, phone, excludeCus
  * Find existing customer by mobile for this business+branch, or create one.
  */
 export async function findOrCreateCustomer(businessId, { name, phone, address, email, notes, branchId = null }) {
-  const normalized = normalizePhone(phone);
+  const normalized = applyDefaultCountryCode(normalizePhone(phone));
   if (!normalized) throw new Error('Valid phone number is required');
 
   let customer = await findCustomerByPhone(businessId, normalized, branchId);

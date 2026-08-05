@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { normalizePhone, phoneMatchVariants } from '../utils/customer.utils.js';
+import { normalizePhone, phoneMatchVariants, applyDefaultCountryCode } from '../utils/customer.utils.js';
 
 const customerSchema = new mongoose.Schema({
   businessId: {
@@ -54,10 +54,10 @@ customerSchema.pre('validate', async function validateUniquePhone(next) {
     if (!phoneTouched) return next();
 
     if (this.phone) {
-      this.phone = normalizePhone(this.phone);
+      this.phone = applyDefaultCountryCode(normalizePhone(this.phone));
     }
     if (this.whatsappNumber) {
-      this.whatsappNumber = normalizePhone(this.whatsappNumber);
+      this.whatsappNumber = applyDefaultCountryCode(normalizePhone(this.whatsappNumber));
     } else if (this.phone) {
       this.whatsappNumber = this.phone;
     }

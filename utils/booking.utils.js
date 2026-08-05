@@ -53,6 +53,7 @@ export async function getBookingSettings(businessId) {
     timezone: settings?.timezone || 'Asia/Kolkata',
     currency: settings?.currency || 'INR',
     workingHours,
+    internationalPhoneEnabled: settings?.internationalPhoneEnabled === true,
     bookingContactFormFields: normalizeBookingContactFormFields(settings?.bookingContactFormFields)
   };
 }

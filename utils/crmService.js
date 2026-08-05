@@ -3,7 +3,7 @@ import LeadStatus from '../models/LeadStatus.model.js';
 import LeadSource from '../models/LeadSource.model.js';
 import Customer from '../models/Customer.model.js';
 import Car from '../models/Car.model.js';
-import { normalizePhone } from './customer.utils.js';
+import { normalizePhone, applyDefaultCountryCode, findCustomerByPhone } from './customer.utils.js';
 import {
   ensureCrmDefaults,
   getAllowedStatusTransitions,
@@ -120,7 +120,7 @@ export async function createLeadRecord({
 }) {
   await ensureCrmDefaults(businessId);
   const name = String(body.name || '').trim();
-  const phone = normalizePhone(body.phone);
+  const phone = applyDefaultCountryCode(normalizePhone(body.phone));
   if (!name) {
     const err = new Error('Customer name is required');
     err.status = 400;
@@ -276,7 +276,7 @@ export async function changeLeadStatus({
  */
 export async function ensureCustomerAndCarFromLead(lead, businessId, branchId, overrides = {}) {
   const name = String(overrides.name || lead.name || '').trim();
-  const phone = normalizePhone(overrides.phone || lead.phone);
+  const phone = applyDefaultCountryCode(normalizePhone(overrides.phone || lead.phone));
   if (!name || !phone) {
     const err = new Error('Customer name and phone are required');
     err.status = 400;
@@ -288,7 +288,7 @@ export async function ensureCustomerAndCarFromLead(lead, businessId, branchId, o
     : null;
 
   if (!customer) {
-    customer = await Customer.findOne({ businessId, phone, ...(branchId ? { branchId } : {}) });
+    customer = await findCustomerByPhone(businessId, phone, branchId || null);
   }
   if (!customer) {
     customer = await Customer.create({
