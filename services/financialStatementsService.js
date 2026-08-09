@@ -8,6 +8,7 @@ import BusinessSettings from '../models/BusinessSettings.model.js';
 import PlatformSettings from '../models/PlatformSettings.model.js';
 import { sumExpenseChannelTotals } from '../utils/expensePayment.js';
 import { roundMoney } from '../utils/invoicePayment.js';
+import { resolveInvoiceDiscount } from '../utils/invoiceDiscount.js';
 import { invoiceSettlementCashOnline, creditCheckoutCashOnline } from '../utils/paymentChannelAmounts.js';
 import { parseAiInsightsDateRange } from '../utils/aiInsightsDateRange.js';
 import { buildCollectionReport, getTodayCashReceived } from './credit/creditReportsService.js';
@@ -110,9 +111,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
     }
 
     totalGst += roundMoney(Number(inv.gstAmount) || 0);
-    const sub = roundMoney(Number(inv.subtotal) || 0);
-    const pct = Number(inv.discount) || 0;
-    totalDiscount += roundMoney(sub * (pct / 100));
+    totalDiscount += resolveInvoiceDiscount(inv).amount;
   }
 
   jobSales = roundMoney(jobSales);
@@ -419,10 +418,12 @@ export async function buildProfitLossStatement(businessId, range, from, to) {
       creditRecovery: data.creditRecovery,
       creditOutstanding: data.debtors,
       totalExpenses: data.totalExpenses,
+      gstCollected: data.totalGst,
+      discountsGiven: data.totalDiscount,
       grossProfit,
       netProfit
     },
-    disclaimer: 'Car wash service business — no opening/closing stock. Sales include paid jobs, packages, and pay-later (credit) invoices. Credit recovery shows amount-due collections in the period.'
+    disclaimer: 'Car wash service business — no opening/closing stock. Sales use invoice totals (GST-inclusive when GST is enabled). Credit recovery shows amount-due collections in the period.'
   };
 }
 

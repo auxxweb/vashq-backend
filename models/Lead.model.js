@@ -12,7 +12,8 @@ const leadActivitySchema = new mongoose.Schema({
       'CONVERTED_BOOKING',
       'CONVERTED_JOB',
       'UPDATED',
-      'IMPORTED'
+      'IMPORTED',
+      'ASSIGNED'
     ],
     required: true
   },

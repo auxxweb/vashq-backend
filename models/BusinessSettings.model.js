@@ -99,15 +99,36 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   serviceCategoriesEnabled: { type: Boolean, default: false },
   /**
+   * When true (and service categories are on), each category can have subcategories.
+   * Services can be tagged with a subcategory; booking/job UIs filter category → subcategory → services.
+   */
+  serviceSubcategoriesEnabled: { type: Boolean, default: false },
+  /**
    * When true, Create Job allows mixing wash services, variable visits, and products in one cart.
    * Off by default — classic Job / Variable Service tabs remain.
    */
   mixedCartEnabled: { type: Boolean, default: false },
   /**
+   * When true, invoice checkout can enter discount as a fixed amount (₹) or percent (%).
+   * Off by default — percent-only discount remains (existing invoices unchanged).
+   */
+  invoiceDiscountAmountEnabled: { type: Boolean, default: false },
+  /**
+   * When true, marking a job COMPLETED creates a draft invoice that can be viewed,
+   * shared, and printed with payment pending. Mark Delivered / close-job flow unchanged.
+   * Off by default — invoices still create only after Mark Delivered.
+   */
+  invoiceOnCompletedEnabled: { type: Boolean, default: false },
+  /**
    * When true, CRM / Leads menu and APIs are available for this business.
    * Off by default — existing workflows unchanged.
    */
   crmEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Attendance (punch in/out, breaks, calendar, correction requests) is available.
+   * Off by default — existing workflows unchanged.
+   */
+  attendanceEnabled: { type: Boolean, default: false },
   /**
    * When true, customer phone fields show a country-code selector (international numbers).
    * Off by default — classic local mobile input remains (server defaults missing codes to +91).
@@ -119,6 +140,12 @@ const businessSettingsSchema = new mongoose.Schema({
    * Off by default — single-employee assign remains the default UX.
    */
   multiEmployeeAssignEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Create Job can assign one or more job-level employees to each selected service
+   * (subset of the job's assignees) so work can be attributed per service.
+   * Off by default.
+   */
+  perServiceEmployeeAssignEnabled: { type: Boolean, default: false },
   /**
    * When true, new job tokens use sequential custom format (prefix/date/counter).
    * Off by default — keeps system YYYYMMDD-RANDOM tokens.

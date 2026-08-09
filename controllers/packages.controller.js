@@ -13,6 +13,7 @@ import { isCreditSettlementMode, closePackageOnCredit } from '../services/credit
 import { getBusinessModules, isModuleEnabled } from '../services/businessModulesService.js';
 import { moduleDisabledResponse } from '../middleware/businessModules.middleware.js';
 import { getInvoiceCompanySnapshot } from '../utils/invoiceCompany.js';
+import { buildGstFieldsForNewInvoice } from '../utils/invoiceGst.js';
 import { applyBranchScope } from '../utils/branchQuery.js';
 import { assertBranchAccess, findScoped, branchIdForCreate } from '../utils/branchAccess.js';
 import { invalidateDashboardForBusiness } from '../utils/dashboardFinancialSync.js';
@@ -289,9 +290,21 @@ export async function softDeleteTemplate(req, res) {
     if (!template) {
       return res.status(404).json({ success: false, message: 'Template not found' });
     }
+
+    // Already disabled → permanently remove template (sold customer packages keep their snapshot)
+    if (template.isActive === false) {
+      await PackageTemplate.deleteOne({ _id: template._id, businessId: req.businessId });
+      return res.json({
+        success: true,
+        deleted: true,
+        id: String(template._id),
+        message: 'Template deleted'
+      });
+    }
+
     template.isActive = false;
     await template.save();
-    res.json({ success: true, data: template, message: 'Template disabled' });
+    res.json({ success: true, data: template, deleted: false, message: 'Template disabled' });
   } catch (error) {
     console.error('Disable package template error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -361,6 +374,10 @@ export async function purchasePackage(req, res) {
 
     const company = await getInvoiceCompanySnapshot(req.businessId);
     const subtotal = roundMoney(template.price);
+    const gstFields = await buildGstFieldsForNewInvoice(req.businessId, {
+      companyGst: company?.gstNumber,
+      subtotal
+    });
     const invoice = await Invoice.create({
       saleType: 'PACKAGE',
       packageId: customerPackage._id,
@@ -372,15 +389,19 @@ export async function purchasePackage(req, res) {
       companyOwnerName: company?.ownerName || null,
       companyAddress: company?.address || null,
       companyPhone: company?.phone || null,
-      companyGst: company?.gstNumber || null,
+      companyGst: gstFields.companyGst,
       customerId: customer._id,
       customerName: customer.name ?? '',
       customerPhone: customer.phone || customer.whatsappNumber || '',
       vehicleNumber: car?.carNumber ?? '',
       items: [{ serviceName: template.name, servicePrice: subtotal }],
       discount: 0,
+      discountType: 'PERCENT',
+      discountAmount: 0,
       subtotal,
-      finalAmount: subtotal,
+      taxPercentage: gstFields.taxPercentage,
+      gstAmount: gstFields.gstAmount,
+      finalAmount: gstFields.finalAmount,
       advancePayment: 0,
       paymentMethod: 'ONLINE',
       paymentCashAmount: 0,
@@ -584,6 +605,16 @@ export async function closePackageSale(req, res) {
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message || 'Credit close failed' });
       }
+    }
+
+    try {
+      const { ensureInvoiceGstSettings, applyComputedGstAmount } = await import('../utils/invoiceGst.js');
+      const { recalculateInvoiceFinalAmount } = await import('../utils/jobServiceLines.js');
+      await ensureInvoiceGstSettings(invoice, req.businessId);
+      applyComputedGstAmount(invoice);
+      recalculateInvoiceFinalAmount(invoice);
+    } catch (_) {
+      /* keep existing totals if settings lookup fails */
     }
 
     const due = balanceDue(invoice.finalAmount, invoice.advancePayment);

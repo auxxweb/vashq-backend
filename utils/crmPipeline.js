@@ -61,7 +61,14 @@ const DEFAULT_SOURCES = [
   'Other'
 ];
 
+const crmDefaultsReady = new Set();
+
 export async function ensureCrmDefaults(businessId) {
+  const key = String(businessId || '');
+  if (key && crmDefaultsReady.has(key)) {
+    return {};
+  }
+
   const existingStatuses = await LeadStatus.countDocuments({ businessId });
   if (existingStatuses === 0) {
     await LeadStatus.insertMany(
@@ -98,6 +105,7 @@ export async function ensureCrmDefaults(businessId) {
     sortOrder: { $gt: 0 }
   }).sort({ sortOrder: 1 }).lean();
 
+  if (key) crmDefaultsReady.add(key);
   return { defaultStatus };
 }
 

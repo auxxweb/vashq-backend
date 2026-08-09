@@ -47,12 +47,22 @@ import BranchCreationRequest from '../models/BranchCreationRequest.model.js';
 import ExpenseType from '../models/ExpenseType.model.js';
 import Expense from '../models/Expense.model.js';
 import ServiceCategory from '../models/ServiceCategory.model.js';
+import ServiceSubCategory from '../models/ServiceSubCategory.model.js';
 import {
   ensureDefaultServiceCategory,
   listServiceCategories,
   normalizeCategoryName,
   resolveServiceCategoryId,
 } from '../utils/serviceCategory.js';
+import {
+  assertParentCategory,
+  deleteSubCategoriesForCategory,
+  ensureDefaultServiceSubCategory,
+  ensureDefaultSubCategoriesForBusiness,
+  listServiceSubCategories,
+  normalizeSubCategoryName,
+  resolveServiceSubCategoryId,
+} from '../utils/serviceSubCategory.js';
 import Invoice, { generateShareToken } from '../models/Invoice.model.js';
 import CustomerPackage from '../models/CustomerPackage.model.js';
 import PackageVisit from '../models/PackageVisit.model.js';
@@ -61,6 +71,7 @@ import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
 import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
 import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, relabelLockedInvoicePaymentMethod, roundMoney } from '../utils/invoicePayment.js';
 import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
+import { resolveInvoiceDiscount } from '../utils/invoiceDiscount.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
 import {
@@ -119,8 +130,8 @@ import { ensureDefaultBranchForBusiness, getBranchOverviewStats, getBranchUsageS
 import { getBranchPlatformConfig } from '../utils/branchConfig.js';
 import { applyBranchScopeOid, applyBranchScope } from '../utils/branchQuery.js';
 import { scopedFilter, assertBranchAccess, assertInvoiceCheckoutAccess, findScoped, branchIdForCreate, jobAccessFilter } from '../utils/branchAccess.js';
-import { resolveJobAssignees, applyEmployeeJobScope, toIdString } from '../utils/jobAssignment.js';
-import { isAdminPanelRole, isBranchAdmin, isBusinessOwner } from '../utils/adminRoles.js';
+import { resolveJobAssignees, attachServiceLineAssignees, applyEmployeeJobScope, toIdString } from '../utils/jobAssignment.js';
+import { isAdminPanelRole, isBranchAdmin, isBusinessOwner, isSalesEmployee } from '../utils/adminRoles.js';
 import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
 import { generateEmployeeCode } from '../utils/employeeAccount.js';
 import { enforceActiveSubscription } from '../middleware/subscription.middleware.js';
@@ -178,13 +189,18 @@ router.post('/push/fcm-token', [
 });
 
 // Allow CAR_WASH_ADMIN for all; EMPLOYEE for dashboard, jobs, upload, leaderboard, and job-creation data (customers, services, cars, settings)
+// Sales employees also pass through /crm and /bookings so the dedicated routers can handle them.
 const allowAdminOrEmployeeForJobs = (req, res, next) => {
   if (req.user.role === 'EMPLOYEE') {
     const p = req.path;
     if (p === '/business' && req.method === 'GET') {
       return next();
     }
+    const salesCrmOrBookings =
+      isSalesEmployee(req.user) &&
+      (p === '/crm' || p.startsWith('/crm/') || p === '/bookings' || p.startsWith('/bookings/'));
     const allowed =
+      salesCrmOrBookings ||
       p === '/dashboard' || p.startsWith('/dashboard/') ||
       p.startsWith('/jobs') ||
       p.startsWith('/upload') ||
@@ -201,6 +217,8 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p === '/expense-types' ||
       p === '/service-categories' ||
       p.startsWith('/service-categories/') ||
+      p === '/service-subcategories' ||
+      p.startsWith('/service-subcategories/') ||
       p === '/my-subscription' ||
       p === '/bootstrap' ||
       p === '/available-plans' ||
@@ -610,6 +628,12 @@ router.post('/service-categories', adminPanelOnly, [
       isActive: true,
       sortOrder: 100,
     });
+    const settingsForSub = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceSubcategoriesEnabled')
+      .lean();
+    if (settingsForSub?.serviceSubcategoriesEnabled) {
+      await ensureDefaultServiceSubCategory(req.businessId, category._id);
+    }
     res.status(201).json({ success: true, category });
   } catch (error) {
     console.error('Create service category error:', error);
@@ -672,14 +696,185 @@ router.delete('/service-categories/:id', adminPanelOnly, async (req, res) => {
       });
     }
     const def = await ensureDefaultServiceCategory(req.businessId);
+    const settingsForSub = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceSubcategoriesEnabled')
+      .lean();
+    let defSubId = null;
+    if (settingsForSub?.serviceSubcategoriesEnabled) {
+      const defSub = await ensureDefaultServiceSubCategory(req.businessId, def._id);
+      defSubId = defSub._id;
+    }
     await Service.updateMany(
       { businessId: req.businessId, categoryId: category._id },
-      { $set: { categoryId: def._id } }
+      { $set: { categoryId: def._id, subCategoryId: defSubId } }
     );
+    await deleteSubCategoriesForCategory(req.businessId, category._id);
     await ServiceCategory.deleteOne({ _id: category._id });
-    res.json({ success: true, message: 'Category deleted. Services were moved to Default.' });
+    res.json({
+      success: true,
+      message: settingsForSub?.serviceSubcategoriesEnabled
+        ? 'Category deleted. Services were moved to Default category / Default subcategory.'
+        : 'Category deleted. Services were moved to Default.'
+    });
   } catch (error) {
     console.error('Delete service category error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== SERVICE SUBCATEGORIES (optional feature) ====================
+
+router.get('/service-subcategories', async (req, res) => {
+  try {
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled serviceSubcategoriesEnabled')
+      .lean();
+    const categoriesOn = !!settings?.serviceCategoriesEnabled;
+    const enabled = categoriesOn && !!settings?.serviceSubcategoriesEnabled;
+    const subcategories = enabled
+      ? await listServiceSubCategories(req.businessId, {
+          categoryId: req.query.categoryId,
+          ensureDefault: true
+        })
+      : [];
+    res.json({
+      success: true,
+      serviceSubcategoriesEnabled: enabled,
+      subcategories,
+    });
+  } catch (error) {
+    console.error('List service subcategories error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.post('/service-subcategories', adminPanelOnly, [
+  body('name').notEmpty().trim(),
+  body('categoryId').notEmpty()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('serviceCategoriesEnabled serviceSubcategoriesEnabled')
+      .lean();
+    if (!settings?.serviceCategoriesEnabled || !settings?.serviceSubcategoriesEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'Enable service categories and subcategories in Settings first',
+      });
+    }
+    try {
+      await assertParentCategory(req.businessId, req.body.categoryId);
+    } catch (e) {
+      return res.status(e.status || 400).json({ success: false, message: e.message });
+    }
+    await ensureDefaultServiceSubCategory(req.businessId, req.body.categoryId);
+    const name = normalizeSubCategoryName(req.body.name);
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Enter a subcategory name' });
+    }
+    if (/^default$/i.test(name)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Default subcategory already exists for this category',
+      });
+    }
+    const exists = await ServiceSubCategory.findOne({
+      businessId: req.businessId,
+      categoryId: req.body.categoryId,
+      name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    }).lean();
+    if (exists) {
+      return res.status(400).json({ success: false, message: 'A subcategory with this name already exists under this category' });
+    }
+    const subcategory = await ServiceSubCategory.create({
+      businessId: req.businessId,
+      categoryId: req.body.categoryId,
+      name,
+      isDefault: false,
+      isActive: true,
+      sortOrder: 100,
+    });
+    res.status(201).json({ success: true, subcategory });
+  } catch (error) {
+    console.error('Create service subcategory error:', error);
+    if (error?.code === 11000) {
+      return res.status(400).json({ success: false, message: 'A subcategory with this name already exists under this category' });
+    }
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.put('/service-subcategories/:id', adminPanelOnly, [
+  body('name').optional().notEmpty().trim(),
+  body('isActive').optional().isBoolean()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    const subcategory = await ServiceSubCategory.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!subcategory) {
+      return res.status(404).json({ success: false, message: 'Subcategory not found' });
+    }
+    if (req.body.name != null) {
+      const name = normalizeSubCategoryName(req.body.name);
+      if (!name) {
+        return res.status(400).json({ success: false, message: 'Enter a subcategory name' });
+      }
+      if (subcategory.isDefault && !/^default$/i.test(name)) {
+        return res.status(400).json({
+          success: false,
+          message: 'The Default subcategory name cannot be changed',
+        });
+      }
+      const clash = await ServiceSubCategory.findOne({
+        businessId: req.businessId,
+        categoryId: subcategory.categoryId,
+        _id: { $ne: subcategory._id },
+        name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+      }).lean();
+      if (clash) {
+        return res.status(400).json({ success: false, message: 'A subcategory with this name already exists under this category' });
+      }
+      subcategory.name = name;
+    }
+    if (req.body.isActive !== undefined && !subcategory.isDefault) {
+      subcategory.isActive = !!req.body.isActive;
+    }
+    await subcategory.save();
+    res.json({ success: true, subcategory });
+  } catch (error) {
+    console.error('Update service subcategory error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.delete('/service-subcategories/:id', adminPanelOnly, async (req, res) => {
+  try {
+    const subcategory = await ServiceSubCategory.findOne({ _id: req.params.id, businessId: req.businessId });
+    if (!subcategory) {
+      return res.status(404).json({ success: false, message: 'Subcategory not found' });
+    }
+    if (subcategory.isDefault) {
+      return res.status(400).json({
+        success: false,
+        message: 'The Default subcategory cannot be deleted',
+      });
+    }
+    const defSub = await ensureDefaultServiceSubCategory(req.businessId, subcategory.categoryId);
+    await Service.updateMany(
+      { businessId: req.businessId, subCategoryId: subcategory._id },
+      { $set: { subCategoryId: defSub._id } }
+    );
+    await ServiceSubCategory.deleteOne({ _id: subcategory._id });
+    res.json({ success: true, message: 'Subcategory deleted. Services were moved to Default.' });
+  } catch (error) {
+    console.error('Delete service subcategory error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -1267,6 +1462,8 @@ router.put('/invoices/:id', [
   body('customerGst').optional().trim(),
   body('vehicleNumber').optional().trim(),
   body('discount').optional().isFloat({ min: 0 }),
+  body('discountType').optional().isIn(['PERCENT', 'AMOUNT']),
+  body('discountAmount').optional().isFloat({ min: 0 }),
   body('finalAmount').optional().isFloat({ min: 0 }),
   body('taxPercentage').optional().isFloat({ min: 0, max: 100 }),
   body('gstAmount').optional().isFloat({ min: 0 }),
@@ -1480,24 +1677,36 @@ router.get('/invoices/:id/share-url', async (req, res) => {
     if (!invoice) {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-    if (invoice.paymentStatus !== 'RECEIVED') {
+
+    let job = null;
+    if (invoice.jobId) {
+      job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId }).select('status').lean();
+      if (!job) {
+        return res.status(400).json({ success: false, message: 'Job not found for this invoice' });
+      }
+    }
+
+    // Existing rule: paid + closed (DELIVERED) job, or paid package invoice (no job).
+    const paidAndClosed =
+      invoice.paymentStatus === 'RECEIVED' &&
+      (!invoice.jobId || job?.status === 'DELIVERED');
+
+    // Optional early invoice: share while job is COMPLETED (payment may still be pending).
+    let earlyCompletedShare = false;
+    if (!paidAndClosed && job?.status === 'COMPLETED') {
+      const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('invoiceOnCompletedEnabled')
+        .lean();
+      earlyCompletedShare = !!settings?.invoiceOnCompletedEnabled;
+    }
+
+    if (!paidAndClosed && !earlyCompletedShare) {
       return res.status(400).json({
         success: false,
         message: 'Invoice can be shared only after payment is received and the job is closed'
       });
     }
-    if (invoice.jobId) {
-      const job = await Job.findOne({ _id: invoice.jobId, businessId: req.businessId }).select('status').lean();
-      if (!job) {
-        return res.status(400).json({ success: false, message: 'Job not found for this invoice' });
-      }
-      if (job.status !== 'DELIVERED') {
-        return res.status(400).json({
-          success: false,
-          message: 'Invoice can be shared only after payment is received and the job is closed'
-        });
-      }
-    }
+
     if (!invoice.shareToken) {
       invoice.shareToken = generateShareToken();
       await invoice.save();
@@ -1505,7 +1714,8 @@ router.get('/invoices/:id/share-url', async (req, res) => {
     res.json({
       success: true,
       shareToken: invoice.shareToken,
-      invoiceId: String(invoice._id)
+      invoiceId: String(invoice._id),
+      paymentPending: invoice.paymentStatus !== 'RECEIVED'
     });
   } catch (error) {
     console.error('Share URL error:', error);
@@ -1568,6 +1778,16 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
       } catch (e) {
         return res.status(e.status || 400).json({ success: false, message: e.message || 'Credit close failed' });
       }
+    }
+
+    // Align GST totals with settings before validating settlement (with or without GST)
+    try {
+      const { ensureInvoiceGstSettings, applyComputedGstAmount } = await import('../utils/invoiceGst.js');
+      await ensureInvoiceGstSettings(invoice, req.businessId);
+      applyComputedGstAmount(invoice);
+      recalculateInvoiceFinalAmount(invoice);
+    } catch (_) {
+      /* keep existing totals if settings lookup fails */
     }
 
     const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
@@ -1755,12 +1975,40 @@ router.get('/reports/jobs', adminPanelOnly, async (req, res) => {
       .populate({ path: 'services.serviceId', model: 'Service', select: 'name' })
       .sort({ createdAt: -1 })
       .lean();
+
+    // Prefer invoice.finalAmount (GST-inclusive when GST is on) over job.totalPrice
+    const jobIds = jobs.map((j) => j._id);
+    const jobInvoices = jobIds.length
+      ? await Invoice.find(applyBranchScope({
+        businessId: req.businessId,
+        jobId: { $in: jobIds }
+      }, req)).select('jobId finalAmount gstAmount subtotal').lean()
+      : [];
+    const invoiceByJobId = new Map(
+      jobInvoices.map((inv) => [String(inv.jobId), inv])
+    );
+    const data = jobs.map((j) => {
+      const inv = invoiceByJobId.get(String(j._id));
+      const billedAmount = inv
+        ? roundMoney(Number(inv.finalAmount) || 0)
+        : roundMoney(Number(j.totalPrice) || 0);
+      return {
+        ...j,
+        billedAmount,
+        gstAmount: inv ? roundMoney(Number(inv.gstAmount) || 0) : 0,
+        invoiceSubtotal: inv ? roundMoney(Number(inv.subtotal) || 0) : roundMoney(Number(j.totalPrice) || 0)
+      };
+    });
+
+    const closedStatuses = new Set(['COMPLETED', 'DELIVERED']);
+    const closed = data.filter((j) => closedStatuses.has(j.status));
     const summary = {
-      totalJobs: jobs.length,
-      totalRevenue: jobs.filter(j => ['COMPLETED', 'DELIVERED'].includes(j.status)).reduce((s, j) => s + (j.totalPrice || 0), 0),
-      byStatus: jobs.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {})
+      totalJobs: data.length,
+      totalRevenue: roundMoney(closed.reduce((s, j) => s + (Number(j.billedAmount) || 0), 0)),
+      totalGst: roundMoney(closed.reduce((s, j) => s + (Number(j.gstAmount) || 0), 0)),
+      byStatus: data.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {})
     };
-    res.json({ success: true, data: jobs, summary, start, end });
+    res.json({ success: true, data, summary, start, end });
   } catch (error) {
     console.error('Reports jobs error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -1980,12 +2228,12 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
         else totalUpiReceived += ch.online;
       }
     }
-    const totalDiscountAmount = invoices.reduce((s, inv) => {
-      const sub = inv.subtotal || 0;
-      const pct = inv.discount || 0;
-      return s + (sub * (pct / 100));
-    }, 0);
-    const totalGst = invoices.reduce((s, inv) => s + (inv.gstAmount || 0), 0);
+    const totalDiscountAmount = roundMoney(
+      data.reduce((s, inv) => s + resolveInvoiceDiscount(inv).amount, 0)
+    );
+    const totalGst = roundMoney(
+      data.reduce((s, inv) => s + (Number(inv.gstAmount) || 0), 0)
+    );
 
     const paymentAtDeliveryCash = Math.round(totalCashReceived * 100) / 100;
     const paymentAtDeliveryOnline = Math.round(totalOnlineReceived * 100) / 100;
@@ -2690,11 +2938,17 @@ router.get('/employees', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied.' });
     }
     const employees = await User.find(employeeListQuery(req))
-      .select('name email phone address employeeCode status branchId createdAt')
+      .select('name email phone address employeeCode employeeType status branchId createdAt')
       .populate('branchId', 'name code')
       .sort({ employeeCode: 1 })
       .lean();
-    res.json({ success: true, employees });
+    res.json({
+      success: true,
+      employees: employees.map((e) => ({
+        ...e,
+        employeeType: e.employeeType === 'SALES' ? 'SALES' : 'DEFAULT'
+      }))
+    });
   } catch (error) {
     console.error('Get employees error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -2710,7 +2964,8 @@ router.post('/employees', [
   body('password').optional().isLength({ min: 6 }),
   body('phone').optional().trim(),
   body('address').optional().trim(),
-  body('branchId').optional().isMongoId()
+  body('branchId').optional().isMongoId(),
+  body('employeeType').optional().isIn(['DEFAULT', 'SALES'])
 ], async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
@@ -2721,6 +2976,7 @@ router.post('/employees', [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
     const { name, email, phone, address } = req.body;
+    const employeeType = req.body.employeeType === 'SALES' ? 'SALES' : 'DEFAULT';
     let password = req.body.password;
     if (!password) password = randomPassword(10);
 
@@ -2752,7 +3008,8 @@ router.post('/employees', [
           branchId: branchId || undefined,
           phone: phone || '',
           address: address || '',
-          employeeCode
+          employeeCode,
+          employeeType
         });
         break;
       } catch (err) {
@@ -2776,6 +3033,7 @@ router.post('/employees', [
         phone: user.phone,
         address: user.address,
         employeeCode: user.employeeCode,
+        employeeType: user.employeeType || 'DEFAULT',
         status: user.status,
         branchId: user.branchId || null
       },
@@ -2895,6 +3153,100 @@ router.get('/employees/:id', async (req, res) => {
   }
 });
 
+// @route   GET /api/admin/employees/:id/service-work
+// @desc    Services this employee performed (per-service assignment) in a date range
+// @access  Private (Car Wash Admin)
+router.get('/employees/:id/service-work', async (req, res) => {
+  try {
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const user = await findManagedEmployee(req, req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    const employeeId = user._id;
+    const empIdStr = String(employeeId);
+
+    const now = new Date();
+    let from = req.query.from ? new Date(req.query.from) : null;
+    let to = req.query.to ? new Date(req.query.to) : null;
+    if (!from || Number.isNaN(from.getTime())) {
+      from = new Date(now.getFullYear(), now.getMonth(), 1);
+      from.setHours(0, 0, 0, 0);
+    } else {
+      from.setHours(0, 0, 0, 0);
+    }
+    if (!to || Number.isNaN(to.getTime())) {
+      to = new Date(now);
+      to.setHours(23, 59, 59, 999);
+    } else {
+      to.setHours(23, 59, 59, 999);
+    }
+    if (from > to) {
+      return res.status(400).json({ success: false, message: 'Invalid date range' });
+    }
+
+    const jobs = await Job.find({
+      businessId: req.businessId,
+      status: { $ne: 'CANCELLED' },
+      createdAt: { $gte: from, $lte: to },
+      'services.assignedToUsers': employeeId
+    })
+      .populate('customerId', 'name phone')
+      .populate('carId', 'carNumber')
+      .populate('services.serviceId', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const serviceAgg = new Map();
+    const jobRows = [];
+
+    for (const job of jobs) {
+      const lines = [];
+      for (const row of job.services || []) {
+        const assignees = Array.isArray(row.assignedToUsers) ? row.assignedToUsers : [];
+        const onLine = assignees.some((id) => String(id?._id || id) === empIdStr);
+        if (!onLine) continue;
+        const sid = String(row.serviceId?._id || row.serviceId || '');
+        const name = row.customName || row.serviceId?.name || 'Service';
+        const qty = Math.max(1, Number(row.quantity) || 1);
+        lines.push({ serviceId: sid, name, quantity: qty });
+        if (!sid) continue;
+        const prev = serviceAgg.get(sid) || { serviceId: sid, name, count: 0, quantitySum: 0 };
+        prev.count += 1;
+        prev.quantitySum += qty;
+        if (name && name !== 'Service') prev.name = name;
+        serviceAgg.set(sid, prev);
+      }
+      if (!lines.length) continue;
+      jobRows.push({
+        _id: job._id,
+        tokenNumber: job.tokenNumber,
+        status: job.status,
+        createdAt: job.createdAt,
+        customerName: job.customerId?.name || '',
+        carNumber: job.carId?.carNumber || '',
+        services: lines
+      });
+    }
+
+    const serviceSummary = [...serviceAgg.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+    res.json({
+      success: true,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      serviceSummary,
+      jobs: jobRows
+    });
+  } catch (error) {
+    console.error('Get employee service-work error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   PUT /api/admin/employees/:id
 // @desc    Update employee (business owner only). Optionally set new password and get it back.
 // @access  Private (Car Wash Admin)
@@ -2905,7 +3257,8 @@ router.put('/employees/:id', [
   body('phone').optional().trim(),
   body('address').optional().trim(),
   body('status').optional().isIn(['ACTIVE', 'SUSPENDED', 'INACTIVE']),
-  body('branchId').optional({ nullable: true }).isMongoId()
+  body('branchId').optional({ nullable: true }).isMongoId(),
+  body('employeeType').optional().isIn(['DEFAULT', 'SALES'])
 ], async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
@@ -2923,6 +3276,9 @@ router.put('/employees/:id', [
     if (req.body.phone != null) user.phone = req.body.phone;
     if (req.body.address != null) user.address = req.body.address;
     if (req.body.status != null) user.status = req.body.status;
+    if (req.body.employeeType != null) {
+      user.employeeType = req.body.employeeType === 'SALES' ? 'SALES' : 'DEFAULT';
+    }
     if (req.body.branchId !== undefined && !isBranchAdmin(req.user.role)) {
       if (req.body.branchId === null || req.body.branchId === '') {
         user.branchId = undefined;
@@ -2953,6 +3309,7 @@ router.put('/employees/:id', [
       phone: user.phone,
       address: user.address,
       employeeCode: user.employeeCode,
+      employeeType: user.employeeType || 'DEFAULT',
       status: user.status,
       branchId: user.branchId || null
     };
@@ -3843,20 +4200,21 @@ router.delete('/cars/:id', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/services', async (req, res) => {
   try {
-    const { search, page = 1, limit = 20, all, catalogType, categoryId } = req.query;
-    const query = buildServicesListQuery(scopedFilter(req), { search, catalogType, categoryId });
+    const { search, page = 1, limit = 20, all, catalogType, categoryId, subCategoryId } = req.query;
+    const query = buildServicesListQuery(scopedFilter(req), { search, catalogType, categoryId, subCategoryId });
     const variableModuleOn = isModuleEnabled(req.businessModules, 'variableServices');
     const filterVariable = (list) => (
       variableModuleOn ? list : list.filter((s) => !s.isVariable)
     );
     const serviceSelect =
-      'name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive categoryId qualityChecklist createdAt';
+      'name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive categoryId subCategoryId qualityChecklist createdAt';
     const returnAll = all === '1' || all === 'true';
     if (returnAll) {
       const services = filterVariable(await Service.find(query)
         .sort({ name: 1 })
         .select(serviceSelect)
         .populate('categoryId', 'name isDefault')
+        .populate('subCategoryId', 'name categoryId')
         .lean());
       const total = services.length;
       return res.json({
@@ -3872,6 +4230,7 @@ router.get('/services', async (req, res) => {
       .limit(parseInt(limit))
       .select(serviceSelect)
       .populate('categoryId', 'name isDefault')
+      .populate('subCategoryId', 'name categoryId')
       .lean());
     res.json({
       success: true,
@@ -3946,14 +4305,21 @@ router.post('/services', adminPanelOnly, [
       : 5;
 
     const settingsForCat = await BusinessSettings.findOne({ businessId: req.businessId })
-      .select('serviceCategoriesEnabled')
+      .select('serviceCategoriesEnabled serviceSubcategoriesEnabled')
       .lean();
     let categoryId = null;
+    let subCategoryId = null;
     try {
       categoryId = await resolveServiceCategoryId({
         businessId: req.businessId,
         categoryId: req.body.categoryId,
         featureEnabled: !!settingsForCat?.serviceCategoriesEnabled,
+      });
+      subCategoryId = await resolveServiceSubCategoryId({
+        businessId: req.businessId,
+        subCategoryId: req.body.subCategoryId,
+        categoryId,
+        featureEnabled: !!settingsForCat?.serviceCategoriesEnabled && !!settingsForCat?.serviceSubcategoriesEnabled,
       });
     } catch (catErr) {
       return res.status(catErr.status || 400).json({ success: false, message: catErr.message });
@@ -3973,6 +4339,7 @@ router.post('/services', adminPanelOnly, [
       loyaltyPointsEarned,
       isActive: req.body.isActive !== false,
       categoryId,
+      subCategoryId,
       qualityChecklist: skipWorkProcess
         ? { name: '', items: [] }
         : normalizeServiceQualityChecklist(req.body.qualityChecklist),
@@ -3981,6 +4348,7 @@ router.post('/services', adminPanelOnly, [
     });
 
     await service.populate('categoryId', 'name isDefault');
+    await service.populate('subCategoryId', 'name categoryId');
 
     res.status(201).json({
       success: true,
@@ -4099,9 +4467,10 @@ router.put('/services/:id', adminPanelOnly, [
       update.qualityChecklist = normalizeServiceQualityChecklist(req.body.qualityChecklist);
     }
     const settingsForCat = await BusinessSettings.findOne({ businessId: req.businessId })
-      .select('serviceCategoriesEnabled')
+      .select('serviceCategoriesEnabled serviceSubcategoriesEnabled')
       .lean();
     const categoriesOn = !!settingsForCat?.serviceCategoriesEnabled;
+    const subcatsOn = categoriesOn && !!settingsForCat?.serviceSubcategoriesEnabled;
     if (req.body.categoryId !== undefined || (categoriesOn && !existing.categoryId)) {
       try {
         update.categoryId = await resolveServiceCategoryId({
@@ -4114,11 +4483,31 @@ router.put('/services/:id', adminPanelOnly, [
         return res.status(catErr.status || 400).json({ success: false, message: catErr.message });
       }
     }
+    const resolvedCategoryId = update.categoryId !== undefined ? update.categoryId : existing.categoryId;
+    if (
+      req.body.subCategoryId !== undefined
+      || req.body.categoryId !== undefined
+      || (subcatsOn && existing.subCategoryId)
+    ) {
+      try {
+        update.subCategoryId = await resolveServiceSubCategoryId({
+          businessId: req.businessId,
+          subCategoryId: req.body.subCategoryId !== undefined ? req.body.subCategoryId : undefined,
+          categoryId: resolvedCategoryId,
+          featureEnabled: subcatsOn,
+          existingSubCategoryId: existing.subCategoryId,
+        });
+      } catch (subErr) {
+        return res.status(subErr.status || 400).json({ success: false, message: subErr.message });
+      }
+    }
     const service = await Service.findOneAndUpdate(
       scopedFilter(req, { _id: req.params.id }),
       update,
       { new: true, runValidators: true }
-    ).populate('categoryId', 'name isDefault');
+    )
+      .populate('categoryId', 'name isDefault')
+      .populate('subCategoryId', 'name categoryId');
     if (!service) {
       return res.status(404).json({
         success: false,
@@ -4177,6 +4566,7 @@ router.get('/jobs/:id', async (req, res) => {
       .populate('customerId', 'name phone whatsappNumber')
       .populate('carId', 'carNumber brand model color')
       .populate('services.serviceId', 'name')
+      .populate('services.assignedToUsers', 'name employeeCode email')
       .populate('assignedTo', 'name employeeCode email')
       .populate('assignedToUsers', 'name employeeCode email');
 
@@ -4575,7 +4965,7 @@ router.post('/jobs', [
         : calculateETA(workCatalogServices(catalogServices)));
 
     const settingsForAssign = await BusinessSettings.findOne({ businessId: req.businessId })
-      .select('multiEmployeeAssignEnabled')
+      .select('multiEmployeeAssignEnabled perServiceEmployeeAssignEnabled')
       .lean();
     let assignedTo;
     let assignedToUsers;
@@ -4593,6 +4983,15 @@ router.post('/jobs', [
         message: assignErr.message || 'Invalid employee assignment'
       });
     }
+
+    const serviceLinesWithAssignees = attachServiceLineAssignees(
+      lines,
+      hasServicesArray ? servicesBody : undefined,
+      {
+        enabled: !!settingsForAssign?.perServiceEmployeeAssignEnabled,
+        allowedIds: assignedToUsers
+      }
+    );
 
     // Create job with retry logic for duplicate token numbers
     let job;
@@ -4619,7 +5018,7 @@ router.post('/jobs', [
           assignedTo,
           assignedToUsers,
           customerPackageId: customerPackageId || null,
-          services: lines,
+          services: serviceLinesWithAssignees,
           ...(directBill
             ? {
               status: 'DELIVERED',
@@ -5077,6 +5476,11 @@ router.put('/jobs/:id', [
 
     const wantsAssignUpdate =
       req.body.assignedTo !== undefined || req.body.assignedToUsers !== undefined;
+    const settingsForAssign = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('multiEmployeeAssignEnabled perServiceEmployeeAssignEnabled')
+      .lean();
+    const perServiceAssignEnabled = !!settingsForAssign?.perServiceEmployeeAssignEnabled;
+
     if (wantsAssignUpdate) {
       if (!isAdminPanelRole(req.user.role)) {
         return res.status(403).json({
@@ -5084,9 +5488,6 @@ router.put('/jobs/:id', [
           message: 'Only admins can change job assignment'
         });
       }
-      const settingsForAssign = await BusinessSettings.findOne({ businessId: req.businessId })
-        .select('multiEmployeeAssignEnabled')
-        .lean();
       const resolved = await resolveJobAssignees({
         businessId: req.businessId,
         assignedToBody: req.body.assignedTo,
@@ -5097,6 +5498,18 @@ router.put('/jobs/:id', [
       job.assignedTo = resolved.assignedTo;
       job.assignedToUsers = resolved.assignedToUsers;
       job.markModified('assignedToUsers');
+
+      // Drop per-service assignees who are no longer on the job
+      const allowed = new Set((resolved.assignedToUsers || []).map((id) => String(id)));
+      let pruned = false;
+      job.services = (job.services || []).map((row) => {
+        const prev = typeof row.toObject === 'function' ? row.toObject() : { ...row };
+        const nextUsers = (Array.isArray(prev.assignedToUsers) ? prev.assignedToUsers : [])
+          .filter((id) => allowed.has(String(id?._id || id)));
+        if (nextUsers.length !== (prev.assignedToUsers || []).length) pruned = true;
+        return { ...prev, assignedToUsers: nextUsers };
+      });
+      if (pruned) job.markModified('services');
     }
 
     if (req.body.beforeImages !== undefined) {
@@ -5171,7 +5584,14 @@ router.put('/jobs/:id', [
         }
       }
 
-      job.services = lines;
+      const jobPool = Array.isArray(job.assignedToUsers) && job.assignedToUsers.length
+        ? job.assignedToUsers
+        : (job.assignedTo ? [job.assignedTo] : []);
+      job.services = attachServiceLineAssignees(
+        lines,
+        hasServicesArray ? servicesBody : undefined,
+        { enabled: perServiceAssignEnabled, allowedIds: jobPool }
+      );
       job.totalPrice = totalPrice;
 
       const advanceOnJob = Math.max(0, Number(job.advancePayment) || 0);
@@ -5205,6 +5625,7 @@ router.put('/jobs/:id', [
     await job.populate('customerId', 'name phone whatsappNumber');
     await job.populate('carId', 'carNumber brand model color');
     await job.populate('services.serviceId', 'name isVariable');
+    await job.populate('services.assignedToUsers', 'name employeeCode email');
     await job.populate('assignedTo', 'name employeeCode email');
     await job.populate('assignedToUsers', 'name employeeCode email');
 
@@ -5545,10 +5966,15 @@ router.put('/settings', [
   body('cardPaymentEnabled').optional().isBoolean(),
   body('qualityCheckEnabled').optional().isBoolean(),
   body('serviceCategoriesEnabled').optional().isBoolean(),
+  body('serviceSubcategoriesEnabled').optional().isBoolean(),
   body('mixedCartEnabled').optional().isBoolean(),
+  body('invoiceDiscountAmountEnabled').optional().isBoolean(),
+  body('invoiceOnCompletedEnabled').optional().isBoolean(),
   body('crmEnabled').optional().isBoolean(),
+  body('attendanceEnabled').optional().isBoolean(),
   body('internationalPhoneEnabled').optional().isBoolean(),
   body('multiEmployeeAssignEnabled').optional().isBoolean(),
+  body('perServiceEmployeeAssignEnabled').optional().isBoolean(),
   body('customJobTokenEnabled').optional().isBoolean(),
   body('jobTokenSettings').optional().isObject(),
   body('customInvoiceNumberEnabled').optional().isBoolean(),
@@ -5606,18 +6032,39 @@ router.put('/settings', [
     }
     if (req.body.serviceCategoriesEnabled !== undefined) {
       updateFields.serviceCategoriesEnabled = !!req.body.serviceCategoriesEnabled;
+      if (!req.body.serviceCategoriesEnabled) {
+        updateFields.serviceSubcategoriesEnabled = false;
+      }
+    }
+    if (req.body.serviceSubcategoriesEnabled !== undefined) {
+      const catsOn = updateFields.serviceCategoriesEnabled !== undefined
+        ? !!updateFields.serviceCategoriesEnabled
+        : !!settings?.serviceCategoriesEnabled;
+      updateFields.serviceSubcategoriesEnabled = !!req.body.serviceSubcategoriesEnabled && catsOn;
     }
     if (req.body.mixedCartEnabled !== undefined) {
       updateFields.mixedCartEnabled = !!req.body.mixedCartEnabled;
     }
+    if (req.body.invoiceDiscountAmountEnabled !== undefined) {
+      updateFields.invoiceDiscountAmountEnabled = !!req.body.invoiceDiscountAmountEnabled;
+    }
+    if (req.body.invoiceOnCompletedEnabled !== undefined) {
+      updateFields.invoiceOnCompletedEnabled = !!req.body.invoiceOnCompletedEnabled;
+    }
     if (req.body.crmEnabled !== undefined) {
       updateFields.crmEnabled = !!req.body.crmEnabled;
+    }
+    if (req.body.attendanceEnabled !== undefined) {
+      updateFields.attendanceEnabled = !!req.body.attendanceEnabled;
     }
     if (req.body.internationalPhoneEnabled !== undefined) {
       updateFields.internationalPhoneEnabled = !!req.body.internationalPhoneEnabled;
     }
     if (req.body.multiEmployeeAssignEnabled !== undefined) {
       updateFields.multiEmployeeAssignEnabled = !!req.body.multiEmployeeAssignEnabled;
+    }
+    if (req.body.perServiceEmployeeAssignEnabled !== undefined) {
+      updateFields.perServiceEmployeeAssignEnabled = !!req.body.perServiceEmployeeAssignEnabled;
     }
     if (req.body.customJobTokenEnabled !== undefined) {
       updateFields.customJobTokenEnabled = !!req.body.customJobTokenEnabled;
@@ -5684,6 +6131,13 @@ router.put('/settings', [
         await ensureDefaultServiceCategory(req.businessId);
       } catch (catErr) {
         console.warn('ensureDefaultServiceCategory on settings save:', catErr?.message || catErr);
+      }
+    }
+    if (settingsObj.serviceCategoriesEnabled && settingsObj.serviceSubcategoriesEnabled) {
+      try {
+        await ensureDefaultSubCategoriesForBusiness(req.businessId);
+      } catch (subErr) {
+        console.warn('ensureDefaultSubCategoriesForBusiness on settings save:', subErr?.message || subErr);
       }
     }
     if (settingsObj.crmEnabled) {

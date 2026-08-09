@@ -21,3 +21,5 @@ export function isAdminPanelRole(role) {
 export function isEmployeeRole(role) {
   return role === ROLES.EMPLOYEE;
 }
+
+export { isSalesEmployee, isDefaultEmployee, normalizeEmployeeType, EMPLOYEE_TYPE_SALES, EMPLOYEE_TYPE_DEFAULT } from './employeeType.js';

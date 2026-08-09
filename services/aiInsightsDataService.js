@@ -49,7 +49,36 @@ async function aggregateJobs(businessId, start, end) {
   const [statusAgg, cancelCount, peakHours, avgCompletion, revenueJobs] = await Promise.all([
     Job.aggregate([
       { $match: { businessId: bid, createdAt: { $gte: start, $lte: end } } },
-      { $group: { _id: '$status', count: { $sum: 1 }, revenue: { $sum: { $cond: [{ $in: ['$status', ['COMPLETED', 'DELIVERED']] }, '$totalPrice', 0] } } } }
+      {
+        $lookup: {
+          from: 'invoices',
+          localField: '_id',
+          foreignField: 'jobId',
+          as: 'inv'
+        }
+      },
+      {
+        $addFields: {
+          billedAmount: {
+            $ifNull: [{ $arrayElemAt: ['$inv.finalAmount', 0] }, '$totalPrice']
+          }
+        }
+      },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+          revenue: {
+            $sum: {
+              $cond: [
+                { $in: ['$status', ['COMPLETED', 'DELIVERED']] },
+                { $ifNull: ['$billedAmount', 0] },
+                0
+              ]
+            }
+          }
+        }
+      }
     ]),
     Job.countDocuments({ businessId: bid, status: 'CANCELLED', createdAt: { $gte: start, $lte: end } }),
     Job.aggregate([
@@ -171,7 +200,22 @@ async function aggregateCars(businessId, start, end) {
       { $match: { businessId: bid, createdAt: { $gte: start, $lte: end } } },
       { $lookup: { from: 'cars', localField: 'carId', foreignField: '_id', as: 'car' } },
       { $unwind: { path: '$car', preserveNullAndEmptyArrays: true } },
-      { $group: { _id: '$car.brand', jobs: { $sum: 1 }, revenue: { $sum: '$totalPrice' } } },
+      {
+        $lookup: {
+          from: 'invoices',
+          localField: '_id',
+          foreignField: 'jobId',
+          as: 'inv'
+        }
+      },
+      {
+        $addFields: {
+          billedAmount: {
+            $ifNull: [{ $arrayElemAt: ['$inv.finalAmount', 0] }, '$totalPrice']
+          }
+        }
+      },
+      { $group: { _id: '$car.brand', jobs: { $sum: 1 }, revenue: { $sum: { $ifNull: ['$billedAmount', 0] } } } },
       { $sort: { revenue: -1 } },
       { $limit: 8 }
     ])

@@ -47,9 +47,18 @@ export async function resolveBranchContext(req, res, next) {
         });
       }
       if (isBusinessOwner(req.user.role)) {
+        // Reads stay unscoped (all). Writes still need a branch — use default / header.
+        const preferredId = req.headers['x-branch-id'] || defaultBranch._id;
+        const branch =
+          (preferredId &&
+            (await Branch.findOne({
+              _id: preferredId,
+              businessId: req.businessId
+            }).lean())) ||
+          defaultBranch;
         req.branchScope = 'all';
-        req.branchId = null;
-        req.branch = null;
+        req.branchId = branch?._id || defaultBranch._id;
+        req.branch = branch || defaultBranch;
         return next();
       }
       const branchId = req.user.branchId || defaultBranch._id;

@@ -87,6 +87,16 @@ const serviceSchema = new mongoose.Schema({
     index: true
   },
   /**
+   * Optional subcategory (when BusinessSettings.serviceSubcategoriesEnabled).
+   * Must belong to the same categoryId when set.
+   */
+  subCategoryId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ServiceSubCategory',
+    default: null,
+    index: true
+  },
+  /**
    * Optional quality checklist for wash workflow (Mark Completed).
    * Only enforced when BusinessSettings.qualityCheckEnabled is true.
    * Multiple checkbox lines under one checklist name per service.
@@ -105,5 +115,7 @@ const serviceSchema = new mongoose.Schema({
 serviceSchema.index({ businessId: 1 });
 serviceSchema.index({ isActive: 1 });
 serviceSchema.index({ businessId: 1, categoryId: 1 });
+serviceSchema.index({ businessId: 1, subCategoryId: 1 });
+serviceSchema.index({ businessId: 1, categoryId: 1, subCategoryId: 1 });
 
 export default mongoose.model('Service', serviceSchema);

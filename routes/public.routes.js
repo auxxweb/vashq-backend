@@ -6,6 +6,8 @@ import PlatformSettings from '../models/PlatformSettings.model.js';
 import Business from '../models/Business.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import Service from '../models/Service.model.js';
+import ServiceCategory from '../models/ServiceCategory.model.js';
+import ServiceSubCategory from '../models/ServiceSubCategory.model.js';
 import { createPublicBooking } from '../services/bookingService.js';
 import { sendBookingErrorResponse } from '../utils/bookingErrors.js';
 import { getSlotAvailabilityForDate, getBookingSettings } from '../utils/booking.utils.js';
@@ -86,10 +88,9 @@ router.get('/book/:businessId', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid business' });
     }
 
-    const [business, settings, services] = await Promise.all([
+    const [business, settings] = await Promise.all([
       Business.findOne({ _id: businessId, status: 'ACTIVE' }).select('businessName address logo phone whatsappNumber').lean(),
-      BusinessSettings.findOne({ businessId }).lean(),
-      Service.find({ businessId, isActive: { $ne: false }, isVariable: { $ne: true } }).select('name price minTime maxTime description').sort({ name: 1 }).lean()
+      BusinessSettings.findOne({ businessId }).lean()
     ]);
 
     if (!business) return res.status(404).json({ success: false, message: 'Business not found' });
@@ -101,7 +102,57 @@ router.get('/book/:businessId', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Online booking is not available' });
     }
 
+    // Fixed services always; variable visits when module enabled. Exclude retail products.
+    const variableServicesEnabled = isModuleEnabled(modules, 'variableServices');
+    const serviceQuery = {
+      businessId,
+      isActive: { $ne: false },
+      ...(variableServicesEnabled
+        ? {
+            $or: [
+              { isVariable: { $ne: true } },
+              {
+                isVariable: true,
+                $or: [
+                  { skipWorkProcess: false },
+                  { skipWorkProcess: null },
+                  { skipWorkProcess: { $exists: false } }
+                ]
+              }
+            ]
+          }
+        : { isVariable: { $ne: true } })
+    };
+    const services = await Service.find(serviceQuery)
+      .select('name price minTime maxTime description categoryId subCategoryId isVariable skipWorkProcess')
+      .sort({ name: 1 })
+      .lean();
+
     const bookingSettingsFull = await getBookingSettings(businessId);
+    const serviceCategoriesEnabled = !!settings?.serviceCategoriesEnabled;
+    const serviceSubcategoriesEnabled = serviceCategoriesEnabled && !!settings?.serviceSubcategoriesEnabled;
+    let serviceCategories = [];
+    let serviceSubcategories = [];
+    if (serviceCategoriesEnabled) {
+      serviceCategories = await ServiceCategory.find({
+        businessId,
+        isActive: { $ne: false }
+      })
+        .select('name isDefault sortOrder')
+        .sort({ sortOrder: 1, name: 1 })
+        .lean();
+    }
+    if (serviceSubcategoriesEnabled) {
+      const { ensureDefaultSubCategoriesForBusiness } = await import('../utils/serviceSubCategory.js');
+      await ensureDefaultSubCategoriesForBusiness(businessId);
+      serviceSubcategories = await ServiceSubCategory.find({
+        businessId,
+        isActive: { $ne: false }
+      })
+        .select('name categoryId isDefault sortOrder')
+        .sort({ isDefault: -1, sortOrder: 1, name: 1 })
+        .lean();
+    }
 
     res.json({
       success: true,
@@ -114,6 +165,10 @@ router.get('/book/:businessId', async (req, res) => {
         whatsappNumber: business.whatsappNumber
       },
       services,
+      serviceCategoriesEnabled,
+      serviceCategories,
+      serviceSubcategoriesEnabled,
+      serviceSubcategories,
       bookingSettings: {
         currency: bookingSettingsFull.currency,
         timezone: bookingSettingsFull.timezone,

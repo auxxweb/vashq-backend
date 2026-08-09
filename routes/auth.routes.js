@@ -265,6 +265,7 @@ router.post('/login', [
       userResponse.branchId = user.branchId || null;
       if (user.role === 'EMPLOYEE') {
         userResponse.employeeCode = user.employeeCode || '';
+        userResponse.employeeType = user.employeeType === 'SALES' ? 'SALES' : 'DEFAULT';
       }
     }
     res.json({
@@ -436,6 +437,7 @@ router.get('/me', authenticate, async (req, res) => {
       u.branchId = user.branchId || null;
       if (user.role === 'EMPLOYEE') {
         u.employeeCode = user.employeeCode || '';
+        u.employeeType = user.employeeType === 'SALES' ? 'SALES' : 'DEFAULT';
       }
     }
     res.json({ success: true, user: u });

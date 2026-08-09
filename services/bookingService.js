@@ -180,20 +180,18 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
       throw new Error('One or more selected services are not available');
     }
 
-    if (!allowMixedCart) {
-      const variableServices = services.filter((s) => s.isVariable);
-      if (variableServices.length) {
-        throw new Error(
-          `Variable-price services cannot be booked online (${variableServices.map((s) => s.name).join(', ')}). Add them when creating the job instead.`
-        );
-      }
-    } else {
-      const hasWork = services.some((s) => !(s.isVariable && s.skipWorkProcess));
-      if (!hasWork) {
-        throw new Error(
-          'Bookings need at least one wash or visit service. Sell products-only from Create Job.'
-        );
-      }
+    // Allow fixed + variable visit services; block retail products on booking.
+    const products = services.filter((s) => s.isVariable && s.skipWorkProcess);
+    if (products.length) {
+      throw new Error(
+        `Product sales cannot be booked (${products.map((s) => s.name).join(', ')}). Sell them from Create Job.`
+      );
+    }
+    const hasWork = services.some((s) => !(s.isVariable && s.skipWorkProcess));
+    if (!hasWork) {
+      throw new Error(
+        'Bookings need at least one wash or visit service. Sell products-only from Create Job.'
+      );
     }
 
     serviceIdsToStore = services.map((s) => s._id);

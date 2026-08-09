@@ -111,14 +111,22 @@ export async function listCrmMeta(businessId) {
   };
 }
 
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.skipEnsure] - caller already ran ensureCrmDefaults
+ * @param {object} [options.status] - preloaded LeadStatus doc
+ * @param {boolean} [options.trustSourceId] - skip per-row LeadSource lookup
+ */
 export async function createLeadRecord({
   businessId,
   branchId,
   userId,
   body,
-  imported = false
+  imported = false,
+  options = {}
 }) {
-  await ensureCrmDefaults(businessId);
+  const { skipEnsure = false, status: presetStatus = null, trustSourceId = false } = options;
+  if (!skipEnsure) await ensureCrmDefaults(businessId);
   const name = String(body.name || '').trim();
   const phone = applyDefaultCountryCode(normalizePhone(body.phone));
   if (!name) {
@@ -132,12 +140,19 @@ export async function createLeadRecord({
     throw err;
   }
 
-  let status;
-  if (body.statusId) {
+  let status = presetStatus || null;
+  if (!status && body.statusId) {
     status = await LeadStatus.findOne({ _id: body.statusId, businessId, isActive: true });
   }
   if (!status) {
-    status = await getDefaultLeadStatus(businessId);
+    status = skipEnsure
+      ? await LeadStatus.findOne({
+          businessId,
+          isActive: true,
+          $or: [{ isTerminal: false }, { isTerminal: { $exists: false } }],
+          sortOrder: { $gt: 0 }
+        }).sort({ sortOrder: 1 })
+      : await getDefaultLeadStatus(businessId);
   }
   if (!status) {
     const err = new Error('No lead status configured');
@@ -147,8 +162,12 @@ export async function createLeadRecord({
 
   let sourceId = null;
   if (body.sourceId) {
-    const src = await LeadSource.findOne({ _id: body.sourceId, businessId, isActive: true });
-    if (src) sourceId = src._id;
+    if (trustSourceId) {
+      sourceId = body.sourceId;
+    } else {
+      const src = await LeadSource.findOne({ _id: body.sourceId, businessId, isActive: true });
+      if (src) sourceId = src._id;
+    }
   }
 
   const lead = await Lead.create({
@@ -180,6 +199,112 @@ export async function createLeadRecord({
   });
 
   return lead;
+}
+
+/** Fast path for CSV import: one defaults/status load, then batched inserts. */
+export async function importLeadRows({
+  businessId,
+  branchId,
+  userId,
+  rows,
+  sourceByName
+}) {
+  await ensureCrmDefaults(businessId);
+  const status = await LeadStatus.findOne({
+    businessId,
+    isActive: true,
+    $or: [{ isTerminal: false }, { isTerminal: { $exists: false } }],
+    sortOrder: { $gt: 0 }
+  }).sort({ sortOrder: 1 });
+
+  if (!status) {
+    const err = new Error('No lead status configured');
+    err.status = 400;
+    throw err;
+  }
+
+  const errors = [];
+  const docs = [];
+  const now = new Date();
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    try {
+      const name = String(row.name || '').trim();
+      const phone = applyDefaultCountryCode(normalizePhone(row.phone));
+      if (!name) throw new Error('Customer name is required');
+      if (!phone) throw new Error('Phone number is required');
+
+      let sourceId = null;
+      if (row.sourceName?.trim()) {
+        const key = row.sourceName.trim().toLowerCase();
+        let src = sourceByName.get(key);
+        if (!src) {
+          src = await LeadSource.create({
+            businessId,
+            name: row.sourceName.trim(),
+            isActive: true
+          });
+          sourceByName.set(key, src);
+        }
+        sourceId = src._id;
+      }
+
+      docs.push({
+        businessId,
+        branchId: branchId || null,
+        name,
+        phone,
+        location: String(row.location || '').trim(),
+        vehicleNumber: String(row.vehicleNumber || '').trim().toUpperCase(),
+        vehicleBrand: String(row.vehicleBrand || '').trim(),
+        vehicleModel: String(row.vehicleModel || '').trim(),
+        vehicleColor: String(row.vehicleColor || '').trim(),
+        vehicleType: String(row.vehicleType || '').trim(),
+        notes: String(row.notes || '').trim(),
+        statusId: status._id,
+        sourceId,
+        assignedTo: row.assignedTo || null,
+        createdBy: userId || null,
+        activity: [{
+          type: 'IMPORTED',
+          note: 'Imported from CSV',
+          toStatusId: status._id,
+          toStatusName: status.name,
+          createdBy: userId || null,
+          createdAt: now
+        }]
+      });
+    } catch (rowErr) {
+      errors.push({ row: i + 2, message: rowErr.message || 'Failed' });
+    }
+  }
+
+  let created = 0;
+  const CHUNK = 100;
+  for (let i = 0; i < docs.length; i += CHUNK) {
+    const chunk = docs.slice(i, i + CHUNK);
+    try {
+      const inserted = await Lead.insertMany(chunk, { ordered: false });
+      created += inserted.length;
+    } catch (bulkErr) {
+      const nInserted = bulkErr?.insertedDocs?.length || bulkErr?.result?.nInserted || 0;
+      created += nInserted;
+      const writeErrors = bulkErr?.writeErrors || [];
+      if (writeErrors.length) {
+        writeErrors.slice(0, 50).forEach((we) => {
+          errors.push({
+            row: i + (we.index || 0) + 2,
+            message: we.errmsg || we.err?.message || 'Insert failed'
+          });
+        });
+      } else if (!nInserted) {
+        throw bulkErr;
+      }
+    }
+  }
+
+  return { created, failed: errors.length, errors: errors.slice(0, 50) };
 }
 
 export async function changeLeadStatus({
@@ -353,6 +478,30 @@ export function parseLeadsCsv(text) {
     throw err;
   }
 
+  const detectDelimiter = (headerLine) => {
+    let commas = 0;
+    let semis = 0;
+    let tabs = 0;
+    let inQ = false;
+    for (let i = 0; i < headerLine.length; i++) {
+      const ch = headerLine[i];
+      if (ch === '"') {
+        if (inQ && headerLine[i + 1] === '"') i++;
+        else inQ = !inQ;
+        continue;
+      }
+      if (inQ) continue;
+      if (ch === ',') commas++;
+      else if (ch === ';') semis++;
+      else if (ch === '\t') tabs++;
+    }
+    if (tabs > 0 && tabs >= commas && tabs >= semis) return '\t';
+    if (semis > commas) return ';';
+    return ',';
+  };
+
+  const delimiter = detectDelimiter(lines[0]);
+
   const split = (line) => {
     const cols = [];
     let cur = '';
@@ -364,7 +513,7 @@ export function parseLeadsCsv(text) {
           cur += '"';
           i++;
         } else inQ = !inQ;
-      } else if ((ch === ',' || ch === '\t') && !inQ) {
+      } else if (ch === delimiter && !inQ) {
         cols.push(cur.trim());
         cur = '';
       } else cur += ch;
@@ -373,7 +522,9 @@ export function parseLeadsCsv(text) {
     return cols;
   };
 
-  const headers = split(lines[0]).map((h) => h.toLowerCase().replace(/\s+/g, '_'));
+  const headers = split(lines[0]).map((h) =>
+    h.toLowerCase().replace(/^\uFEFF/, '').replace(/\s+/g, '_')
+  );
   const idx = (aliases) => {
     for (const a of aliases) {
       const i = headers.indexOf(a);
@@ -382,10 +533,10 @@ export function parseLeadsCsv(text) {
     return -1;
   };
 
-  const nameI = idx(['name', 'customer_name', 'customer', 'full_name']);
-  const phoneI = idx(['phone', 'mobile', 'phone_number', 'mobile_number']);
+  const nameI = idx(['name', 'customer_name', 'customer', 'full_name', 'lead_name']);
+  const phoneI = idx(['phone', 'mobile', 'phone_number', 'mobile_number', 'contact', 'whatsapp']);
   const locI = idx(['location', 'address', 'area', 'city']);
-  const plateI = idx(['vehicle_number', 'car_number', 'vehicle', 'registration']);
+  const plateI = idx(['vehicle_number', 'car_number', 'vehicle', 'registration', 'reg_no', 'reg_number']);
   const brandI = idx(['vehicle_brand', 'brand', 'make']);
   const modelI = idx(['vehicle_model', 'model']);
   const colorI = idx(['vehicle_color', 'color']);
@@ -393,7 +544,9 @@ export function parseLeadsCsv(text) {
   const sourceI = idx(['source', 'lead_source']);
 
   if (nameI < 0 || phoneI < 0) {
-    const err = new Error('CSV header must include name and phone columns');
+    const err = new Error(
+      `CSV header must include name and phone columns (found: ${headers.filter(Boolean).join(', ') || 'none'})`
+    );
     err.status = 400;
     throw err;
   }
@@ -416,5 +569,12 @@ export function parseLeadsCsv(text) {
       sourceName: sourceI >= 0 ? cols[sourceI] : ''
     });
   }
+
+  if (!rows.length) {
+    const err = new Error('CSV has no lead rows with name/phone');
+    err.status = 400;
+    throw err;
+  }
+
   return rows;
 }

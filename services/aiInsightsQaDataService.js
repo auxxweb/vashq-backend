@@ -15,11 +15,26 @@ async function topCustomersByVisits(businessId, limit = 25) {
   const rows = await Job.aggregate([
     { $match: { businessId: bid } },
     {
+      $lookup: {
+        from: 'invoices',
+        localField: '_id',
+        foreignField: 'jobId',
+        as: 'inv'
+      }
+    },
+    {
+      $addFields: {
+        billedAmount: {
+          $ifNull: [{ $arrayElemAt: ['$inv.finalAmount', 0] }, '$totalPrice']
+        }
+      }
+    },
+    {
       $group: {
         _id: '$customerId',
         totalVisits: { $sum: 1 },
         lastVisit: { $max: '$createdAt' },
-        totalSpent: { $sum: '$totalPrice' }
+        totalSpent: { $sum: { $ifNull: ['$billedAmount', 0] } }
       }
     },
     { $sort: { totalVisits: -1 } },
@@ -53,11 +68,26 @@ async function inactiveCustomers(businessId, days = 30, limit = 25) {
   const rows = await Job.aggregate([
     { $match: { businessId: bid } },
     {
+      $lookup: {
+        from: 'invoices',
+        localField: '_id',
+        foreignField: 'jobId',
+        as: 'inv'
+      }
+    },
+    {
+      $addFields: {
+        billedAmount: {
+          $ifNull: [{ $arrayElemAt: ['$inv.finalAmount', 0] }, '$totalPrice']
+        }
+      }
+    },
+    {
       $group: {
         _id: '$customerId',
         lastVisit: { $max: '$createdAt' },
         totalVisits: { $sum: 1 },
-        totalSpent: { $sum: '$totalPrice' }
+        totalSpent: { $sum: { $ifNull: ['$billedAmount', 0] } }
       }
     },
     { $match: { lastVisit: { $lt: cutoff } } },

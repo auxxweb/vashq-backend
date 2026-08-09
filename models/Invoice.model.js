@@ -36,7 +36,12 @@ const invoiceSchema = new mongoose.Schema({
   vehicleNumber: { type: String, trim: true },
   // Line items & totals
   items: [invoiceItemSchema],
+  /** Percent 0–100 when discountType is PERCENT; also stored as derived % for AMOUNT (legacy readers). */
   discount: { type: Number, default: 0, min: 0 },
+  /** How discount was entered. Missing/legacy → PERCENT. */
+  discountType: { type: String, enum: ['PERCENT', 'AMOUNT'], default: 'PERCENT' },
+  /** Monetary discount applied (always persisted for reports/display). */
+  discountAmount: { type: Number, default: 0, min: 0 },
   subtotal: { type: Number, required: true, min: 0 },
   taxPercentage: { type: Number, min: 0, max: 100 },
   gstAmount: { type: Number, default: 0, min: 0 },

@@ -8,8 +8,10 @@ import { getInvoiceCompanySnapshot } from './invoiceCompany.js';
 import {
   balanceDue,
   assertSettlementMatchesDue,
-  normalizeInvoicePaymentFields
+  normalizeInvoicePaymentFields,
+  roundMoney
 } from './invoicePayment.js';
+import { buildGstFieldsForNewInvoice } from './invoiceGst.js';
 import { deductServiceStockForSale, restoreServiceStock } from './serviceInventory.js';
 import { lineQuantity } from './serviceCatalog.js';
 import { isFullyPaid } from '../services/credit/outstandingService.js';
@@ -77,6 +79,11 @@ export async function createInvoiceForJobRecord({
   );
   const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
   const company = await getInvoiceCompanySnapshot(businessId);
+  const subtotalRounded = roundMoney(subtotal);
+  const gstFields = await buildGstFieldsForNewInvoice(businessId, {
+    companyGst: company?.gstNumber,
+    subtotal: subtotalRounded
+  });
 
   return Invoice.create({
     jobId: job._id,
@@ -87,7 +94,7 @@ export async function createInvoiceForJobRecord({
     companyOwnerName: company?.ownerName || null,
     companyAddress: company?.address || null,
     companyPhone: company?.phone || null,
-    companyGst: company?.gstNumber || null,
+    companyGst: gstFields.companyGst,
     customerName: customer?.name ?? '',
     customerPhone: customer?.phone || customer?.whatsappNumber || '',
     customerId: customer?._id || job.customerId || null,
@@ -95,8 +102,12 @@ export async function createInvoiceForJobRecord({
     vehicleNumber: car?.carNumber ?? '',
     items,
     discount: 0,
-    subtotal,
-    finalAmount: subtotal,
+    discountType: 'PERCENT',
+    discountAmount: 0,
+    subtotal: subtotalRounded,
+    taxPercentage: gstFields.taxPercentage,
+    gstAmount: gstFields.gstAmount,
+    finalAmount: gstFields.finalAmount,
     advancePayment: advanceFromJob,
     paymentMethod: 'ONLINE',
     paymentCashAmount: 0,

@@ -24,6 +24,7 @@ import businessRoutes from './routes/business.routes.js';
 import aiInsightsRoutes from './routes/aiInsights.routes.js';
 import bookingAdminRoutes from './routes/bookingAdmin.routes.js';
 import crmRoutes from './routes/crm.routes.js';
+import attendanceRoutes from './routes/attendance.routes.js';
 import { initFirebaseAdmin } from './services/firebaseAdmin.js';
 import branchesRoutes from './routes/branches.routes.js';
 import { startCronJobs } from './cronJobs.js';
@@ -120,14 +121,16 @@ app.use('/api/auth/register', rateLimit({
   message: { success: false, message: 'Too many registration attempts.' }
 }));
 
-// Routes
+// Routes — mount CRM/bookings before the catch-all /api/admin router so sales
+// employees are not blocked by admin.routes allowAdminOrEmployeeForJobs.
 app.use('/api/auth', authRoutes);
 app.use('/api/super-admin', superAdminRoutes);
-app.use('/api/admin', adminRoutes);
 app.use('/api/admin/branches', branchesRoutes);
 app.use('/api/admin/ai-insights', aiInsightsRoutes);
 app.use('/api/admin/bookings', bookingAdminRoutes);
 app.use('/api/admin/crm', crmRoutes);
+app.use('/api/admin/attendance', attendanceRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/packages', packageRoutes);
 app.use('/api/business', businessRoutes);
 app.use('/api/public', publicRoutes);

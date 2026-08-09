@@ -4,6 +4,8 @@ import Job from '../models/Job.model.js';
 import { lineQuantity } from './serviceCatalog.js';
 import { assertSufficientStock, deductServiceStockForSale, restoreServiceStock } from './serviceInventory.js';
 import { isProductCatalogService } from './jobCart.js';
+import { resolveInvoiceDiscount, syncInvoiceDiscountAmount } from './invoiceDiscount.js';
+import { applyComputedGstAmount } from './invoiceGst.js';
 
 async function serviceNameMapForLines(businessId, jobServices = []) {
   const serviceIds = (jobServices || [])
@@ -209,12 +211,9 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
 
   invoice.items = items;
   invoice.subtotal = subtotal;
-
-  const discountPct = Number(invoice.discount) || 0;
-  const afterDiscount = subtotal * (1 - discountPct / 100);
-  const gst = Number(invoice.gstAmount) || 0;
-  const loyaltyAmt = Number(invoice.loyaltyRedeemedAmount) || 0;
-  invoice.finalAmount = Math.max(0, Math.round((afterDiscount + gst - loyaltyAmt) * 100) / 100);
+  syncInvoiceDiscountAmount(invoice);
+  applyComputedGstAmount(invoice);
+  recalculateInvoiceFinalAmount(invoice);
 
   await invoice.save();
 
@@ -247,9 +246,8 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
 }
 
 export function recalculateInvoiceFinalAmount(invoice) {
-  const subtotal = Number(invoice.subtotal) || 0;
-  const discountPct = Number(invoice.discount) || 0;
-  const afterDiscount = subtotal * (1 - discountPct / 100);
+  syncInvoiceDiscountAmount(invoice);
+  const { afterDiscount } = resolveInvoiceDiscount(invoice);
   const gst = Number(invoice.gstAmount) || 0;
   const loyaltyAmt = Number(invoice.loyaltyRedeemedAmount) || 0;
   invoice.finalAmount = Math.max(0, Math.round((afterDiscount + gst - loyaltyAmt) * 100) / 100);
@@ -269,17 +267,29 @@ export async function syncJobFromInvoiceItems(jobId, businessId, items, subtotal
     : [];
   const nameById = new Map(catalog.map((s) => [s._id.toString(), s.name]));
 
+  // Preserve per-service assignees when invoice sync rewrites lines
+  const prevAssigneesBySid = new Map();
+  for (const row of job.services || []) {
+    const sid = String(row.serviceId?._id || row.serviceId || '');
+    if (!sid) continue;
+    if (!prevAssigneesBySid.has(sid) && Array.isArray(row.assignedToUsers) && row.assignedToUsers.length) {
+      prevAssigneesBySid.set(sid, row.assignedToUsers);
+    }
+  }
+
   job.services = (items || [])
     .filter((i) => i.serviceId)
     .map((i) => {
       const sid = i.serviceId?._id || i.serviceId;
       const catalogName = nameById.get(String(sid)) || '';
       const customName = i.serviceName && i.serviceName !== catalogName ? String(i.serviceName).trim() : '';
+      const assignedToUsers = prevAssigneesBySid.get(String(sid)) || [];
       return {
         serviceId: sid,
         price: Math.round((Number(i.servicePrice) || 0) * 100) / 100,
         quantity: lineQuantity(i.quantity),
-        ...(customName ? { customName } : {})
+        ...(customName ? { customName } : {}),
+        ...(assignedToUsers.length ? { assignedToUsers } : {})
       };
     });
 
@@ -382,6 +392,8 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
       0
     ) * 100
   ) / 100;
+  syncInvoiceDiscountAmount(invoice);
+  applyComputedGstAmount(invoice);
   recalculateInvoiceFinalAmount(invoice);
 
   if (invoice.jobId) {

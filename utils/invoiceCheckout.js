@@ -3,9 +3,13 @@ import BusinessSettings from '../models/BusinessSettings.model.js';
 import { recalculateInvoiceFinalAmount } from './jobServiceLines.js';
 import { normalizeInvoicePaymentFields, roundMoney } from './invoicePayment.js';
 import { normalizeCreditCheckoutPayment } from './creditPayment.js';
+import { applyInvoiceDiscountFields, resolveInvoiceDiscount } from './invoiceDiscount.js';
+import { applyComputedGstAmount, ensureInvoiceGstSettings } from './invoiceGst.js';
 
 const LOCKED_FINANCIAL_KEYS = [
   'discount',
+  'discountType',
+  'discountAmount',
   'taxPercentage',
   'gstAmount',
   'loyaltyRedeemedPoints',
@@ -72,9 +76,7 @@ async function applyLoyaltyRedemption(invoice, body, businessId) {
     throw err;
   }
 
-  const subtotal = Number(invoice.subtotal) || 0;
-  const discountPct = Number(invoice.discount) || 0;
-  const afterDiscount = subtotal * (1 - discountPct / 100);
+  const { afterDiscount } = resolveInvoiceDiscount(invoice);
   const gst = Number(invoice.gstAmount) || 0;
   const billBeforeLoyalty = roundMoney(afterDiscount + gst);
   if (amount > billBeforeLoyalty + 0.02) {
@@ -87,15 +89,6 @@ async function applyLoyaltyRedemption(invoice, body, businessId) {
   invoice.loyaltyRedeemedAmount = amount;
 }
 
-function recalcGstAmount(invoice) {
-  const subtotal = Number(invoice.subtotal) || 0;
-  const discountPct = Number(invoice.discount) || 0;
-  const afterDiscount = subtotal * (1 - discountPct / 100);
-  const taxPct = Number(invoice.taxPercentage) || 0;
-  const hasGst = !!(invoice.companyGst && String(invoice.companyGst).trim() && taxPct > 0);
-  invoice.gstAmount = hasGst ? roundMoney(afterDiscount * (taxPct / 100)) : 0;
-}
-
 /**
  * Apply discount, loyalty, GST, and checkout payment fields on an open (unpaid) invoice.
  */
@@ -106,21 +99,38 @@ export async function applyOpenInvoiceFinancialFields(invoice, body, businessId)
     throw err;
   }
 
-  if (body.discount !== undefined) {
-    invoice.discount = Math.max(0, Math.min(100, Number(body.discount) || 0));
+  // GST-enabled shops: fill missing tax % / GSTIN from settings before totals/payment
+  await ensureInvoiceGstSettings(invoice, businessId);
+
+  const discountTouched =
+    body.discount !== undefined ||
+    body.discountType !== undefined ||
+    body.discountAmount !== undefined;
+
+  if (discountTouched) {
+    const settings = await BusinessSettings.findOne({ businessId })
+      .select('invoiceDiscountAmountEnabled')
+      .lean();
+    applyInvoiceDiscountFields(invoice, body, {
+      amountModeEnabled: !!settings?.invoiceDiscountAmountEnabled
+    });
   }
 
   if (body.taxPercentage !== undefined) {
     invoice.taxPercentage = Math.max(0, Math.min(100, Number(body.taxPercentage) || 0));
   }
 
+  // GST on amount-after-discount (loyalty is applied after tax, matching the UI)
   if (body.gstAmount !== undefined) {
     invoice.gstAmount = roundMoney(Math.max(0, Number(body.gstAmount) || 0));
-  } else if (body.taxPercentage !== undefined || body.discount !== undefined) {
-    recalcGstAmount(invoice);
+  } else {
+    applyComputedGstAmount(invoice);
   }
 
-  if (body.loyaltyRedeemedPoints !== undefined || body.loyaltyRedeemedAmount !== undefined) {
+  const loyaltyTouched =
+    body.loyaltyRedeemedPoints !== undefined || body.loyaltyRedeemedAmount !== undefined;
+
+  if (loyaltyTouched) {
     await applyLoyaltyRedemption(invoice, body, businessId);
   }
 

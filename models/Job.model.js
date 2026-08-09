@@ -36,7 +36,15 @@ const jobServiceSchema = new mongoose.Schema({
     type: Number,
     default: 1,
     min: [1, 'Quantity must be at least 1']
-  }
+  },
+  /**
+   * Employees who performed this service line (subset of job assignedToUsers).
+   * Used when perServiceEmployeeAssignEnabled is on.
+   */
+  assignedToUsers: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }]
 }, { _id: false });
 
 const qualityCheckItemSchema = new mongoose.Schema({

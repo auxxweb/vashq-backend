@@ -19,6 +19,7 @@ import {
   changeLeadStatus,
   createLeadRecord,
   ensureCustomerAndCarFromLead,
+  importLeadRows,
   listCrmMeta,
   markLeadConverted,
   parseLeadsCsv,
@@ -28,6 +29,18 @@ import { createAdminBooking } from '../services/bookingService.js';
 import { isModuleEnabled } from '../services/businessModulesService.js';
 import { normalizePhone, applyDefaultCountryCode } from '../utils/customer.utils.js';
 import { parseBusinessDateRange, applyCreatedAtRange } from '../utils/businessDateRange.js';
+import { isAdminPanelRole } from '../utils/adminRoles.js';
+import { isSalesEmployee } from '../utils/employeeType.js';
+import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
+import {
+  applySalesLeadScope,
+  assertSalesCanAccessLead,
+  canBulkManageLeads,
+  canImportLeads,
+  canManageCrmPipeline,
+  listSalesStaff,
+  resolveSalesAssignee
+} from '../utils/crmAccess.js';
 
 const router = express.Router();
 
@@ -62,6 +75,13 @@ async function requireCrmEnabled(req, res, next) {
 }
 
 router.use(requireCrmEnabled);
+router.use((req, res, next) => {
+  if (isAdminPanelRole(req.user?.role) || isSalesEmployee(req.user)) return next();
+  return res.status(403).json({
+    success: false,
+    message: 'Access denied. CRM is available to admins and sales employees.'
+  });
+});
 
 function validate(req, res) {
   const errors = validationResult(req);
@@ -80,16 +100,27 @@ async function findLead(req, id) {
   const lead = await Lead.findOne(scopedFilter(req, { _id: id }))
     .populate('statusId')
     .populate('sourceId')
-    .populate('assignedTo', 'name employeeCode')
+    .populate('assignedTo', 'name employeeCode employeeType')
     .populate('convertedCustomerId', 'name phone')
     .populate('convertedBookingId', 'bookingDate status')
     .populate('convertedJobId', 'tokenNumber status');
-  if (lead) assertBranchAccess(req, lead, { allowLegacyNull: true });
+  if (lead) {
+    assertBranchAccess(req, lead, { allowLegacyNull: true });
+    assertSalesCanAccessLead(req.user, lead);
+  }
   return lead;
 }
 
 function leadFilter(req, extra = {}) {
-  return { ...branchFilter(req), ...extra };
+  const filter = { ...branchFilter(req), ...extra };
+  return applySalesLeadScope(filter, req.user);
+}
+
+function requirePipelineAdmin(req, res, next) {
+  if (!canManageCrmPipeline(req.user)) {
+    return res.status(403).json({ success: false, message: 'Only admins can manage CRM statuses and sources' });
+  }
+  next();
 }
 
 // ---------- Meta ----------
@@ -113,7 +144,7 @@ router.get('/statuses', async (req, res) => {
   }
 });
 
-router.post('/statuses', [
+router.post('/statuses', requirePipelineAdmin, [
   body('name').trim().notEmpty().withMessage('Status name is required'),
   body('sortOrder').isInt({ min: 0 }).withMessage('Sort order must be 0 or greater'),
   body('color').optional().trim().isString(),
@@ -143,7 +174,7 @@ router.post('/statuses', [
   }
 });
 
-router.put('/statuses/reorder', [
+router.put('/statuses/reorder', requirePipelineAdmin, [
   body('orderedIds').isArray({ min: 1 }).withMessage('orderedIds required')
 ], async (req, res) => {
   try {
@@ -170,7 +201,7 @@ router.put('/statuses/reorder', [
   }
 });
 
-router.put('/statuses/:id', [
+router.put('/statuses/:id', requirePipelineAdmin, [
   body('name').optional().trim().notEmpty(),
   body('sortOrder').optional().isInt({ min: 0 }),
   body('color').optional().trim().isString(),
@@ -206,7 +237,7 @@ router.put('/statuses/:id', [
   }
 });
 
-router.delete('/statuses/:id', async (req, res) => {
+router.delete('/statuses/:id', requirePipelineAdmin, async (req, res) => {
   try {
     const status = await LeadStatus.findOne({ _id: req.params.id, businessId: req.businessId });
     if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
@@ -272,7 +303,7 @@ router.get('/sources', async (req, res) => {
   }
 });
 
-router.post('/sources', [
+router.post('/sources', requirePipelineAdmin, [
   body('name').trim().notEmpty().withMessage('Source name is required')
 ], async (req, res) => {
   try {
@@ -292,7 +323,7 @@ router.post('/sources', [
   }
 });
 
-router.put('/sources/:id', [
+router.put('/sources/:id', requirePipelineAdmin, [
   body('name').optional().trim().notEmpty(),
   body('isActive').optional().isBoolean()
 ], async (req, res) => {
@@ -312,7 +343,7 @@ router.put('/sources/:id', [
   }
 });
 
-router.delete('/sources/:id', async (req, res) => {
+router.delete('/sources/:id', requirePipelineAdmin, async (req, res) => {
   try {
     const source = await LeadSource.findOne({ _id: req.params.id, businessId: req.businessId });
     if (!source) return res.status(404).json({ success: false, message: 'Source not found' });
@@ -335,12 +366,28 @@ router.delete('/sources/:id', async (req, res) => {
   }
 });
 
+// ---------- Sales staff (for assign UI) ----------
+router.get('/sales-staff', async (req, res) => {
+  try {
+    if (!canBulkManageLeads(req.user) && !isSalesEmployee(req.user)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const branchScope = req.branchScope === 'one' ? req.branchId : null;
+    const staff = await listSalesStaff(req.businessId, { branchId: branchScope });
+    res.json({ success: true, employees: staff });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message || 'Server error' });
+  }
+});
+
 // ---------- Leads ----------
 router.get('/leads', async (req, res) => {
   try {
     const {
       statusId,
       sourceId,
+      assignedTo,
+      unassigned,
       search,
       followUpDue,
       range = 'all',
@@ -353,6 +400,14 @@ router.get('/leads', async (req, res) => {
     const filter = leadFilter(req);
     if (statusId && mongoose.isValidObjectId(statusId)) filter.statusId = statusId;
     if (sourceId && mongoose.isValidObjectId(sourceId)) filter.sourceId = sourceId;
+    // Admin assignee filter (sales scope already applied above)
+    if (isAdminPanelRole(req.user.role)) {
+      if (unassigned === '1' || unassigned === 'true') {
+        filter.assignedTo = null;
+      } else if (assignedTo && mongoose.isValidObjectId(assignedTo)) {
+        filter.assignedTo = assignedTo;
+      }
+    }
     if (followUpDue === '1' || followUpDue === 'true') {
       filter.followUpAt = { $ne: null, $lte: new Date() };
       // Converted / already-booked leads must not appear as open follow-ups
@@ -406,7 +461,7 @@ router.get('/leads', async (req, res) => {
         .limit(lim)
         .populate('statusId')
         .populate('sourceId')
-        .populate('assignedTo', 'name')
+        .populate('assignedTo', 'name employeeCode employeeType')
         .lean(),
       Lead.countDocuments(filter),
       listCrmMeta(req.businessId)
@@ -424,7 +479,10 @@ router.get('/leads', async (req, res) => {
       range: rangeKey,
       rangeLabel: rangeMeta.rangeLabel,
       start: rangeMeta.start,
-      end: rangeMeta.end
+      end: rangeMeta.end,
+      canBulkManage: canBulkManageLeads(req.user),
+      canImport: canImportLeads(req.user),
+      canManagePipeline: canManageCrmPipeline(req.user)
     });
   } catch (e) {
     console.error('List leads error:', e);
@@ -437,72 +495,237 @@ router.post('/leads', [
   body('phone').trim().notEmpty().withMessage('Phone is required'),
   body('location').optional().trim().isString(),
   body('statusId').optional().isMongoId(),
-  body('sourceId').optional({ checkFalsy: true }).isMongoId()
+  body('sourceId').optional({ checkFalsy: true }).isMongoId(),
+  body('assignedTo').optional({ checkFalsy: true }).isMongoId()
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;
     if (!req.branchId) {
       return res.status(400).json({ success: false, message: 'Select an active branch first' });
     }
+    const body = { ...req.body };
+    if (isSalesEmployee(req.user)) {
+      body.assignedTo = req.user._id;
+    } else if (body.assignedTo) {
+      const assignee = await resolveSalesAssignee(req.businessId, body.assignedTo, {
+        branchId: req.branchScope === 'one' ? req.branchId : null
+      });
+      body.assignedTo = assignee._id;
+    }
     const lead = await createLeadRecord({
       businessId: req.businessId,
       branchId: branchIdForCreate(req),
       userId: req.user._id,
-      body: req.body
+      body
     });
     await lead.populate('statusId');
     await lead.populate('sourceId');
+    await lead.populate('assignedTo', 'name employeeCode employeeType');
     res.status(201).json({ success: true, lead });
   } catch (e) {
     res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
   }
 });
 
-router.post('/leads/import', [
+router.post('/leads/import', adminPanelOnly, [
   body('csv').isString().notEmpty().withMessage('CSV content is required')
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;
-    if (!req.branchId) {
-      return res.status(400).json({ success: false, message: 'Select an active branch first' });
+    if (!canImportLeads(req.user)) {
+      return res.status(403).json({ success: false, message: 'Only admins can bulk-import leads' });
     }
+
+    let writeBranchId = req.branchId;
+    if (!writeBranchId) {
+      const { ensureDefaultBranchForBusiness } = await import('../services/branchService.js');
+      const defaultBranch = await ensureDefaultBranchForBusiness(req.businessId);
+      writeBranchId = defaultBranch?._id || null;
+    }
+    if (!writeBranchId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Select a branch in the header switcher, then try Import again'
+      });
+    }
+
     const rows = parseLeadsCsv(req.body.csv);
     const sources = await LeadSource.find({ businessId: req.businessId }).lean();
     const sourceByName = new Map(sources.map((s) => [s.name.toLowerCase(), s]));
 
-    let created = 0;
+    const result = await importLeadRows({
+      businessId: req.businessId,
+      branchId: writeBranchId,
+      userId: req.user._id,
+      rows,
+      sourceByName
+    });
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
+  }
+});
+
+/** Bulk assign / status / edit — business & branch admins only */
+router.post('/leads/bulk', adminPanelOnly, [
+  body('leadIds').isArray({ min: 1 }).withMessage('Select at least one lead'),
+  body('action').isIn(['assign', 'status', 'edit']).withMessage('Invalid bulk action')
+], async (req, res) => {
+  try {
+    if (!validate(req, res)) return;
+    if (!canBulkManageLeads(req.user)) {
+      return res.status(403).json({ success: false, message: 'Only admins can bulk-manage leads' });
+    }
+
+    const leadIds = [...new Set((req.body.leadIds || []).map(String).filter((id) => mongoose.isValidObjectId(id)))];
+    if (!leadIds.length) {
+      return res.status(400).json({ success: false, message: 'Select at least one valid lead' });
+    }
+
+    const leads = await Lead.find(scopedFilter(req, { _id: { $in: leadIds } }));
+    if (!leads.length) {
+      return res.status(404).json({ success: false, message: 'No matching leads found' });
+    }
+    for (const lead of leads) {
+      assertBranchAccess(req, lead, { allowLegacyNull: true });
+    }
+
+    const action = req.body.action;
+    let updated = 0;
     const errors = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      try {
-        let sourceId = null;
-        if (row.sourceName?.trim()) {
-          const key = row.sourceName.trim().toLowerCase();
-          let src = sourceByName.get(key);
-          if (!src) {
-            src = await LeadSource.create({
-              businessId: req.businessId,
-              name: row.sourceName.trim(),
-              isActive: true
-            });
-            sourceByName.set(key, src);
-          }
-          sourceId = src._id;
-        }
-        await createLeadRecord({
-          businessId: req.businessId,
-          branchId: branchIdForCreate(req),
-          userId: req.user._id,
-          body: { ...row, sourceId },
-          imported: true
+
+    if (action === 'assign') {
+      let assigneeId = req.body.assignedTo;
+      if (assigneeId === '' || assigneeId === undefined) assigneeId = null;
+      let assignee = null;
+      if (assigneeId) {
+        assignee = await resolveSalesAssignee(req.businessId, assigneeId, {
+          branchId: req.branchScope === 'one' ? req.branchId : null
         });
-        created++;
-      } catch (rowErr) {
-        errors.push({ row: i + 2, message: rowErr.message || 'Failed' });
+      }
+      for (const lead of leads) {
+        try {
+          const prev = lead.assignedTo ? String(lead.assignedTo) : null;
+          const next = assignee ? String(assignee._id) : null;
+          if (prev === next) continue;
+          lead.assignedTo = assignee?._id || null;
+          pushLeadActivity(lead, {
+            type: 'ASSIGNED',
+            note: assignee
+              ? `Assigned to ${assignee.name || assignee.employeeCode || 'sales staff'}`
+              : 'Unassigned',
+            createdBy: req.user._id
+          });
+          await lead.save();
+          updated += 1;
+        } catch (rowErr) {
+          errors.push({ leadId: String(lead._id), message: rowErr.message || 'Failed' });
+        }
+      }
+    } else if (action === 'status') {
+      if (!req.body.statusId || !mongoose.isValidObjectId(req.body.statusId)) {
+        return res.status(400).json({ success: false, message: 'Status is required' });
+      }
+      const note = String(req.body.note || 'Bulk status update').trim() || 'Bulk status update';
+      for (const lead of leads) {
+        try {
+          await changeLeadStatus({
+            lead,
+            businessId: req.businessId,
+            userId: req.user._id,
+            statusId: req.body.statusId,
+            note,
+            followUpAt: req.body.followUpAt,
+            followUpNotes: req.body.followUpNotes
+          });
+          updated += 1;
+        } catch (rowErr) {
+          errors.push({ leadId: String(lead._id), message: rowErr.message || 'Failed' });
+        }
+      }
+    } else if (action === 'edit') {
+      const fields = req.body.fields || {};
+      let resolvedSourceId;
+      if (fields.sourceId !== undefined) {
+        if (!fields.sourceId) resolvedSourceId = null;
+        else {
+          const src = await LeadSource.findOne({ _id: fields.sourceId, businessId: req.businessId });
+          if (!src) {
+            return res.status(400).json({ success: false, message: 'Source not found' });
+          }
+          resolvedSourceId = src._id;
+        }
+      }
+      let resolvedAssignee;
+      if (fields.assignedTo !== undefined) {
+        if (!fields.assignedTo) resolvedAssignee = null;
+        else {
+          resolvedAssignee = await resolveSalesAssignee(req.businessId, fields.assignedTo, {
+            branchId: req.branchScope === 'one' ? req.branchId : null
+          });
+        }
+      }
+
+      for (const lead of leads) {
+        try {
+          let changed = false;
+          const textFields = ['location', 'notes', 'followUpNotes', 'vehicleBrand', 'vehicleModel', 'vehicleColor', 'vehicleType'];
+          for (const f of textFields) {
+            if (fields[f] !== undefined) {
+              lead[f] = String(fields[f] || '').trim();
+              changed = true;
+            }
+          }
+          if (fields.vehicleNumber !== undefined) {
+            lead.vehicleNumber = String(fields.vehicleNumber || '').trim().toUpperCase();
+            changed = true;
+          }
+          if (fields.followUpAt !== undefined) {
+            lead.followUpAt = fields.followUpAt ? new Date(fields.followUpAt) : null;
+            changed = true;
+          }
+          if (fields.sourceId !== undefined) {
+            lead.sourceId = resolvedSourceId;
+            changed = true;
+          }
+          if (fields.assignedTo !== undefined) {
+            const prev = lead.assignedTo ? String(lead.assignedTo) : null;
+            const next = resolvedAssignee ? String(resolvedAssignee._id) : null;
+            if (prev !== next) {
+              lead.assignedTo = resolvedAssignee?._id || null;
+              pushLeadActivity(lead, {
+                type: 'ASSIGNED',
+                note: resolvedAssignee
+                  ? `Assigned to ${resolvedAssignee.name || resolvedAssignee.employeeCode || 'sales staff'}`
+                  : 'Unassigned',
+                createdBy: req.user._id
+              });
+              changed = true;
+            }
+          }
+          if (!changed) continue;
+          pushLeadActivity(lead, {
+            type: 'UPDATED',
+            note: String(fields.updateNote || 'Bulk edit').trim() || 'Bulk edit',
+            createdBy: req.user._id
+          });
+          await lead.save();
+          updated += 1;
+        } catch (rowErr) {
+          errors.push({ leadId: String(lead._id), message: rowErr.message || 'Failed' });
+        }
       }
     }
-    res.json({ success: true, created, failed: errors.length, errors: errors.slice(0, 50) });
+
+    res.json({
+      success: true,
+      updated,
+      matched: leads.length,
+      failed: errors.length,
+      errors: errors.slice(0, 50)
+    });
   } catch (e) {
+    console.error('Bulk leads error:', e);
     res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
   }
 });
@@ -533,6 +756,7 @@ router.put('/leads/:id', async (req, res) => {
     const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     assertBranchAccess(req, lead, { allowLegacyNull: true });
+    assertSalesCanAccessLead(req.user, lead);
 
     const fields = [
       'name', 'location', 'vehicleNumber', 'vehicleBrand', 'vehicleModel',
@@ -562,7 +786,27 @@ router.put('/leads/:id', async (req, res) => {
       lead.followUpAt = req.body.followUpAt ? new Date(req.body.followUpAt) : null;
     }
     if (req.body.assignedTo !== undefined) {
-      lead.assignedTo = req.body.assignedTo || null;
+      if (isSalesEmployee(req.user)) {
+        return res.status(403).json({ success: false, message: 'Sales staff cannot reassign leads' });
+      }
+      if (!req.body.assignedTo) {
+        lead.assignedTo = null;
+        pushLeadActivity(lead, {
+          type: 'ASSIGNED',
+          note: 'Unassigned',
+          createdBy: req.user._id
+        });
+      } else {
+        const assignee = await resolveSalesAssignee(req.businessId, req.body.assignedTo, {
+          branchId: req.branchScope === 'one' ? req.branchId : null
+        });
+        lead.assignedTo = assignee._id;
+        pushLeadActivity(lead, {
+          type: 'ASSIGNED',
+          note: `Assigned to ${assignee.name || assignee.employeeCode || 'sales staff'}`,
+          createdBy: req.user._id
+        });
+      }
     }
 
     pushLeadActivity(lead, {
@@ -573,7 +817,21 @@ router.put('/leads/:id', async (req, res) => {
     await lead.save();
     await lead.populate('statusId');
     await lead.populate('sourceId');
+    await lead.populate('assignedTo', 'name employeeCode employeeType');
     res.json({ success: true, lead });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
+  }
+});
+
+router.delete('/leads/:id', adminPanelOnly, async (req, res) => {
+  try {
+    const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    assertBranchAccess(req, lead, { allowLegacyNull: true });
+    assertSalesCanAccessLead(req.user, lead);
+    await Lead.deleteOne({ _id: lead._id, businessId: req.businessId });
+    res.json({ success: true, message: 'Lead deleted' });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message || 'Server error' });
   }
@@ -590,7 +848,7 @@ router.post('/leads/:id/status', [
     const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     assertBranchAccess(req, lead, { allowLegacyNull: true });
-
+    assertSalesCanAccessLead(req.user, lead);
     await changeLeadStatus({
       lead,
       businessId: req.businessId,
@@ -623,6 +881,7 @@ router.post('/leads/:id/note', [
     const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     assertBranchAccess(req, lead, { allowLegacyNull: true });
+    assertSalesCanAccessLead(req.user, lead);
     pushLeadActivity(lead, {
       type: 'NOTE',
       note: req.body.note.trim(),
@@ -735,7 +994,7 @@ router.post('/leads/:id/link-booking', [
     const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     assertBranchAccess(req, lead, { allowLegacyNull: true });
-
+    assertSalesCanAccessLead(req.user, lead);
     if (lead.convertedBookingId) {
       return res.json({ success: true, lead: await findLead(req, lead._id), alreadyLinked: true });
     }
@@ -771,7 +1030,7 @@ router.post('/leads/:id/convert-booking', async (req, res) => {
     const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     assertBranchAccess(req, lead, { allowLegacyNull: true });
-
+    assertSalesCanAccessLead(req.user, lead);
     if (lead.convertedBookingId) {
       return res.status(400).json({ success: false, message: 'Lead already has a booking' });
     }
@@ -861,7 +1120,7 @@ router.post('/leads/:id/convert-job', async (req, res) => {
     const lead = await Lead.findOne(scopedFilter(req, { _id: req.params.id }));
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     assertBranchAccess(req, lead, { allowLegacyNull: true });
-
+    assertSalesCanAccessLead(req.user, lead);
     if (lead.convertedJobId) {
       return res.status(400).json({ success: false, message: 'Lead already has a job' });
     }

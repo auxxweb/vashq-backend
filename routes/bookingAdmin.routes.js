@@ -30,7 +30,9 @@ import { resolveBranchContext, branchFilter } from '../middleware/branchContext.
 import { requireBusinessModule } from '../middleware/businessModules.middleware.js';
 import { scopedFilter, assertBranchAccess } from '../utils/branchAccess.js';
 import { enforceActiveSubscription } from '../middleware/subscription.middleware.js';
-import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
+import { adminPanelOnly, adminPanelOrSalesEmployee } from '../middleware/adminPanel.middleware.js';
+import { isAdminPanelRole } from '../utils/adminRoles.js';
+import { isSalesEmployee } from '../utils/employeeType.js';
 
 async function findBookingScoped(req, id) {
   const booking = await Booking.findOne(scopedFilter(req, { _id: id }))
@@ -56,6 +58,13 @@ router.use((req, res, next) => {
 router.use(resolveBranchContext);
 router.use(requireBusinessModule('bookings'));
 router.use(enforceActiveSubscription());
+router.use((req, res, next) => {
+  if (isAdminPanelRole(req.user?.role) || isSalesEmployee(req.user)) return next();
+  return res.status(403).json({
+    success: false,
+    message: 'Access denied. Bookings are available to admins and sales employees.'
+  });
+});
 
 function validate(req, res) {
   const errors = validationResult(req);
@@ -327,8 +336,8 @@ router.get('/availability', async (req, res) => {
   }
 });
 
-// ---------- Create booking (shop admin / walk-in) ----------
-router.post('/', adminPanelOnly, [
+// ---------- Create booking (shop admin / sales employee / walk-in) ----------
+router.post('/', adminPanelOrSalesEmployee, [
   body('slotId').notEmpty().withMessage('Time slot is required'),
   body('bookingDate').notEmpty().withMessage('Booking date is required'),
   body('serviceIds').optional().isArray({ min: 1 }),
@@ -438,7 +447,7 @@ router.get('/:id/whatsapp-message', async (req, res) => {
   }
 });
 
-router.patch('/:id/confirm', adminPanelOnly, async (req, res) => {
+router.patch('/:id/confirm', adminPanelOrSalesEmployee, async (req, res) => {
   try {
     const booking = await updateBookingStatus(req.businessId, req.params.id, 'CONFIRMED');
     res.json({ success: true, booking });
@@ -447,7 +456,7 @@ router.patch('/:id/confirm', adminPanelOnly, async (req, res) => {
   }
 });
 
-router.patch('/:id/reject', adminPanelOnly, async (req, res) => {
+router.patch('/:id/reject', adminPanelOrSalesEmployee, async (req, res) => {
   try {
     const booking = await updateBookingStatus(req.businessId, req.params.id, 'REJECTED');
     res.json({ success: true, booking });
@@ -456,7 +465,7 @@ router.patch('/:id/reject', adminPanelOnly, async (req, res) => {
   }
 });
 
-router.patch('/:id/cancel', adminPanelOnly, async (req, res) => {
+router.patch('/:id/cancel', adminPanelOrSalesEmployee, async (req, res) => {
   try {
     const booking = await updateBookingStatus(req.businessId, req.params.id, 'CANCELLED');
     res.json({ success: true, booking });
@@ -465,7 +474,7 @@ router.patch('/:id/cancel', adminPanelOnly, async (req, res) => {
   }
 });
 
-router.patch('/:id/reschedule', adminPanelOnly, [
+router.patch('/:id/reschedule', adminPanelOrSalesEmployee, [
   body('bookingDate').isISO8601(),
   body('slotId').notEmpty()
 ], async (req, res) => {
@@ -481,7 +490,7 @@ router.patch('/:id/reschedule', adminPanelOnly, [
   }
 });
 
-router.post('/:id/convert-job', adminPanelOnly, [
+router.post('/:id/convert-job', adminPanelOrSalesEmployee, [
   body('carId').optional().isMongoId(),
   body('vehicleNumber').optional().trim(),
   body('vehicleBrand').optional().trim(),

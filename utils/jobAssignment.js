@@ -100,3 +100,37 @@ export async function resolveJobAssignees({
     assignedToUsers: ordered.map((id) => new mongoose.Types.ObjectId(id))
   };
 }
+
+/**
+ * Attach per-service assignees onto resolved job lines.
+ * Only IDs that are in the job-level assignee pool are kept.
+ * When disabled, strips any incoming line assignees.
+ *
+ * @param {Array} lines - output of resolveJobServiceLines
+ * @param {Array} linesInput - original request services[] (same order)
+ * @param {{ enabled: boolean, allowedIds: Array }} opts
+ */
+export function attachServiceLineAssignees(lines, linesInput, { enabled, allowedIds } = {}) {
+  const allowed = new Set((allowedIds || []).map((id) => toIdString(id)).filter(Boolean));
+
+  return (lines || []).map((line, index) => {
+    const base = { ...line };
+    if (!enabled) {
+      delete base.assignedToUsers;
+      return base;
+    }
+
+    const input = Array.isArray(linesInput) ? linesInput[index] : null;
+    const raw = Array.isArray(input?.assignedToUsers) ? input.assignedToUsers : [];
+    const ordered = [];
+    const seen = new Set();
+    for (const v of raw) {
+      const id = toIdString(v);
+      if (!id || !allowed.has(id) || seen.has(id)) continue;
+      if (!mongoose.Types.ObjectId.isValid(id)) continue;
+      seen.add(id);
+      ordered.push(new mongoose.Types.ObjectId(id));
+    }
+    return { ...base, assignedToUsers: ordered };
+  });
+}
