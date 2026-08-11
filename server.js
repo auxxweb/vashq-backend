@@ -29,6 +29,7 @@ import vehicleScannerRoutes from './routes/vehicleScanner.routes.js';
 import { initFirebaseAdmin } from './services/firebaseAdmin.js';
 import branchesRoutes from './routes/branches.routes.js';
 import { startCronJobs } from './cronJobs.js';
+import { resolveCorsAllowlist } from './utils/frontendUrl.js';
 
 const app = express();
 
@@ -45,14 +46,27 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// Middleware - allow FRONTEND_URL (string or comma-separated) or defaults
-const corsOrigin = process.env.FRONTEND_URL
-  ? process.env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean)
-  : ['http://localhost:3000', 'http://localhost:4173', 'https://vashq.com','https://beta.vashq.com',];
+// CORS — merge FRONTEND_URL / PUBLIC_FRONTEND_URL with production defaults (vashq.com, www, beta)
+const corsAllowlist = resolveCorsAllowlist();
 app.use(cors({
-  origin: corsOrigin.length === 1 ? corsOrigin[0] : corsOrigin,
-  credentials: true
+  origin(origin, callback) {
+    // Non-browser / same-origin tools (curl, health checks) send no Origin
+    if (!origin) return callback(null, true);
+    const normalized = String(origin).trim().replace(/\/$/, '');
+    if (corsAllowlist.includes(normalized)) {
+      return callback(null, true);
+    }
+    console.warn('CORS blocked origin:', normalized, '| allowlist size:', corsAllowlist.length);
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Branch-Id', 'X-Branch-Scope', 'X-Requested-With'],
+  optionsSuccessStatus: 204
 }));
+// Explicit preflight for all API paths (helps some proxies)
+app.options('*', cors());
+
 app.use(compression());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
@@ -97,7 +111,7 @@ const apiLimiter = rateLimit({
   max: 400,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === '/api/health',
+  skip: (req) => req.path === '/api/health' || req.method === 'OPTIONS',
   message: { success: false, message: 'Too many requests, please try again later.' }
 });
 app.use('/api', apiLimiter);
@@ -108,6 +122,7 @@ const authLimiter = rateLimit({
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.method === 'OPTIONS',
   message: { success: false, message: 'Too many requests, please try again later.' }
 });
 app.use('/api/auth/login', authLimiter);

@@ -2,10 +2,59 @@
  * FRONTEND_URL may be comma-separated (CORS allowlist). Customer-facing links need one origin.
  */
 
+const DEFAULT_CORS_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:4173',
+  'http://127.0.0.1:3000',
+  'https://vashq.com',
+  'https://www.vashq.com',
+  'https://beta.vashq.com'
+];
+
 export function parseFrontendOrigins() {
   const raw = (process.env.FRONTEND_URL || '').trim();
   if (!raw) return [];
-  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return raw.split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
+}
+
+/**
+ * Full CORS allowlist: FRONTEND_URL + PUBLIC_FRONTEND_URL + safe production defaults.
+ * Ensures https://vashq.com works even if FRONTEND_URL was set to a single other origin.
+ */
+export function resolveCorsAllowlist() {
+  const fromEnv = parseFrontendOrigins();
+  const publicOrigin = normalizeOrigin(process.env.PUBLIC_FRONTEND_URL || '');
+  const merged = [...fromEnv];
+  if (publicOrigin) merged.push(publicOrigin);
+  for (const o of DEFAULT_CORS_ORIGINS) {
+    if (!merged.includes(o)) merged.push(o);
+  }
+  // Also allow www ↔ apex pair when one is listed (skip localhost / IPs)
+  const withWwwPairs = [...merged];
+  for (const o of merged) {
+    try {
+      const u = new URL(o);
+      const host = u.hostname;
+      if (
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host === '[::1]' ||
+        /^\d{1,3}(\.\d{1,3}){3}$/.test(host)
+      ) {
+        continue;
+      }
+      if (host.startsWith('www.')) {
+        const apex = `${u.protocol}//${host.slice(4)}`;
+        if (!withWwwPairs.includes(apex)) withWwwPairs.push(apex);
+      } else if (host.includes('.')) {
+        const www = `${u.protocol}//www.${host}`;
+        if (!withWwwPairs.includes(www)) withWwwPairs.push(www);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return [...new Set(withWwwPairs.map((s) => s.replace(/\/$/, '')).filter(Boolean))];
 }
 
 function isLocalOrigin(url) {
