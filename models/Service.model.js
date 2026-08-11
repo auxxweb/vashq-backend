@@ -76,6 +76,11 @@ const serviceSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  /** When false, service is hidden from the public online booking form (admin bookings still include it). */
+  showOnBookingForm: {
+    type: Boolean,
+    default: true
+  },
   /**
    * Optional category (when BusinessSettings.serviceCategoriesEnabled).
    * Legacy / unset rows are backfilled to the business Default category when the feature is enabled.

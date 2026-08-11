@@ -23,7 +23,15 @@ const customerPackageSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   price: { type: Number, required: true, min: 0 },
   totalVisits: { type: Number, required: true, min: 1 },
-  validityDays: { type: Number, required: true, min: 1 },
+  /** Optional on legacy purchased packages */
+  validityValue: { type: Number, min: 0.01 },
+  validityUnit: {
+    type: String,
+    enum: ['days', 'weeks', 'months', 'years'],
+    default: 'days'
+  },
+  /** Approximate days snapshot (legacy + reporting) */
+  validityDays: { type: Number, required: true, min: 0.01 },
   servicesIncluded: { type: [serviceQtySchema], default: [] },
   servicesRemaining: { type: [serviceRemainingSchema], default: [] },
   description: { type: String, trim: true },

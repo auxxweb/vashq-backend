@@ -154,3 +154,45 @@ export async function applyOpenInvoiceFinancialFields(invoice, body, businessId)
 
   return invoice;
 }
+
+/**
+ * Owner editing a paid/credit-closed invoice: discount + GST only.
+ * Skips loyalty and payment amount mutation (loyalty balances / ledger stay intact).
+ * Caller should run reconcileClosedInvoiceAfterTotalChange after save prep.
+ */
+export async function applyOwnerLockedInvoiceFinancialFields(invoice, body, businessId) {
+  if (body.finalAmount !== undefined) {
+    const err = new Error('Final amount is calculated automatically');
+    err.status = 400;
+    throw err;
+  }
+
+  await ensureInvoiceGstSettings(invoice, businessId);
+
+  const discountTouched =
+    body.discount !== undefined ||
+    body.discountType !== undefined ||
+    body.discountAmount !== undefined;
+
+  if (discountTouched) {
+    const settings = await BusinessSettings.findOne({ businessId })
+      .select('invoiceDiscountAmountEnabled')
+      .lean();
+    applyInvoiceDiscountFields(invoice, body, {
+      amountModeEnabled: !!settings?.invoiceDiscountAmountEnabled
+    });
+  }
+
+  if (body.taxPercentage !== undefined) {
+    invoice.taxPercentage = Math.max(0, Math.min(100, Number(body.taxPercentage) || 0));
+  }
+
+  if (body.gstAmount !== undefined) {
+    invoice.gstAmount = roundMoney(Math.max(0, Number(body.gstAmount) || 0));
+  } else if (discountTouched || body.taxPercentage !== undefined || body.items !== undefined) {
+    applyComputedGstAmount(invoice);
+  }
+
+  recalculateInvoiceFinalAmount(invoice);
+  return invoice;
+}

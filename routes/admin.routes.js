@@ -13,7 +13,7 @@ import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import Notification from '../models/Notification.model.js';
 import { generateTokenNumber, calculateETA, canAcceptNewJob, isValidStatusTransition } from '../utils/job.utils.js';
-import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, removeProductLineFromOpenInvoice, assertVariableVisitAmountsRequired } from '../utils/jobServiceLines.js';
+import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, removeProductLineFromOpenInvoice, assertVariableVisitAmountsRequired, reconcileClosedInvoiceAfterTotalChange } from '../utils/jobServiceLines.js';
 import {
   assertDirectBillEligible,
   createInvoiceForJobRecord,
@@ -28,6 +28,7 @@ import {
   deductProductStockOnWashJobDelivery
 } from '../utils/jobProductStock.js';
 import { buildServicesListQuery } from '../utils/serviceCatalog.js';
+import { findRecentDuplicate } from '../utils/createIdempotency.js';
 import { loadDashboardStats } from '../services/dashboardStatsService.js';
 import { getDashboardServicesDistribution } from '../utils/dashboardServicesDistribution.js';
 import { getDashboardUnclosedInvoices } from '../utils/dashboardUnclosedInvoices.js';
@@ -70,7 +71,7 @@ import { sendPushNotification } from '../services/notificationService.js';
 import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
 import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
 import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, relabelLockedInvoicePaymentMethod, roundMoney } from '../utils/invoicePayment.js';
-import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
+import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields, applyOwnerLockedInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
 import { resolveInvoiceDiscount } from '../utils/invoiceDiscount.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
@@ -337,30 +338,31 @@ router.post('/upload/images', (req, res, next) => {
       return res.status(400).json({ success: false, message: 'No images provided' });
     }
     const isEmployee = req.user.role === 'EMPLOYEE';
-    const folderKey = req.body.folder === 'after'
-      ? 'after'
-      : req.body.folder === 'expenses'
-        ? 'expenses'
-        : req.body.folder === 'payment'
-          ? 'payment'
-          : req.body.folder === 'logos'
-            ? 'logos'
-            : 'before';
-    if (isEmployee && folderKey === 'payment') {
-      return res.status(403).json({ success: false, message: 'Employees cannot upload payment proof images.' });
+    const rawFolder = String(req.body.folder || '').trim().toLowerCase();
+    const folderKey = ['after', 'expenses', 'payment', 'logos', 'employees'].includes(rawFolder)
+      ? rawFolder
+      : 'before';
+    if (isEmployee && (folderKey === 'payment' || folderKey === 'employees')) {
+      return res.status(403).json({
+        success: false,
+        message: folderKey === 'employees'
+          ? 'Only business or branch admins can upload employee documents.'
+          : 'Employees cannot upload payment proof images.'
+      });
     }
     if (folderKey === 'logos' && !isBusinessOwner(req.user.role)) {
       return res.status(403).json({ success: false, message: 'Only the business owner can upload a business logo.' });
     }
-    const folder = folderKey === 'after'
-      ? 'washq/jobs/after'
-      : folderKey === 'expenses'
-        ? 'washq/expenses'
-        : folderKey === 'payment'
-          ? 'washq/payment'
-          : folderKey === 'logos'
-            ? 'washq/logos'
-            : 'washq/jobs/before';
+    if (folderKey === 'employees' && !isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const folder =
+      folderKey === 'after' ? 'washq/jobs/after'
+        : folderKey === 'expenses' ? 'washq/expenses'
+          : folderKey === 'payment' ? 'washq/payment'
+            : folderKey === 'logos' ? 'washq/logos'
+              : folderKey === 'employees' ? 'washq/employees'
+                : 'washq/jobs/before';
     const urls = [];
     for (const file of req.files) {
       const { url } = await uploadBuffer(file.buffer, file.mimetype, folder);
@@ -1496,6 +1498,7 @@ router.put('/invoices/:id', [
     const isPaid = invoice.paymentStatus === 'RECEIVED';
     const isCreditClosed = invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt;
     const isLocked = isPaid || isCreditClosed;
+    const ownerPrivileged = isLocked && isBusinessOwner(req.user.role);
 
     if (isLocked && !isBusinessOwner(req.user.role)) {
       return res.status(403).json({
@@ -1504,19 +1507,21 @@ router.put('/invoices/:id', [
       });
     }
 
-    if (isLocked) {
+    if (isLocked && !ownerPrivileged) {
       rejectLockedFinancialBodyFields(req.body);
     }
 
     if (req.body.items !== undefined) {
-      if (isLocked) {
+      if (isLocked && !ownerPrivileged) {
         return res.status(403).json({
           success: false,
           message: 'Line item amounts cannot be edited on a paid or credit-closed invoice'
         });
       }
       try {
-        await applyInvoiceItemPriceUpdates(invoice, req.body.items, req.businessId);
+        await applyInvoiceItemPriceUpdates(invoice, req.body.items, req.businessId, {
+          allowAllLinePrices: !!ownerPrivileged
+        });
       } catch (itemErr) {
         return res.status(itemErr.status || 400).json({
           success: false,
@@ -1529,6 +1534,19 @@ router.put('/invoices/:id', [
 
     if (!isLocked) {
       await applyOpenInvoiceFinancialFields(invoice, req.body, req.businessId);
+    } else if (ownerPrivileged) {
+      await applyOwnerLockedInvoiceFinancialFields(invoice, req.body, req.businessId);
+      if (req.body.paymentMethod !== undefined || req.body.onlinePaymentMode !== undefined) {
+        const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
+        const cardEnabled = await getCardPaymentEnabled(req.businessId);
+        relabelLockedInvoicePaymentMethod(
+          invoice,
+          req.body.paymentMethod ?? invoice.paymentMethod,
+          req.body.onlinePaymentMode,
+          { cardEnabled }
+        );
+      }
+      reconcileClosedInvoiceAfterTotalChange(invoice);
     } else if (req.body.paymentMethod !== undefined || req.body.onlinePaymentMode !== undefined) {
       const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');
       const cardEnabled = await getCardPaymentEnabled(req.businessId);
@@ -1591,7 +1609,9 @@ router.post('/invoices/:id/add-products', [
     }
 
     try {
-      await addProductLinesToOpenInvoice(invoiceDoc, req.businessId, req.body.services);
+      await addProductLinesToOpenInvoice(invoiceDoc, req.businessId, req.body.services, {
+        allowClosed: isBusinessOwner(req.user.role)
+      });
     } catch (addErr) {
       return res.status(addErr.status || 400).json({
         success: false,
@@ -1648,6 +1668,8 @@ router.post('/invoices/:id/remove-product', [
     try {
       await removeProductLineFromOpenInvoice(invoiceDoc, req.businessId, {
         serviceId: req.body.serviceId
+      }, {
+        allowClosed: isBusinessOwner(req.user.role)
       });
     } catch (removeErr) {
       return res.status(removeErr.status || 400).json({
@@ -1691,21 +1713,32 @@ router.get('/invoices/:id/share-url', async (req, res) => {
       invoice.paymentStatus === 'RECEIVED' &&
       (!invoice.jobId || job?.status === 'DELIVERED');
 
+    // Credit / pay-later sale already confirmed (job closed) but amount may still be due.
+    const creditSaleClosed =
+      invoice.settlementMode === 'CREDIT' &&
+      !!invoice.saleConfirmedAt &&
+      (!invoice.jobId || job?.status === 'DELIVERED');
+
     // Optional early invoice: share while job is COMPLETED (payment may still be pending).
     let earlyCompletedShare = false;
-    if (!paidAndClosed && job?.status === 'COMPLETED') {
+    if (!paidAndClosed && !creditSaleClosed && job?.status === 'COMPLETED') {
       const settings = await BusinessSettings.findOne({ businessId: req.businessId })
         .select('invoiceOnCompletedEnabled')
         .lean();
       earlyCompletedShare = !!settings?.invoiceOnCompletedEnabled;
     }
 
-    if (!paidAndClosed && !earlyCompletedShare) {
+    if (!paidAndClosed && !creditSaleClosed && !earlyCompletedShare) {
       return res.status(400).json({
         success: false,
         message: 'Invoice can be shared only after payment is received and the job is closed'
       });
     }
+
+    const outstanding = Math.max(0, Number(invoice.outstandingAmount) || 0);
+    const paymentPending =
+      invoice.paymentStatus !== 'RECEIVED' ||
+      (invoice.settlementMode === 'CREDIT' && outstanding > 0.02);
 
     if (!invoice.shareToken) {
       invoice.shareToken = generateShareToken();
@@ -1715,7 +1748,8 @@ router.get('/invoices/:id/share-url', async (req, res) => {
       success: true,
       shareToken: invoice.shareToken,
       invoiceId: String(invoice._id),
-      paymentPending: invoice.paymentStatus !== 'RECEIVED'
+      paymentPending,
+      outstandingAmount: outstanding
     });
   } catch (error) {
     console.error('Share URL error:', error);
@@ -2929,6 +2963,46 @@ async function findManagedEmployee(req, employeeId, asQuery = false) {
   return asQuery ? q : User.findOne(q);
 }
 
+function normalizeOptionalImageUrl(value) {
+  if (value == null) return '';
+  return String(value).trim();
+}
+
+function employeeDocumentFieldsFromBody(body = {}) {
+  const out = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'photoUrl')) {
+    out.photoUrl = normalizeOptionalImageUrl(body.photoUrl);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'aadhaarCardUrl')) {
+    out.aadhaarCardUrl = normalizeOptionalImageUrl(body.aadhaarCardUrl);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'panCardUrl')) {
+    out.panCardUrl = normalizeOptionalImageUrl(body.panCardUrl);
+  }
+  return out;
+}
+
+function serializeEmployee(user) {
+  if (!user) return null;
+  const obj = typeof user.toObject === 'function' ? user.toObject() : user;
+  return {
+    _id: obj._id,
+    id: obj._id,
+    name: obj.name,
+    email: obj.email,
+    phone: obj.phone,
+    address: obj.address,
+    employeeCode: obj.employeeCode,
+    employeeType: obj.employeeType === 'SALES' ? 'SALES' : 'DEFAULT',
+    status: obj.status,
+    branchId: obj.branchId || null,
+    photoUrl: obj.photoUrl || '',
+    aadhaarCardUrl: obj.aadhaarCardUrl || '',
+    panCardUrl: obj.panCardUrl || '',
+    createdAt: obj.createdAt
+  };
+}
+
 // @route   GET /api/admin/employees
 // @desc    List employees (business owner only)
 // @access  Private (Car Wash Admin)
@@ -2938,16 +3012,13 @@ router.get('/employees', async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied.' });
     }
     const employees = await User.find(employeeListQuery(req))
-      .select('name email phone address employeeCode employeeType status branchId createdAt')
+      .select('name email phone address employeeCode employeeType status branchId photoUrl aadhaarCardUrl panCardUrl createdAt')
       .populate('branchId', 'name code')
       .sort({ employeeCode: 1 })
       .lean();
     res.json({
       success: true,
-      employees: employees.map((e) => ({
-        ...e,
-        employeeType: e.employeeType === 'SALES' ? 'SALES' : 'DEFAULT'
-      }))
+      employees: employees.map((e) => serializeEmployee(e))
     });
   } catch (error) {
     console.error('Get employees error:', error);
@@ -2965,7 +3036,10 @@ router.post('/employees', [
   body('phone').optional().trim(),
   body('address').optional().trim(),
   body('branchId').optional().isMongoId(),
-  body('employeeType').optional().isIn(['DEFAULT', 'SALES'])
+  body('employeeType').optional().isIn(['DEFAULT', 'SALES']),
+  body('photoUrl').optional({ nullable: true }).isString(),
+  body('aadhaarCardUrl').optional({ nullable: true }).isString(),
+  body('panCardUrl').optional({ nullable: true }).isString()
 ], async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
@@ -2977,6 +3051,7 @@ router.post('/employees', [
     }
     const { name, email, phone, address } = req.body;
     const employeeType = req.body.employeeType === 'SALES' ? 'SALES' : 'DEFAULT';
+    const docs = employeeDocumentFieldsFromBody(req.body);
     let password = req.body.password;
     if (!password) password = randomPassword(10);
 
@@ -3009,7 +3084,10 @@ router.post('/employees', [
           phone: phone || '',
           address: address || '',
           employeeCode,
-          employeeType
+          employeeType,
+          photoUrl: docs.photoUrl || '',
+          aadhaarCardUrl: docs.aadhaarCardUrl || '',
+          panCardUrl: docs.panCardUrl || ''
         });
         break;
       } catch (err) {
@@ -3025,18 +3103,7 @@ router.post('/employees', [
 
     res.status(201).json({
       success: true,
-      employee: {
-        _id: user._id,
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        address: user.address,
-        employeeCode: user.employeeCode,
-        employeeType: user.employeeType || 'DEFAULT',
-        status: user.status,
-        branchId: user.branchId || null
-      },
+      employee: serializeEmployee(user),
       temporaryPassword: password,
       message: 'Copy the password now; it will not be shown again.'
     });
@@ -3258,7 +3325,10 @@ router.put('/employees/:id', [
   body('address').optional().trim(),
   body('status').optional().isIn(['ACTIVE', 'SUSPENDED', 'INACTIVE']),
   body('branchId').optional({ nullable: true }).isMongoId(),
-  body('employeeType').optional().isIn(['DEFAULT', 'SALES'])
+  body('employeeType').optional().isIn(['DEFAULT', 'SALES']),
+  body('photoUrl').optional({ nullable: true }).isString(),
+  body('aadhaarCardUrl').optional({ nullable: true }).isString(),
+  body('panCardUrl').optional({ nullable: true }).isString()
 ], async (req, res) => {
   try {
     if (!isAdminPanelRole(req.user.role)) {
@@ -3279,6 +3349,10 @@ router.put('/employees/:id', [
     if (req.body.employeeType != null) {
       user.employeeType = req.body.employeeType === 'SALES' ? 'SALES' : 'DEFAULT';
     }
+    const docs = employeeDocumentFieldsFromBody(req.body);
+    if (Object.prototype.hasOwnProperty.call(docs, 'photoUrl')) user.photoUrl = docs.photoUrl;
+    if (Object.prototype.hasOwnProperty.call(docs, 'aadhaarCardUrl')) user.aadhaarCardUrl = docs.aadhaarCardUrl;
+    if (Object.prototype.hasOwnProperty.call(docs, 'panCardUrl')) user.panCardUrl = docs.panCardUrl;
     if (req.body.branchId !== undefined && !isBranchAdmin(req.user.role)) {
       if (req.body.branchId === null || req.body.branchId === '') {
         user.branchId = undefined;
@@ -3301,18 +3375,7 @@ router.put('/employees/:id', [
       user.password = req.body.password;
     }
     await user.save();
-    const out = {
-      _id: user._id,
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      address: user.address,
-      employeeCode: user.employeeCode,
-      employeeType: user.employeeType || 'DEFAULT',
-      status: user.status,
-      branchId: user.branchId || null
-    };
+    const out = serializeEmployee(user);
     if (temporaryPassword) {
       res.json({ success: true, employee: out, temporaryPassword, message: 'Copy the new password if needed.' });
     } else {
@@ -4093,8 +4156,19 @@ router.post('/cars', [
     }
     assertBranchAccess(req, customer);
 
+    const plate = String(req.body.carNumber || '').trim().toUpperCase();
+    const recentCar = await findRecentDuplicate(Car, {
+      businessId: req.businessId,
+      customerId: customer._id,
+      carNumber: plate
+    });
+    if (recentCar) {
+      return res.status(200).json({ success: true, car: recentCar, deduped: true });
+    }
+
     const car = await Car.create({
       ...req.body,
+      carNumber: plate || req.body.carNumber,
       businessId: req.businessId,
       branchId: customer.branchId || req.branchId || branchIdForCreate(req)
     });
@@ -4207,7 +4281,7 @@ router.get('/services', async (req, res) => {
       variableModuleOn ? list : list.filter((s) => !s.isVariable)
     );
     const serviceSelect =
-      'name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive categoryId subCategoryId qualityChecklist createdAt';
+      'name price minTime maxTime description loyaltyPointsEarned isVariable skipWorkProcess trackInventory stockQuantity lowStockThreshold isActive showOnBookingForm categoryId subCategoryId qualityChecklist createdAt';
     const returnAll = all === '1' || all === 'true';
     if (returnAll) {
       const services = filterVariable(await Service.find(query)
@@ -4258,7 +4332,9 @@ router.post('/services', adminPanelOnly, [
   body('stockQuantity').optional({ values: 'null' }).isFloat({ min: 0 }),
   body('lowStockThreshold').optional({ values: 'null' }).isFloat({ min: 0 }),
   body('minTime').optional({ values: 'null' }).isInt({ min: 0 }),
-  body('maxTime').optional({ values: 'null' }).isInt({ min: 0 })
+  body('maxTime').optional({ values: 'null' }).isInt({ min: 0 }),
+  body('isActive').optional().isBoolean(),
+  body('showOnBookingForm').optional().isBoolean()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -4325,8 +4401,25 @@ router.post('/services', adminPanelOnly, [
       return res.status(catErr.status || 400).json({ success: false, message: catErr.message });
     }
 
+    const serviceName = String(req.body.name || '').trim();
+    const recent = await findRecentDuplicate(Service, {
+      businessId: req.businessId,
+      name: serviceName,
+      isVariable,
+      skipWorkProcess
+    });
+    if (recent) {
+      await recent.populate('categoryId', 'name isDefault');
+      await recent.populate('subCategoryId', 'name categoryId');
+      return res.status(200).json({
+        success: true,
+        service: recent,
+        deduped: true
+      });
+    }
+
     const service = await Service.create({
-      name: req.body.name,
+      name: serviceName,
       description: req.body.description,
       isVariable,
       skipWorkProcess,
@@ -4338,6 +4431,7 @@ router.post('/services', adminPanelOnly, [
       maxTime: timeCheck.maxTime,
       loyaltyPointsEarned,
       isActive: req.body.isActive !== false,
+      showOnBookingForm: req.body.showOnBookingForm !== false,
       categoryId,
       subCategoryId,
       qualityChecklist: skipWorkProcess
@@ -4375,7 +4469,9 @@ router.put('/services/:id', adminPanelOnly, [
   body('stockQuantity').optional({ values: 'null' }).isFloat({ min: 0 }),
   body('lowStockThreshold').optional({ values: 'null' }).isFloat({ min: 0 }),
   body('minTime').optional({ values: 'null' }).isInt({ min: 0 }),
-  body('maxTime').optional({ values: 'null' }).isInt({ min: 0 })
+  body('maxTime').optional({ values: 'null' }).isInt({ min: 0 }),
+  body('isActive').optional().isBoolean(),
+  body('showOnBookingForm').optional().isBoolean()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -4459,7 +4555,10 @@ router.put('/services/:id', adminPanelOnly, [
       minTime: timeCheck.minTime,
       maxTime: timeCheck.maxTime,
       loyaltyPointsEarned,
-      isActive: req.body.isActive !== undefined ? !!req.body.isActive : existing.isActive
+      isActive: req.body.isActive !== undefined ? !!req.body.isActive : existing.isActive,
+      showOnBookingForm: req.body.showOnBookingForm !== undefined
+        ? !!req.body.showOnBookingForm
+        : (existing.showOnBookingForm !== false)
     };
     if (skipWorkProcess) {
       update.qualityChecklist = { name: '', items: [] };
@@ -4579,7 +4678,7 @@ router.get('/jobs/:id', async (req, res) => {
     assertBranchAccess(req, job, { allowLegacyNull: true });
 
     const invoiceForJob = await Invoice.findOne({ businessId: req.businessId, jobId: job._id })
-      .select('finalAmount advancePayment paymentMethod onlinePaymentMode paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber createdAt paymentReceivedAt')
+      .select('finalAmount subtotal gstAmount discount discountType discountAmount taxPercentage items advancePayment paymentMethod onlinePaymentMode paymentStatus paymentCashAmount paymentOnlineAmount invoiceNumber createdAt paymentReceivedAt settlementMode saleConfirmedAt outstandingAmount')
       .lean();
 
     const pendingSettlementRequest = invoiceForJob
@@ -5461,10 +5560,16 @@ router.put('/jobs/:id', [
     }
     assertBranchAccess(req, job, { allowLegacyNull: true });
 
-    if (job.status === 'DELIVERED' || job.status === 'CANCELLED') {
+    if (job.status === 'CANCELLED') {
       return res.status(400).json({
         success: false,
-        message: 'Delivered/cancelled jobs cannot be edited'
+        message: 'Cancelled jobs cannot be edited'
+      });
+    }
+    if (job.status === 'DELIVERED' && !isBusinessOwner(req.user.role)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only the business owner can edit a delivered job'
       });
     }
 
@@ -5606,14 +5711,19 @@ router.put('/jobs/:id', [
         ? new Date(estimatedDelivery)
         : calculateETA(workCatalogServices(catalogServices));
 
-      const draftInvoice = await Invoice.findOne({
+      const linkedInvoice = await Invoice.findOne({
         businessId: req.businessId,
-        jobId: job._id,
-        paymentStatus: { $ne: 'RECEIVED' }
+        jobId: job._id
       });
-      if (draftInvoice) {
-        await job.populate('services.serviceId', 'name');
-        await syncDraftInvoiceFromJob(draftInvoice, job);
+      if (linkedInvoice) {
+        const closed =
+          linkedInvoice.paymentStatus === 'RECEIVED' ||
+          (linkedInvoice.settlementMode === 'CREDIT' && linkedInvoice.saleConfirmedAt);
+        // Open invoices always sync; closed invoices sync only for business owner edits
+        if (!closed || isBusinessOwner(req.user.role)) {
+          await job.populate('services.serviceId', 'name');
+          await syncDraftInvoiceFromJob(linkedInvoice, job, { force: !!closed });
+        }
       }
     } else if (estimatedDelivery && !isNaN(Date.parse(estimatedDelivery))) {
       // Allow ETA-only edit without touching services

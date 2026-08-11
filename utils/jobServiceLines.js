@@ -6,6 +6,58 @@ import { assertSufficientStock, deductServiceStockForSale, restoreServiceStock }
 import { isProductCatalogService } from './jobCart.js';
 import { resolveInvoiceDiscount, syncInvoiceDiscountAmount } from './invoiceDiscount.js';
 import { applyComputedGstAmount } from './invoiceGst.js';
+import { roundMoney } from './invoicePayment.js';
+
+function isInvoiceFinanciallyClosed(invoice) {
+  if (!invoice) return false;
+  if (invoice.paymentStatus === 'RECEIVED') return true;
+  return invoice.settlementMode === 'CREDIT' && !!invoice.saleConfirmedAt;
+}
+
+/**
+ * After owner edits totals on a paid/credit-closed invoice, keep payment fields consistent.
+ * - RECEIVED: scale cash/online split to the new final (still fully paid).
+ * - CREDIT closed: refresh outstanding = max(0, final - collected).
+ * Does not create/delete PaymentCollection rows or mutate customer loyalty balances.
+ */
+export function reconcileClosedInvoiceAfterTotalChange(invoice) {
+  if (!invoice || !isInvoiceFinanciallyClosed(invoice)) return invoice;
+
+  const final = roundMoney(invoice.finalAmount);
+  const cash = roundMoney(Number(invoice.paymentCashAmount) || 0);
+  const online = roundMoney(Number(invoice.paymentOnlineAmount) || 0);
+  const collected = roundMoney(cash + online);
+
+  if (invoice.paymentStatus === 'RECEIVED') {
+    if (Math.abs(collected - final) <= 0.02) {
+      invoice.outstandingAmount = 0;
+      return invoice;
+    }
+    if (collected <= 0.02) {
+      invoice.paymentCashAmount = final;
+      invoice.paymentOnlineAmount = 0;
+      if (final > 0) invoice.paymentMethod = 'CASH';
+    } else {
+      const ratio = final / collected;
+      const nextCash = roundMoney(cash * ratio);
+      invoice.paymentCashAmount = nextCash;
+      invoice.paymentOnlineAmount = roundMoney(final - nextCash);
+      if (invoice.paymentCashAmount > 0 && invoice.paymentOnlineAmount > 0) {
+        invoice.paymentMethod = 'SPLIT';
+      } else if (invoice.paymentOnlineAmount > 0) {
+        invoice.paymentMethod = 'ONLINE';
+      } else {
+        invoice.paymentMethod = 'CASH';
+      }
+    }
+    invoice.outstandingAmount = 0;
+    return invoice;
+  }
+
+  // Credit-closed
+  invoice.outstandingAmount = Math.max(0, roundMoney(final - collected));
+  return invoice;
+}
 
 async function serviceNameMapForLines(businessId, jobServices = []) {
   const serviceIds = (jobServices || [])
@@ -165,9 +217,9 @@ export function jobLinesToInvoiceItems(jobServices = [], nameByServiceId = null)
   });
 }
 
-export async function syncDraftInvoiceFromJob(invoice, job) {
-  if (!invoice || !job || invoice.paymentStatus === 'RECEIVED') return false;
-  if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) return false;
+export async function syncDraftInvoiceFromJob(invoice, job, { force = false } = {}) {
+  if (!invoice || !job) return false;
+  if (!force && isInvoiceFinanciallyClosed(invoice)) return false;
 
   const businessId = job.businessId || invoice.businessId;
   const nameByServiceId = await serviceNameMapForLines(businessId, job.services || []);
@@ -214,6 +266,9 @@ export async function syncDraftInvoiceFromJob(invoice, job) {
   syncInvoiceDiscountAmount(invoice);
   applyComputedGstAmount(invoice);
   recalculateInvoiceFinalAmount(invoice);
+  if (force && isInvoiceFinanciallyClosed(invoice)) {
+    reconcileClosedInvoiceAfterTotalChange(invoice);
+  }
 
   await invoice.save();
 
@@ -299,7 +354,8 @@ export async function syncJobFromInvoiceItems(jobId, businessId, items, subtotal
 }
 
 /**
- * Variable visit services (not retail products) must have a positive amount on the invoice.
+ * Variable visit services (not retail products) must have an amount entered on the invoice.
+ * Amount may be 0 (free service); blank/missing is rejected on the client before save.
  */
 export async function assertVariableVisitAmountsRequired(invoice, businessId) {
   const items = invoice?.items || [];
@@ -319,10 +375,17 @@ export async function assertVariableVisitAmountsRequired(invoice, businessId) {
     const isVariableVisit = !!(svc?.isVariable && !svc?.skipWorkProcess);
     if (!isVariableVisit) continue;
 
-    const price = Math.round((Number(row.servicePrice) || 0) * 100) / 100;
-    if (!Number.isFinite(price) || price <= 0) {
+    // Reject only when price is missing/invalid. Explicit 0 (free) is allowed.
+    if (row.servicePrice === '' || row.servicePrice == null) {
       const label = row.serviceName || svc?.name || 'variable service';
-      const err = new Error(`Enter an amount for "${label}"`);
+      const err = new Error(`Please enter an amount for "${label}"`);
+      err.status = 400;
+      throw err;
+    }
+    const price = Math.round(Number(row.servicePrice) * 100) / 100;
+    if (!Number.isFinite(price) || price < 0) {
+      const label = row.serviceName || svc?.name || 'variable service';
+      const err = new Error(`Please enter an amount for "${label}"`);
       err.status = 400;
       throw err;
     }
@@ -330,9 +393,11 @@ export async function assertVariableVisitAmountsRequired(invoice, businessId) {
 }
 
 /**
- * Update variable-service line prices on an open invoice (same line count; no add/remove).
+ * Update line prices on an invoice (same line count; no add/remove).
+ * By default only variable catalog lines can change price.
+ * Owner privileged edits may pass allowAllLinePrices to edit every line.
  */
-export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, businessId) {
+export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, businessId, { allowAllLinePrices = false } = {}) {
   if (itemsInput === undefined) return false;
   if (!Array.isArray(itemsInput) || itemsInput.length === 0) {
     const err = new Error('At least one line item is required');
@@ -361,24 +426,18 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
     const isVariable = !!svc?.isVariable;
     const isVariableVisit = isVariable && !svc?.skipWorkProcess;
     const base = typeof row.toObject === 'function' ? row.toObject() : { ...row };
-    if (!isVariable) return base;
+    if (!allowAllLinePrices && !isVariable) return base;
 
     const raw = incoming.servicePrice;
     if (isVariableVisit && (raw === '' || raw == null)) {
       const label = base.serviceName || svc?.name || 'variable service';
-      const err = new Error(`Enter an amount for "${label}"`);
+      const err = new Error(`Please enter an amount for "${label}"`);
       err.status = 400;
       throw err;
     }
     const price = Math.round((Number(raw) || 0) * 100) / 100;
     if (!Number.isFinite(price) || price < 0) {
       const err = new Error('Line item prices must be 0 or more');
-      err.status = 400;
-      throw err;
-    }
-    if (isVariableVisit && price <= 0) {
-      const label = base.serviceName || svc?.name || 'variable service';
-      const err = new Error(`Enter an amount for "${label}"`);
       err.status = 400;
       throw err;
     }
@@ -403,21 +462,22 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
 }
 
 /**
- * Append product catalog lines to an open wash-job or product-sale invoice.
+ * Append product catalog lines to a job/sale invoice.
+ * @param {{ allowClosed?: boolean }} [opts] - business owner may edit closed invoices
  */
-export async function addProductLinesToOpenInvoice(invoice, businessId, productLinesInput = []) {
+export async function addProductLinesToOpenInvoice(invoice, businessId, productLinesInput = [], opts = {}) {
   if (!invoice?.jobId) {
     const err = new Error('Invoice is not linked to a job');
     err.status = 400;
     throw err;
   }
-  if (invoice.paymentStatus === 'RECEIVED') {
-    const err = new Error('Cannot add products to a paid invoice');
-    err.status = 403;
-    throw err;
-  }
-  if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
-    const err = new Error('Cannot add products to a closed credit invoice');
+  const closed = isInvoiceFinanciallyClosed(invoice);
+  if (closed && !opts.allowClosed) {
+    const err = new Error(
+      invoice.paymentStatus === 'RECEIVED'
+        ? 'Cannot add products to a paid invoice'
+        : 'Cannot add products to a closed credit invoice'
+    );
     err.status = 403;
     throw err;
   }
@@ -502,26 +562,27 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
     await deductServiceStockForSale(businessId, newLines, catalogServices);
   }
 
-  await syncDraftInvoiceFromJob(invoice, job);
+  await syncDraftInvoiceFromJob(invoice, job, { force: closed });
   return { job, invoice };
 }
 
 /**
- * Remove a retail product line from an open wash-job or product-sale invoice.
+ * Remove a retail product line from a job/sale invoice.
+ * @param {{ allowClosed?: boolean }} [opts] - business owner may edit closed invoices
  */
-export async function removeProductLineFromOpenInvoice(invoice, businessId, { serviceId } = {}) {
+export async function removeProductLineFromOpenInvoice(invoice, businessId, { serviceId } = {}, opts = {}) {
   if (!invoice?.jobId) {
     const err = new Error('Invoice is not linked to a job');
     err.status = 400;
     throw err;
   }
-  if (invoice.paymentStatus === 'RECEIVED') {
-    const err = new Error('Cannot remove products from a paid invoice');
-    err.status = 403;
-    throw err;
-  }
-  if (invoice.settlementMode === 'CREDIT' && invoice.saleConfirmedAt) {
-    const err = new Error('Cannot remove products from a closed credit invoice');
+  const closed = isInvoiceFinanciallyClosed(invoice);
+  if (closed && !opts.allowClosed) {
+    const err = new Error(
+      invoice.paymentStatus === 'RECEIVED'
+        ? 'Cannot remove products from a paid invoice'
+        : 'Cannot remove products from a closed credit invoice'
+    );
     err.status = 403;
     throw err;
   }
@@ -595,6 +656,6 @@ export async function removeProductLineFromOpenInvoice(invoice, businessId, { se
     await restoreServiceStock(businessId, [{ serviceId: removedSvc._id, quantity: removedQty }]);
   }
 
-  await syncDraftInvoiceFromJob(invoice, job);
+  await syncDraftInvoiceFromJob(invoice, job, { force: closed });
   return { job, invoice };
 }

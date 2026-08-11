@@ -10,7 +10,15 @@ const packageTemplateSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   price: { type: Number, required: true, min: 0 },
   totalVisits: { type: Number, required: true, min: 1 },
-  validityDays: { type: Number, required: true, min: 1 },
+  /** Numeric validity amount (supports decimals, e.g. 1.5 months). Optional on legacy docs. */
+  validityValue: { type: Number, min: 0.01 },
+  validityUnit: {
+    type: String,
+    enum: ['days', 'weeks', 'months', 'years'],
+    default: 'days'
+  },
+  /** Approximate days (legacy + reporting); derived from value + unit when possible */
+  validityDays: { type: Number, required: true, min: 0.01 },
   // Each included service can have a quantity (e.g. Full wash x2)
   servicesIncluded: { type: [serviceQtySchema], default: [] },
   description: { type: String, trim: true },

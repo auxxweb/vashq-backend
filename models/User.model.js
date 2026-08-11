@@ -36,6 +36,10 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, trim: true },
   address: { type: String, trim: true },
   employeeCode: { type: String, trim: true },
+  /** Optional profile / KYC document image URLs (Cloudinary). */
+  photoUrl: { type: String, trim: true, default: '' },
+  aadhaarCardUrl: { type: String, trim: true, default: '' },
+  panCardUrl: { type: String, trim: true, default: '' },
   /** DEFAULT = floor staff; SALES = CRM + bookings (+ default employee features). */
   employeeType: {
     type: String,

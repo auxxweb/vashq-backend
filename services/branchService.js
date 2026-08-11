@@ -22,6 +22,7 @@ import { getBusinessModules, isModuleEnabled } from './businessModulesService.js
 import { expensePaidAmountAggregationExpr } from '../utils/expensePayment.js';
 import { cacheGetOrSet, cacheDelete } from '../utils/cache.js';
 import { syncDefaultBranchWhatsAppToBusiness } from '../utils/whatsappSettingsMerge.js';
+import { approximateValidityDays } from '../utils/packageValidity.js';
 
 const DEFAULT_BRANCH_CACHE_TTL = 120_000;
 
@@ -247,7 +248,8 @@ export async function seedBranchCatalogFromDefault(businessId, newBranchId) {
         loyaltyPointsEarned: svc.loyaltyPointsEarned,
         isVariable: svc.isVariable,
         skipWorkProcess: svc.skipWorkProcess,
-        isActive: svc.isActive
+        isActive: svc.isActive,
+        showOnBookingForm: svc.showOnBookingForm !== false
       });
       serviceIdMap.set(String(svc._id), created._id);
     }
@@ -261,7 +263,11 @@ export async function seedBranchCatalogFromDefault(businessId, newBranchId) {
         name: tpl.name,
         price: tpl.price,
         totalVisits: tpl.totalVisits,
-        validityDays: tpl.validityDays,
+        validityValue: tpl.validityValue ?? tpl.validityDays,
+        validityUnit: tpl.validityUnit || 'days',
+        validityDays:
+          tpl.validityDays ??
+          approximateValidityDays(tpl.validityValue ?? tpl.validityDays, tpl.validityUnit || 'days'),
         servicesIncluded: mappedServices,
         description: tpl.description,
         isActive: tpl.isActive

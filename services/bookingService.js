@@ -122,7 +122,7 @@ async function resolveBookingCustomerAndCar(businessId, payload) {
   };
 }
 
-async function createBookingRecord(businessId, payload, { status = 'PENDING', slotOpts = {}, branchId = null, allowMixedCart = false } = {}) {
+async function createBookingRecord(businessId, payload, { status = 'PENDING', slotOpts = {}, branchId = null, allowMixedCart = false, requireShowOnBookingForm = false } = {}) {
   const { slot, bookingDate, bayNumber } = await validateSlotBooking(
     businessId,
     payload.slotId,
@@ -159,6 +159,17 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
       throw err;
     }
 
+    if (requireShowOnBookingForm) {
+      const blocked = catalogServices.filter((s) => s.showOnBookingForm === false);
+      if (blocked.length) {
+        const err = new Error(
+          `One or more selected services are not available for online booking (${blocked.map((s) => s.name).join(', ')})`
+        );
+        err.status = 400;
+        throw err;
+      }
+    }
+
     serviceLinesToStore = lines.map((l) => ({
       serviceId: l.serviceId,
       price: Number(l.price) || 0,
@@ -174,10 +185,15 @@ async function createBookingRecord(businessId, payload, { status = 'PENDING', sl
     const services = await Service.find({
       _id: { $in: uniqueServiceIds },
       businessId,
-      isActive: { $ne: false }
+      isActive: { $ne: false },
+      ...(requireShowOnBookingForm ? { showOnBookingForm: { $ne: false } } : {})
     }).lean();
     if (services.length !== uniqueServiceIds.length) {
-      throw new Error('One or more selected services are not available');
+      throw new Error(
+        requireShowOnBookingForm
+          ? 'One or more selected services are not available for online booking'
+          : 'One or more selected services are not available'
+      );
     }
 
     // Allow fixed + variable visit services; block retail products on booking.
@@ -262,7 +278,8 @@ export async function createPublicBooking(businessId, payload) {
 
   const { booking, slot, payloadDate } = await createBookingRecord(businessId, mergedPayload, {
     status: 'PENDING',
-    branchId: defaultBranch?._id || null
+    branchId: defaultBranch?._id || null,
+    requireShowOnBookingForm: true
   });
 
   await notifyOwner(businessId, {

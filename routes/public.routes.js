@@ -107,6 +107,7 @@ router.get('/book/:businessId', async (req, res) => {
     const serviceQuery = {
       businessId,
       isActive: { $ne: false },
+      showOnBookingForm: { $ne: false },
       ...(variableServicesEnabled
         ? {
             $or: [
@@ -124,7 +125,7 @@ router.get('/book/:businessId', async (req, res) => {
         : { isVariable: { $ne: true } })
     };
     const services = await Service.find(serviceQuery)
-      .select('name price minTime maxTime description categoryId subCategoryId isVariable skipWorkProcess')
+      .select('name price minTime maxTime description categoryId subCategoryId isVariable skipWorkProcess showOnBookingForm')
       .sort({ name: 1 })
       .lean();
 

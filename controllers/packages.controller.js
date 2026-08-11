@@ -17,6 +17,12 @@ import { buildGstFieldsForNewInvoice } from '../utils/invoiceGst.js';
 import { applyBranchScope } from '../utils/branchQuery.js';
 import { assertBranchAccess, findScoped, branchIdForCreate } from '../utils/branchAccess.js';
 import { invalidateDashboardForBusiness } from '../utils/dashboardFinancialSync.js';
+import { findRecentDuplicate } from '../utils/createIdempotency.js';
+import {
+  addPackageValidity,
+  approximateValidityDays,
+  resolveTemplateValidity
+} from '../utils/packageValidity.js';
 
 // ==================== Helpers ====================
 
@@ -239,14 +245,35 @@ export async function listTemplates(req, res) {
 
 export async function createTemplate(req, res) {
   try {
-    const { name, price, totalVisits, validityDays, servicesIncluded, description } = req.body;
+    const { name, price, totalVisits, servicesIncluded, description } = req.body;
+    let validity;
+    try {
+      validity = resolveTemplateValidity(req.body);
+    } catch (e) {
+      return res.status(400).json({ success: false, message: e.message || 'Invalid validity' });
+    }
+    const approxDays = approximateValidityDays(validity.validityValue, validity.validityUnit);
     const normalizedServices = await validateTemplateServices(req.businessId, servicesIncluded);
-    const template = await PackageTemplate.create({
+    const templateName = String(name).trim();
+    const recent = await findRecentDuplicate(PackageTemplate, {
       businessId: req.businessId,
-      name: String(name).trim(),
+      name: templateName,
       price: roundMoney(price),
       totalVisits: Math.max(1, Math.floor(Number(totalVisits))),
-      validityDays: Math.max(1, Math.floor(Number(validityDays))),
+      validityValue: validity.validityValue,
+      validityUnit: validity.validityUnit
+    });
+    if (recent) {
+      return res.status(200).json({ success: true, data: recent, deduped: true });
+    }
+    const template = await PackageTemplate.create({
+      businessId: req.businessId,
+      name: templateName,
+      price: roundMoney(price),
+      totalVisits: Math.max(1, Math.floor(Number(totalVisits))),
+      validityValue: validity.validityValue,
+      validityUnit: validity.validityUnit,
+      validityDays: approxDays,
       servicesIncluded: normalizedServices,
       description: description?.trim() || undefined,
       isActive: true
@@ -265,11 +292,28 @@ export async function updateTemplate(req, res) {
       return res.status(404).json({ success: false, message: 'Template not found' });
     }
 
-    const { name, price, totalVisits, validityDays, servicesIncluded, description, isActive } = req.body;
+    const { name, price, totalVisits, servicesIncluded, description, isActive } = req.body;
     if (name !== undefined) template.name = String(name).trim();
     if (price !== undefined) template.price = roundMoney(price);
     if (totalVisits !== undefined) template.totalVisits = Math.max(1, Math.floor(Number(totalVisits)));
-    if (validityDays !== undefined) template.validityDays = Math.max(1, Math.floor(Number(validityDays)));
+    if (
+      req.body.validityValue !== undefined ||
+      req.body.validityUnit !== undefined ||
+      req.body.validityDays !== undefined
+    ) {
+      try {
+        const validity = resolveTemplateValidity({
+          validityValue: req.body.validityValue !== undefined ? req.body.validityValue : template.validityValue,
+          validityUnit: req.body.validityUnit !== undefined ? req.body.validityUnit : template.validityUnit,
+          validityDays: req.body.validityDays !== undefined ? req.body.validityDays : template.validityDays
+        });
+        template.validityValue = validity.validityValue;
+        template.validityUnit = validity.validityUnit;
+        template.validityDays = approximateValidityDays(validity.validityValue, validity.validityUnit);
+      } catch (e) {
+        return res.status(400).json({ success: false, message: e.message || 'Invalid validity' });
+      }
+    }
     if (description !== undefined) template.description = description?.trim() || undefined;
     if (isActive !== undefined) template.isActive = !!isActive;
     if (servicesIncluded !== undefined) {
@@ -341,8 +385,14 @@ export async function purchasePackage(req, res) {
     }
 
     const startDate = new Date();
-    const expiryDate = new Date(startDate);
-    expiryDate.setDate(expiryDate.getDate() + Number(template.validityDays || 0));
+    let validity;
+    try {
+      validity = resolveTemplateValidity(template);
+    } catch (e) {
+      return res.status(400).json({ success: false, message: e.message || 'Invalid package validity' });
+    }
+    const expiryDate = addPackageValidity(startDate, validity.validityValue, validity.validityUnit);
+    const approxDays = approximateValidityDays(validity.validityValue, validity.validityUnit);
 
     const servicesIncluded = (template.servicesIncluded || []).map((row) => ({
       serviceId: row.serviceId,
@@ -359,7 +409,9 @@ export async function purchasePackage(req, res) {
       name: template.name,
       price: template.price,
       totalVisits: template.totalVisits,
-      validityDays: template.validityDays,
+      validityValue: validity.validityValue,
+      validityUnit: validity.validityUnit,
+      validityDays: approxDays,
       servicesIncluded,
       servicesRemaining: buildServicesRemainingFromIncluded(servicesIncluded),
       description: template.description,

@@ -43,12 +43,17 @@ router.post('/template', adminPanelOnly, [
   body('name').notEmpty().trim(),
   body('price').isFloat({ min: 0 }),
   body('totalVisits').isInt({ min: 1 }),
-  body('validityDays').isInt({ min: 1 }),
+  body('validityValue').optional().isFloat({ gt: 0 }),
+  body('validityUnit').optional().isIn(['days', 'weeks', 'months', 'years']),
+  body('validityDays').optional().isFloat({ gt: 0 }),
   body('servicesIncluded').optional().isArray(),
   body('description').optional().isString()
 ], (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  if (req.body.validityValue == null && req.body.validityDays == null) {
+    return res.status(400).json({ success: false, message: 'validityValue is required' });
+  }
   next();
 }, createTemplate);
 
@@ -56,7 +61,9 @@ router.put('/template/:id', adminPanelOnly, [
   body('name').optional().trim(),
   body('price').optional().isFloat({ min: 0 }),
   body('totalVisits').optional().isInt({ min: 1 }),
-  body('validityDays').optional().isInt({ min: 1 }),
+  body('validityValue').optional().isFloat({ gt: 0 }),
+  body('validityUnit').optional().isIn(['days', 'weeks', 'months', 'years']),
+  body('validityDays').optional().isFloat({ gt: 0 }),
   body('servicesIncluded').optional().isArray(),
   body('description').optional().isString(),
   body('isActive').optional().isBoolean()
