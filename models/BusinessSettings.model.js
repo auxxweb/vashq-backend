@@ -125,6 +125,11 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   crmEnabled: { type: Boolean, default: false },
   /**
+   * When true, Create Job “New vehicle” can use AI camera scan to fill plate/brand/model/color.
+   * Off by default — existing manual car entry is unchanged.
+   */
+  vehicleScannerEnabled: { type: Boolean, default: false },
+  /**
    * When true, Attendance (punch in/out, breaks, calendar, correction requests) is available.
    * Off by default — existing workflows unchanged.
    */

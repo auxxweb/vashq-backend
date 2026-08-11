@@ -6081,6 +6081,7 @@ router.put('/settings', [
   body('invoiceDiscountAmountEnabled').optional().isBoolean(),
   body('invoiceOnCompletedEnabled').optional().isBoolean(),
   body('crmEnabled').optional().isBoolean(),
+  body('vehicleScannerEnabled').optional().isBoolean(),
   body('attendanceEnabled').optional().isBoolean(),
   body('internationalPhoneEnabled').optional().isBoolean(),
   body('multiEmployeeAssignEnabled').optional().isBoolean(),
@@ -6163,6 +6164,9 @@ router.put('/settings', [
     }
     if (req.body.crmEnabled !== undefined) {
       updateFields.crmEnabled = !!req.body.crmEnabled;
+    }
+    if (req.body.vehicleScannerEnabled !== undefined) {
+      updateFields.vehicleScannerEnabled = !!req.body.vehicleScannerEnabled;
     }
     if (req.body.attendanceEnabled !== undefined) {
       updateFields.attendanceEnabled = !!req.body.attendanceEnabled;
