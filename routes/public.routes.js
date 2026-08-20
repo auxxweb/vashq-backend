@@ -276,4 +276,47 @@ router.get('/invoice/:id/view', async (req, res) => {
   }
 });
 
+// GET /api/public/estimate/:id/view?token=xxx
+router.get('/estimate/:id/view', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const token = req.query.token;
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Token required' });
+    }
+    const Estimate = (await import('../models/Estimate.model.js')).default;
+    const estimate = await Estimate.findOne({
+      _id: id,
+      shareToken: token,
+      status: { $in: ['SHARED', 'CONVERTED'] }
+    }).lean();
+    if (!estimate) {
+      return res.status(404).json({ success: false, message: 'Estimate not found' });
+    }
+
+    const [platform, business] = await Promise.all([
+      PlatformSettings.findOne({}).lean(),
+      getInvoiceCompanySnapshot(estimate.businessId)
+    ]);
+
+    const currency = platform?.defaultCurrency || 'USD';
+    res.json({
+      success: true,
+      estimate,
+      currency,
+      business: business || {
+        businessName: estimate.companyName,
+        logo: estimate.companyLogo,
+        phone: estimate.companyPhone,
+        email: estimate.companyEmail,
+        address: estimate.companyAddress,
+        gstNumber: estimate.companyGst
+      }
+    });
+  } catch (error) {
+    console.error('Public estimate view error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 export default router;

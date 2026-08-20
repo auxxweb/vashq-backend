@@ -1,5 +1,7 @@
 import Job from '../models/Job.model.js';
 import Expense from '../models/Expense.model.js';
+import OtherRevenue from '../models/OtherRevenue.model.js';
+import BusinessSettings from '../models/BusinessSettings.model.js';
 import { WASH_JOB_FILTER, getProductSalesDashboardStats } from '../utils/directBillJob.js';
 import { getPackageSalesDashboardStats } from '../utils/packageSalesDashboard.js';
 import { parseBusinessDateRange } from '../utils/businessDateRange.js';
@@ -20,7 +22,8 @@ const EMPTY_CASH = {
   todayFullPayCheckout: 0,
   todayCreditCheckout: 0,
   todayCreditRecovery: 0,
-  todayAdvances: 0
+  todayAdvances: 0,
+  todayOtherRevenueCollected: 0
 };
 
 const EMPTY_CREDIT = {
@@ -53,6 +56,7 @@ const EMPTY_SALES = {
   creditSalesRevenue: 0,
   creditSalesCollected: 0,
   creditSalesOutstanding: 0,
+  otherSalesRevenue: 0,
   totalSalesRevenue: 0
 };
 
@@ -60,6 +64,7 @@ const EMPTY_MONTHLY_RECEIVED = {
   jobSalesReceived: 0,
   productSalesReceived: 0,
   packageSalesReceived: 0,
+  otherSalesReceived: 0,
   totalSalesReceived: 0
 };
 
@@ -94,7 +99,7 @@ export async function loadDashboardStats({
 }) {
   const washJobMatch = { ...baseMatch, ...WASH_JOB_FILTER };
 
-  const [jobStats, avgResult, todayAdvanceCollectedResult, todayExpResult] = await Promise.all([
+  const [jobStats, avgResult, todayAdvanceCollectedResult, todayExpResult, todayOtherRevResult, otherRevenueSetting] = await Promise.all([
     Job.aggregate([
       { $match: washJobMatch },
       {
@@ -235,7 +240,16 @@ export async function loadDashboardStats({
       : Expense.aggregate([
         { $match: { ...expenseMatch, expenseDate: { $gte: startUtc, $lt: endUtc } } },
         { $group: { _id: null, total: { $sum: expensePaidAmountAggregationExpr() } } }
-      ])
+      ]),
+    isEmployee
+      ? Promise.resolve([])
+      : OtherRevenue.aggregate([
+        { $match: { ...expenseMatch, revenueDate: { $gte: startUtc, $lt: endUtc } } },
+        { $group: { _id: null, total: { $sum: expensePaidAmountAggregationExpr() } } }
+      ]),
+    isEmployee
+      ? Promise.resolve(null)
+      : BusinessSettings.findOne({ businessId }).select('otherRevenueEnabled').lean()
   ]);
 
   const statsPayload = {
@@ -262,6 +276,8 @@ export async function loadDashboardStats({
       todayCashReceivedCard: 0,
       monthlyRevenue: 0,
       todayExpenses: 0,
+      todayOtherRevenue: 0,
+      otherRevenueEnabled: false,
       closingBalance: 0,
       monthlyTotalSales: 0
     });
@@ -273,6 +289,8 @@ export async function loadDashboardStats({
   const advUpiToday = todayAdvanceCollectedResult[0]?.upi ?? advOnlineToday;
   const advCardToday = todayAdvanceCollectedResult[0]?.card ?? 0;
   const todayExpenses = todayExpResult[0]?.total ?? 0;
+  const todayOtherRevenue = todayOtherRevResult[0]?.total ?? 0;
+  const otherRevenueEnabled = !!otherRevenueSetting?.otherRevenueEnabled;
   const monthBounds = parseBusinessDateRange(businessTz, 'month');
 
   const modules = businessModules || await getBusinessModules(businessId);
@@ -338,12 +356,16 @@ export async function loadDashboardStats({
   statsPayload.todaySales = periodSales.jobSalesRevenue;
   statsPayload.todayRevenue = periodSales.jobSalesRevenue;
   statsPayload.todayExpenses = todayExpenses;
+  statsPayload.todayOtherRevenue = otherRevenueEnabled ? todayOtherRevenue : 0;
+  statsPayload.otherRevenueEnabled = otherRevenueEnabled;
+  // Cash received already includes other-revenue collections when enabled.
   statsPayload.closingBalance = (cashReceived.todayCashReceived || 0) - todayExpenses;
   statsPayload.monthlyRevenue = monthlyReceived.jobSalesReceived;
   statsPayload.monthlyTotalSales = monthlyReceived.totalSalesReceived;
   statsPayload.monthlyJobSalesReceived = monthlyReceived.jobSalesReceived;
   statsPayload.monthlyProductSalesReceived = monthlyReceived.productSalesReceived;
   statsPayload.monthlyPackageSalesReceived = monthlyReceived.packageSalesReceived;
+  statsPayload.monthlyOtherSalesReceived = monthlyReceived.otherSalesReceived || 0;
 
   return statsPayload;
 }

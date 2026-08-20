@@ -8,6 +8,7 @@ import Customer from '../models/Customer.model.js';
 import Car from '../models/Car.model.js';
 import Service from '../models/Service.model.js';
 import Job from '../models/Job.model.js';
+import Lead from '../models/Lead.model.js';
 import WhatsAppTemplate from '../models/WhatsAppTemplate.model.js';
 import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
@@ -72,6 +73,7 @@ import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
 import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
 import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, relabelLockedInvoicePaymentMethod, roundMoney } from '../utils/invoicePayment.js';
 import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields, applyOwnerLockedInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
+import { reopenInvoiceAsUnpaid } from '../utils/invoiceReopen.js';
 import { resolveInvoiceDiscount } from '../utils/invoiceDiscount.js';
 import { normalizeCreditCheckoutPayment } from '../utils/creditPayment.js';
 import { normalizeJobAdvanceForCreate } from '../utils/jobAdvance.js';
@@ -101,8 +103,13 @@ import {
   parseCategoryIdsFromQuery,
   resolveSalesReportServiceFilter,
   shouldIncludeJobSales,
+  shouldIncludeOtherRevenueSales,
   shouldIncludePackageSales
 } from '../utils/salesReportFilter.js';
+import {
+  isOtherRevenueEnabled,
+  loadOtherRevenueSalesRows
+} from '../utils/otherRevenueSales.js';
 import {
   assertCustomerPhoneAvailable,
   normalizePhone,
@@ -131,7 +138,7 @@ import { ensureDefaultBranchForBusiness, getBranchOverviewStats, getBranchUsageS
 import { getBranchPlatformConfig } from '../utils/branchConfig.js';
 import { applyBranchScopeOid, applyBranchScope } from '../utils/branchQuery.js';
 import { scopedFilter, assertBranchAccess, assertInvoiceCheckoutAccess, findScoped, branchIdForCreate, jobAccessFilter } from '../utils/branchAccess.js';
-import { resolveJobAssignees, attachServiceLineAssignees, applyEmployeeJobScope, toIdString } from '../utils/jobAssignment.js';
+import { resolveJobAssignees, attachServiceLineAssignees, applyEmployeeJobScope, toIdString, isEmployeeAssignedToJob, employeeAssignedMatch } from '../utils/jobAssignment.js';
 import { isAdminPanelRole, isBranchAdmin, isBusinessOwner, isSalesEmployee } from '../utils/adminRoles.js';
 import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
 import { generateEmployeeCode } from '../utils/employeeAccount.js';
@@ -339,7 +346,7 @@ router.post('/upload/images', (req, res, next) => {
     }
     const isEmployee = req.user.role === 'EMPLOYEE';
     const rawFolder = String(req.body.folder || '').trim().toLowerCase();
-    const folderKey = ['after', 'expenses', 'payment', 'logos', 'employees'].includes(rawFolder)
+    const folderKey = ['after', 'expenses', 'other-revenues', 'payment', 'logos', 'employees'].includes(rawFolder)
       ? rawFolder
       : 'before';
     if (isEmployee && (folderKey === 'payment' || folderKey === 'employees')) {
@@ -359,6 +366,7 @@ router.post('/upload/images', (req, res, next) => {
     const folder =
       folderKey === 'after' ? 'washq/jobs/after'
         : folderKey === 'expenses' ? 'washq/expenses'
+          : folderKey === 'other-revenues' ? 'washq/other-revenues'
           : folderKey === 'payment' ? 'washq/payment'
             : folderKey === 'logos' ? 'washq/logos'
               : folderKey === 'employees' ? 'washq/employees'
@@ -1329,7 +1337,11 @@ router.get('/invoices', async (req, res) => {
 
     const [invoices, total] = await Promise.all([
       Invoice.find(query)
-        .populate('jobId', 'tokenNumber status')
+        .populate({
+          path: 'jobId',
+          select: 'tokenNumber status carId',
+          populate: { path: 'carId', select: 'carNumber brand model' }
+        })
         .populate('packageId', 'name')
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * limitNum)
@@ -1754,6 +1766,42 @@ router.get('/invoices/:id/share-url', async (req, res) => {
   } catch (error) {
     console.error('Share URL error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/invoices/:id/mark-unpaid — owner only: reopen closed invoice for checkout again
+router.patch('/invoices/:id/mark-unpaid', async (req, res) => {
+  try {
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the business owner can mark an invoice unpaid'
+      });
+    }
+
+    const invoice = await Invoice.findOne(scopedFilter(req, { _id: req.params.id, businessId: req.businessId }));
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    assertBranchAccess(req, invoice, { allowLegacyNull: true });
+
+    const result = await reopenInvoiceAsUnpaid({
+      businessId: req.businessId,
+      invoiceId: invoice._id,
+      user: req.user
+    });
+
+    return res.json({
+      success: true,
+      message: result.message,
+      invoice: result.invoice
+    });
+  } catch (error) {
+    console.error('Mark unpaid error:', error);
+    return res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
   }
 });
 
@@ -2229,14 +2277,32 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
       }));
     }
 
-    const data = [...invoices, ...packageSales].sort((a, b) => {
-      const da = a.saleType === 'job'
-        ? (a.jobId?.actualDelivery || a.paymentReceivedAt || a.jobId?.createdAt || a.createdAt)
-        : (a.paymentReceivedAt || a.createdAt);
-      const db = b.saleType === 'job'
-        ? (b.jobId?.actualDelivery || b.paymentReceivedAt || b.jobId?.createdAt || b.createdAt)
-        : (b.paymentReceivedAt || b.createdAt);
-      return new Date(db).getTime() - new Date(da).getTime();
+    let otherRevenueSales = [];
+    if (
+      !forceEmpty &&
+      shouldIncludeOtherRevenueSales(salesSource, hasServiceFilter) &&
+      await isOtherRevenueEnabled(req.businessId)
+    ) {
+      const endExclusive = exclusiveEnd ? end : new Date(end.getTime() + 1);
+      otherRevenueSales = await loadOtherRevenueSalesRows(
+        req.businessId,
+        start,
+        endExclusive,
+        req.branchId || null
+      );
+    }
+
+    const data = [...invoices, ...packageSales, ...otherRevenueSales].sort((a, b) => {
+      const dateOf = (row) => {
+        if (row.saleType === 'job') {
+          return row.jobId?.actualDelivery || row.paymentReceivedAt || row.jobId?.createdAt || row.createdAt;
+        }
+        if (row.saleType === 'other-revenue') {
+          return row.revenueDate || row.createdAt;
+        }
+        return row.paymentReceivedAt || row.createdAt;
+      };
+      return new Date(dateOf(b)).getTime() - new Date(dateOf(a)).getTime();
     });
 
     const totalRevenue = data.reduce((s, inv) => s + (inv.finalAmount || 0), 0);
@@ -2276,9 +2342,13 @@ router.get('/reports/sales', adminPanelOnly, async (req, res) => {
     let amountDueOnDeliveredSales = 0;
     for (const inv of data) {
       if (inv.settlementMode === 'CREDIT') {
-        const final = roundMoney(Number(inv.finalAmount) || 0);
-        const atCheckout = roundMoney(Number(inv.amountCollectedAtCheckout) || 0);
-        amountDueOnDeliveredSales += roundMoney(Math.max(0, final - atCheckout));
+        if (inv.saleType === 'other-revenue') {
+          amountDueOnDeliveredSales += roundMoney(Number(inv.outstandingAmount) || 0);
+        } else {
+          const final = roundMoney(Number(inv.finalAmount) || 0);
+          const atCheckout = roundMoney(Number(inv.amountCollectedAtCheckout) || 0);
+          amountDueOnDeliveredSales += roundMoney(Math.max(0, final - atCheckout));
+        }
       }
     }
     amountDueOnDeliveredSales = Math.round(amountDueOnDeliveredSales * 100) / 100;
@@ -3221,7 +3291,7 @@ router.get('/employees/:id', async (req, res) => {
 });
 
 // @route   GET /api/admin/employees/:id/service-work
-// @desc    Services this employee performed (per-service assignment) in a date range
+// @desc    Service counts this employee did in a date range (per-service assign, else job-level)
 // @access  Private (Car Wash Admin)
 router.get('/employees/:id/service-work', async (req, res) => {
   try {
@@ -3236,30 +3306,38 @@ router.get('/employees/:id/service-work', async (req, res) => {
     const employeeId = user._id;
     const empIdStr = String(employeeId);
 
-    const now = new Date();
-    let from = req.query.from ? new Date(req.query.from) : null;
-    let to = req.query.to ? new Date(req.query.to) : null;
-    if (!from || Number.isNaN(from.getTime())) {
-      from = new Date(now.getFullYear(), now.getMonth(), 1);
-      from.setHours(0, 0, 0, 0);
-    } else {
-      from.setHours(0, 0, 0, 0);
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('timezone')
+      .lean();
+    const tz = settings?.timezone || process.env.CRON_TZ || 'UTC';
+
+    const rangeKey = String(req.query.range || req.query.dateRange || 'monthly').trim() || 'monthly';
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
+    let startUtc;
+    let endUtc;
+    let rangeLabel;
+    try {
+      ({ startUtc, endUtc, rangeLabel } = parseBusinessDateRange(tz, rangeKey, fromQ, toQ));
+    } catch (rangeErr) {
+      return res.status(rangeErr.statusCode || 400).json({
+        success: false,
+        message: rangeErr.message || 'Invalid date range'
+      });
     }
-    if (!to || Number.isNaN(to.getTime())) {
-      to = new Date(now);
-      to.setHours(23, 59, 59, 999);
-    } else {
-      to.setHours(23, 59, 59, 999);
-    }
-    if (from > to) {
-      return res.status(400).json({ success: false, message: 'Invalid date range' });
-    }
+
+    const createdAtFilter = {};
+    if (startUtc) createdAtFilter.$gte = startUtc;
+    if (endUtc) createdAtFilter.$lt = endUtc;
 
     const jobs = await Job.find({
       businessId: req.businessId,
-      status: { $ne: 'CANCELLED' },
-      createdAt: { $gte: from, $lte: to },
-      'services.assignedToUsers': employeeId
+      status: { $nin: ['CANCELLED'] },
+      ...(Object.keys(createdAtFilter).length ? { createdAt: createdAtFilter } : {}),
+      $or: [
+        { 'services.assignedToUsers': employeeId },
+        ...(employeeAssignedMatch(employeeId).$or || [])
+      ]
     })
       .populate('customerId', 'name phone')
       .populate('carId', 'carNumber')
@@ -3269,25 +3347,37 @@ router.get('/employees/:id/service-work', async (req, res) => {
 
     const serviceAgg = new Map();
     const jobRows = [];
+    let totalServiceLines = 0;
+    let totalQuantity = 0;
+    let jobsWithServices = 0;
 
     for (const job of jobs) {
+      const jobAssigned = isEmployeeAssignedToJob(job, employeeId);
       const lines = [];
+
       for (const row of job.services || []) {
         const assignees = Array.isArray(row.assignedToUsers) ? row.assignedToUsers : [];
-        const onLine = assignees.some((id) => String(id?._id || id) === empIdStr);
-        if (!onLine) continue;
-        const sid = String(row.serviceId?._id || row.serviceId || '');
+        const onLine = assignees.some((id) => toIdString(id) === empIdStr);
+        // Line with assignees → only if this employee is on the line
+        // Line without assignees → count when employee is assigned on the job
+        const lineInclude = assignees.length ? onLine : jobAssigned;
+        if (!lineInclude) continue;
+
+        const sid = String(row.serviceId?._id || row.serviceId || row.customName || `custom-${lines.length}`);
         const name = row.customName || row.serviceId?.name || 'Service';
         const qty = Math.max(1, Number(row.quantity) || 1);
         lines.push({ serviceId: sid, name, quantity: qty });
-        if (!sid) continue;
+        totalServiceLines += 1;
+        totalQuantity += qty;
         const prev = serviceAgg.get(sid) || { serviceId: sid, name, count: 0, quantitySum: 0 };
         prev.count += 1;
         prev.quantitySum += qty;
         if (name && name !== 'Service') prev.name = name;
         serviceAgg.set(sid, prev);
       }
+
       if (!lines.length) continue;
+      jobsWithServices += 1;
       jobRows.push({
         _id: job._id,
         tokenNumber: job.tokenNumber,
@@ -3299,17 +3389,114 @@ router.get('/employees/:id/service-work', async (req, res) => {
       });
     }
 
-    const serviceSummary = [...serviceAgg.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    const serviceSummary = [...serviceAgg.values()].sort(
+      (a, b) => b.count - a.count || a.name.localeCompare(b.name)
+    );
 
     res.json({
       success: true,
-      from: from.toISOString(),
-      to: to.toISOString(),
+      from: startUtc ? startUtc.toISOString() : null,
+      to: endUtc ? endUtc.toISOString() : null,
+      rangeLabel,
+      totals: {
+        serviceCount: totalServiceLines,
+        quantitySum: totalQuantity,
+        jobCount: jobsWithServices,
+        distinctServices: serviceSummary.length
+      },
       serviceSummary,
       jobs: jobRows
     });
   } catch (error) {
     console.error('Get employee service-work error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/admin/employees/:id/converted-leads
+// @desc    Converted (closed) leads assigned to a sales employee, filtered by conversion date
+// @access  Private (Car Wash Admin)
+router.get('/employees/:id/converted-leads', async (req, res) => {
+  try {
+    if (!isAdminPanelRole(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+    const user = await findManagedEmployee(req, req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('timezone crmEnabled')
+      .lean();
+
+    const tz = settings?.timezone || process.env.CRON_TZ || 'UTC';
+    const rangeKey = String(req.query.range || req.query.dateRange || 'monthly').trim() || 'monthly';
+    const fromQ = String(req.query.from || '').trim();
+    const toQ = String(req.query.to || '').trim();
+    let startUtc;
+    let endUtc;
+    let rangeLabel;
+    try {
+      ({ startUtc, endUtc, rangeLabel } = parseBusinessDateRange(tz, rangeKey, fromQ, toQ));
+    } catch (rangeErr) {
+      return res.status(rangeErr.statusCode || 400).json({
+        success: false,
+        message: rangeErr.message || 'Invalid date range'
+      });
+    }
+
+    const convertedAtFilter = { $ne: null };
+    if (startUtc) convertedAtFilter.$gte = startUtc;
+    if (endUtc) convertedAtFilter.$lt = endUtc;
+
+    const filter = {
+      businessId: req.businessId,
+      assignedTo: user._id,
+      convertedAt: convertedAtFilter
+    };
+
+    const [leads, total] = await Promise.all([
+      Lead.find(filter)
+        .populate('statusId', 'name color isTerminal')
+        .populate('sourceId', 'name')
+        .sort({ convertedAt: -1 })
+        .limit(200)
+        .lean(),
+      Lead.countDocuments(filter)
+    ]);
+
+    const withBooking = leads.filter((l) => l.convertedBookingId).length;
+    const withJob = leads.filter((l) => l.convertedJobId).length;
+
+    res.json({
+      success: true,
+      from: startUtc ? startUtc.toISOString() : null,
+      to: endUtc ? endUtc.toISOString() : null,
+      rangeLabel,
+      crmEnabled: settings?.crmEnabled !== false,
+      totals: {
+        convertedCount: total,
+        withBooking,
+        withJob
+      },
+      leads: leads.map((l) => ({
+        _id: l._id,
+        name: l.name,
+        phone: l.phone,
+        location: l.location || '',
+        vehicleNumber: l.vehicleNumber || '',
+        statusName: l.statusId?.name || 'Converted',
+        statusColor: l.statusId?.color || '#059669',
+        sourceName: l.sourceId?.name || '',
+        convertedAt: l.convertedAt,
+        createdAt: l.createdAt,
+        convertedJobId: l.convertedJobId || null,
+        convertedBookingId: l.convertedBookingId || null
+      }))
+    });
+  } catch (error) {
+    console.error('Get employee converted-leads error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -6083,6 +6270,11 @@ router.put('/settings', [
   body('crmEnabled').optional().isBoolean(),
   body('vehicleScannerEnabled').optional().isBoolean(),
   body('attendanceEnabled').optional().isBoolean(),
+  body('otherRevenueEnabled').optional().isBoolean(),
+  body('attendanceGeoFenceEnabled').optional().isBoolean(),
+  body('attendanceLatitude').optional({ nullable: true }).isFloat({ min: -90, max: 90 }),
+  body('attendanceLongitude').optional({ nullable: true }).isFloat({ min: -180, max: 180 }),
+  body('attendancePerimeterMeters').optional({ nullable: true }).isFloat({ min: 1, max: 100000 }),
   body('internationalPhoneEnabled').optional().isBoolean(),
   body('multiEmployeeAssignEnabled').optional().isBoolean(),
   body('perServiceEmployeeAssignEnabled').optional().isBoolean(),
@@ -6171,6 +6363,27 @@ router.put('/settings', [
     if (req.body.attendanceEnabled !== undefined) {
       updateFields.attendanceEnabled = !!req.body.attendanceEnabled;
     }
+    if (req.body.otherRevenueEnabled !== undefined) {
+      updateFields.otherRevenueEnabled = !!req.body.otherRevenueEnabled;
+    }
+    if (req.body.attendanceGeoFenceEnabled !== undefined) {
+      updateFields.attendanceGeoFenceEnabled = !!req.body.attendanceGeoFenceEnabled;
+    }
+    if (req.body.attendanceLatitude !== undefined) {
+      const lat = req.body.attendanceLatitude;
+      updateFields.attendanceLatitude =
+        lat === null || lat === '' ? null : Number(lat);
+    }
+    if (req.body.attendanceLongitude !== undefined) {
+      const lng = req.body.attendanceLongitude;
+      updateFields.attendanceLongitude =
+        lng === null || lng === '' ? null : Number(lng);
+    }
+    if (req.body.attendancePerimeterMeters !== undefined) {
+      const p = req.body.attendancePerimeterMeters;
+      updateFields.attendancePerimeterMeters =
+        p === null || p === '' ? null : Number(p);
+    }
     if (req.body.internationalPhoneEnabled !== undefined) {
       updateFields.internationalPhoneEnabled = !!req.body.internationalPhoneEnabled;
     }
@@ -6212,6 +6425,43 @@ router.put('/settings', [
       const firstOpen = normalized.find((d) => d.isOpen) || normalized[0];
       if (firstOpen) {
         updateFields.workingHours = { start: firstOpen.start, end: firstOpen.end };
+      }
+    }
+
+    const nextAttendanceEnabled =
+      updateFields.attendanceEnabled !== undefined
+        ? updateFields.attendanceEnabled
+        : !!settings?.attendanceEnabled;
+    const nextGeoFenceEnabled =
+      updateFields.attendanceGeoFenceEnabled !== undefined
+        ? updateFields.attendanceGeoFenceEnabled
+        : !!settings?.attendanceGeoFenceEnabled;
+    if (nextAttendanceEnabled && nextGeoFenceEnabled) {
+      const { isValidLatitude, isValidLongitude, isValidPerimeterMeters } = await import(
+        '../utils/attendanceGeoFence.js'
+      );
+      const nextLat =
+        updateFields.attendanceLatitude !== undefined
+          ? updateFields.attendanceLatitude
+          : settings?.attendanceLatitude;
+      const nextLng =
+        updateFields.attendanceLongitude !== undefined
+          ? updateFields.attendanceLongitude
+          : settings?.attendanceLongitude;
+      const nextPerimeter =
+        updateFields.attendancePerimeterMeters !== undefined
+          ? updateFields.attendancePerimeterMeters
+          : settings?.attendancePerimeterMeters;
+      if (
+        !isValidLatitude(nextLat) ||
+        !isValidLongitude(nextLng) ||
+        !isValidPerimeterMeters(nextPerimeter)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            'Location-based punch requires a valid latitude, longitude, and perimeter (in meters).'
+        });
       }
     }
 

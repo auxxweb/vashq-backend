@@ -6,12 +6,14 @@ import Job from '../models/Job.model.js';
 import Business from '../models/Business.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import PlatformSettings from '../models/PlatformSettings.model.js';
+import OtherRevenue from '../models/OtherRevenue.model.js';
 import { sumExpenseChannelTotals } from '../utils/expensePayment.js';
 import { roundMoney } from '../utils/invoicePayment.js';
 import { resolveInvoiceDiscount } from '../utils/invoiceDiscount.js';
 import { invoiceSettlementCashOnline, creditCheckoutCashOnline } from '../utils/paymentChannelAmounts.js';
 import { parseAiInsightsDateRange } from '../utils/aiInsightsDateRange.js';
 import { buildCollectionReport, getTodayCashReceived } from './credit/creditReportsService.js';
+import { isOtherRevenueEnabled } from '../utils/otherRevenueSales.js';
 
 export { parseAiInsightsDateRange as parseStatementDateRange };
 
@@ -74,6 +76,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
 
   let jobSales = 0;
   let packageSales = 0;
+  let otherSales = 0;
   let salesCash = 0;
   let salesOnline = 0;
   let totalGst = 0;
@@ -114,9 +117,44 @@ async function gatherPeriodFinancials(businessId, start, end) {
     totalDiscount += resolveInvoiceDiscount(inv).amount;
   }
 
+  if (await isOtherRevenueEnabled(businessId)) {
+    const otherRows = await OtherRevenue.find({
+      businessId: bid,
+      revenueDate: { $gte: start, $lte: end }
+    }).select(
+      'amount settlementMode outstandingAmount paymentCashAmount paymentOnlineAmount paymentMethod paymentStatus'
+    ).lean();
+    for (const row of otherRows) {
+      const amt = roundMoney(Number(row.amount) || 0);
+      otherSales += amt;
+      const isCredit = row.settlementMode === 'CREDIT';
+      if (isCredit) {
+        creditSalesInPeriod += amt;
+        creditOutstandingFromPeriod += roundMoney(Number(row.outstandingAmount) || 0);
+      } else {
+        cashSalesInPeriod += amt;
+      }
+      const pc = roundMoney(Number(row.paymentCashAmount) || 0);
+      const po = roundMoney(Number(row.paymentOnlineAmount) || 0);
+      if (pc + po > PAYMENT_EPS) {
+        salesCash += pc;
+        salesOnline += po;
+      } else if (!isCredit) {
+        if (row.paymentMethod === 'ONLINE') salesOnline += amt;
+        else if (row.paymentMethod === 'SPLIT') {
+          // fallback if channels missing
+          salesCash += amt;
+        } else {
+          salesCash += amt;
+        }
+      }
+    }
+  }
+
   jobSales = roundMoney(jobSales);
   packageSales = roundMoney(packageSales);
-  const totalSales = roundMoney(jobSales + packageSales);
+  otherSales = roundMoney(otherSales);
+  const totalSales = roundMoney(jobSales + packageSales + otherSales);
   salesCash = roundMoney(salesCash);
   salesOnline = roundMoney(salesOnline);
   creditSalesInPeriod = roundMoney(creditSalesInPeriod);
@@ -236,7 +274,23 @@ async function gatherPeriodFinancials(businessId, start, end) {
     },
     { $group: { _id: null, total: { $sum: '$outstandingAmount' } } }
   ]);
-  const debtors = roundMoney(debtorsAgg[0]?.total ?? 0);
+  // Also include other-revenue receivables in debtors when enabled
+  let otherDebtors = 0;
+  if (await isOtherRevenueEnabled(businessId)) {
+    const otherDebtAgg = await OtherRevenue.aggregate([
+      {
+        $match: {
+          businessId: bid,
+          settlementMode: 'CREDIT',
+          outstandingAmount: { $gt: 0.01 },
+          revenueDate: { $lte: end }
+        }
+      },
+      { $group: { _id: null, total: { $sum: '$outstandingAmount' } } }
+    ]);
+    otherDebtors = roundMoney(otherDebtAgg[0]?.total ?? 0);
+  }
+  const debtors = roundMoney((debtorsAgg[0]?.total ?? 0) + otherDebtors);
 
   const netProfit = roundMoney(totalSales - totalExpenses);
 
@@ -244,6 +298,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
     meta,
     jobSales,
     packageSales,
+    otherSales,
     totalSales,
     cashSalesInPeriod,
     creditSalesInPeriod,
@@ -324,7 +379,7 @@ export async function buildTrialBalance(businessId, range, from, to) {
     pushTrialRow(rows, name, line.amount, 0);
   }
 
-  pushTrialRow(rows, 'Sales A/c (Car wash & packages)', 0, data.totalSales);
+  pushTrialRow(rows, 'Sales A/c (Jobs, packages & other revenue)', 0, data.totalSales);
 
   const { rows: balancedRows, totalDebit, totalCredit } = balanceTrialRows(rows);
 
@@ -340,7 +395,7 @@ export async function buildTrialBalance(businessId, range, from, to) {
       creditRecovery: data.creditRecovery,
       creditOutstanding: data.debtors
     },
-    disclaimer: 'Derived from VashQ job & package sales, daily expenses, cash/online collections, and pay-later (credit) balances for the selected period.'
+    disclaimer: 'Derived from VashQ job, package, and other revenue sales, daily expenses, cash/online collections, and pay-later (credit) balances for the selected period.'
   };
 }
 
@@ -364,6 +419,9 @@ export async function buildProfitLossStatement(businessId, range, from, to) {
   }
   if (data.packageSales > 0.009) {
     tradingCredit.push({ label: 'Sales (Packages)', amount: data.packageSales, prefix: 'By' });
+  }
+  if (data.otherSales > 0.009) {
+    tradingCredit.push({ label: 'Sales (Other revenue)', amount: data.otherSales, prefix: 'By' });
   }
   if (tradingCredit.length === 0 && data.totalSales > 0.009) {
     tradingCredit.push({ label: 'Sales', amount: data.totalSales, prefix: 'By' });
@@ -413,6 +471,7 @@ export async function buildProfitLossStatement(businessId, range, from, to) {
       totalSales: data.totalSales,
       jobSales: data.jobSales,
       packageSales: data.packageSales,
+      otherSales: data.otherSales,
       cashSales: data.cashSalesInPeriod,
       creditSales: data.creditSalesInPeriod,
       creditRecovery: data.creditRecovery,
@@ -438,6 +497,7 @@ export async function buildSalesExpensesStatement(businessId, range, from, to) {
     sales: {
       jobServices: data.jobSales,
       packageSales: data.packageSales,
+      otherSales: data.otherSales,
       total: data.totalSales,
       cashReceived: data.cashInPeriod,
       onlineReceived: data.bankInPeriod,
@@ -460,7 +520,7 @@ export async function buildSalesExpensesStatement(businessId, range, from, to) {
       netProfit: data.netProfit,
       netMarginPct: data.totalSales > 0 ? roundMoney((data.netProfit / data.totalSales) * 100) : 0
     },
-    disclaimer: 'Sales include paid invoices and pay-later (credit) sales confirmed in the period.'
+    disclaimer: 'Sales include job, package, and other revenue (paid and collect-later) confirmed in the period.'
   };
 }
 

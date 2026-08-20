@@ -4,10 +4,16 @@ import AttendanceCorrectionRequest from '../models/AttendanceCorrectionRequest.m
 import User from '../models/User.model.js';
 import { getBusinessTimezone } from '../utils/businessTimezone.js';
 import { isAdminPanelRole } from '../utils/adminRoles.js';
+import BusinessSettings from '../models/BusinessSettings.model.js';
+import {
+  assertInsideAttendanceGeoFence,
+  buildAttendanceGeoFencePublic
+} from '../utils/attendanceGeoFence.js';
 
-function httpError(message, status = 400) {
+function httpError(message, status = 400, code) {
   const err = new Error(message);
   err.status = status;
+  if (code) err.code = code;
   return err;
 }
 
@@ -76,14 +82,40 @@ export async function getTodayAttendance(req, userId) {
     date
   }).lean();
   const live = deriveLiveState(day);
+  const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+    .select(
+      'attendanceEnabled attendanceGeoFenceEnabled attendanceLatitude attendanceLongitude attendancePerimeterMeters'
+    )
+    .lean();
   return {
     date,
     day: day || null,
+    geoFence: buildAttendanceGeoFencePublic(settings),
     ...live
   };
 }
 
+async function enforcePunchGeoFence(req) {
+  const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+    .select(
+      'attendanceEnabled attendanceGeoFenceEnabled attendanceLatitude attendanceLongitude attendancePerimeterMeters'
+    )
+    .lean();
+  try {
+    return assertInsideAttendanceGeoFence(settings, {
+      latitude: req.body?.latitude ?? req.body?.lat,
+      longitude: req.body?.longitude ?? req.body?.lng
+    });
+  } catch (e) {
+    const err = httpError(e.message, e.status || 400, e.code);
+    if (e.distanceMeters != null) err.distanceMeters = e.distanceMeters;
+    if (e.perimeterMeters != null) err.perimeterMeters = e.perimeterMeters;
+    throw err;
+  }
+}
+
 export async function punchIn(req, userId) {
+  await enforcePunchGeoFence(req);
   const day = await getOrCreateToday(req, userId);
   const live = deriveLiveState(day);
   if (live.state === 'PUNCHED_IN' || live.state === 'ON_BREAK') {
@@ -99,6 +131,7 @@ export async function punchIn(req, userId) {
 }
 
 export async function punchOut(req, userId) {
+  await enforcePunchGeoFence(req);
   const day = await getOrCreateToday(req, userId);
   const live = deriveLiveState(day);
   if (live.state === 'ON_BREAK') {

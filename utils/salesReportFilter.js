@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { PRODUCT_SALE_FILTER, WASH_JOB_FILTER } from './directBillJob.js';
 
-const VALID_SOURCES = new Set(['all', 'wash', 'jobs', 'products', 'product', 'variable', 'packages']);
+const VALID_SOURCES = new Set(['all', 'wash', 'jobs', 'products', 'product', 'variable', 'packages', 'other-revenue', 'other-revenues']);
 
 /** Parse categoryId / categoryIds query into unique valid ObjectId strings. */
 export function parseCategoryIdsFromQuery(query = {}) {
@@ -66,16 +66,25 @@ export function normalizeSalesReportSource(source) {
   if (!VALID_SOURCES.has(s)) return 'all';
   if (s === 'jobs') return 'wash';
   if (s === 'product') return 'products';
+  if (s === 'other-revenues') return 'other-revenue';
   return s;
 }
 
 export function shouldIncludeJobSales(source) {
-  return normalizeSalesReportSource(source) !== 'packages';
+  const normalized = normalizeSalesReportSource(source);
+  return normalized !== 'packages' && normalized !== 'other-revenue';
 }
 
 export function shouldIncludePackageSales(source, hasServiceFilter) {
   const normalized = normalizeSalesReportSource(source);
   if (normalized === 'packages') return true;
+  if (normalized === 'other-revenue') return false;
+  return normalized === 'all' && !hasServiceFilter;
+}
+
+export function shouldIncludeOtherRevenueSales(source, hasServiceFilter) {
+  const normalized = normalizeSalesReportSource(source);
+  if (normalized === 'other-revenue') return true;
   return normalized === 'all' && !hasServiceFilter;
 }
 

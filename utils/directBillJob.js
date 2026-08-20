@@ -118,7 +118,7 @@ export async function createInvoiceForJobRecord({
   });
 }
 
-async function computeLoyaltyEarnedForJobServices(businessId, jobServices = []) {
+export async function computeLoyaltyEarnedForJobServices(businessId, jobServices = []) {
   const serviceIds = (jobServices || []).map((s) => s?.serviceId).filter(Boolean);
   if (!serviceIds.length) return 0;
 

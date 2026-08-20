@@ -13,7 +13,9 @@ const leadActivitySchema = new mongoose.Schema({
       'CONVERTED_JOB',
       'UPDATED',
       'IMPORTED',
-      'ASSIGNED'
+      'ASSIGNED',
+      'ESTIMATE_CREATED',
+      'ESTIMATE_SHARED'
     ],
     required: true
   },

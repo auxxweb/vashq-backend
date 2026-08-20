@@ -1,6 +1,11 @@
 import mongoose from 'mongoose';
 import Invoice from '../models/Invoice.model.js';
 import { invoiceCollectedAmountExpression, invoiceOutstandingAmountExpression } from './dashboardFinancialSync.js';
+import {
+  isOtherRevenueEnabled,
+  sumOtherRevenueBilled,
+  sumOtherRevenueCollectedChannels
+} from './otherRevenueSales.js';
 
 function roundMoney(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -138,8 +143,14 @@ export async function getPeriodSalesBreakdown(businessId, startUtc, endUtc, bran
   const creditSalesRevenue = roundMoney(creditAgg[0]?.total ?? 0);
   const creditSalesCollected = roundMoney(creditCollectedAgg[0]?.total ?? 0);
   const creditSalesOutstanding = roundMoney(creditOutstandingAgg[0]?.total ?? 0);
+
+  const otherRevenueOn = await isOtherRevenueEnabled(businessId);
+  const otherSalesRevenue = otherRevenueOn
+    ? await sumOtherRevenueBilled(businessId, startUtc, endUtc, branchId)
+    : 0;
+
   const totalSalesRevenue = roundMoney(
-    jobSalesRevenue + productSalesRevenue + packageSalesRevenue + creditSalesRevenue
+    jobSalesRevenue + productSalesRevenue + packageSalesRevenue + creditSalesRevenue + otherSalesRevenue
   );
 
   return {
@@ -149,6 +160,7 @@ export async function getPeriodSalesBreakdown(businessId, startUtc, endUtc, bran
     creditSalesRevenue,
     creditSalesCollected,
     creditSalesOutstanding,
+    otherSalesRevenue,
     totalSalesRevenue
   };
 }
@@ -266,14 +278,22 @@ export async function getPeriodSalesReceivedBreakdown(businessId, startUtc, endU
   const jobSalesReceived = roundMoney(jobAgg[0]?.total ?? 0);
   const productSalesReceived = roundMoney(productAgg[0]?.total ?? 0);
   const packageSalesReceived = roundMoney(packageAgg[0]?.total ?? 0);
+
+  const otherRevenueOn = await isOtherRevenueEnabled(businessId);
+  const otherCollected = otherRevenueOn
+    ? await sumOtherRevenueCollectedChannels(businessId, startUtc, endUtc, branchId)
+    : { total: 0 };
+  const otherSalesReceived = roundMoney(otherCollected.total);
+
   const totalSalesReceived = roundMoney(
-    jobSalesReceived + productSalesReceived + packageSalesReceived
+    jobSalesReceived + productSalesReceived + packageSalesReceived + otherSalesReceived
   );
 
   return {
     jobSalesReceived,
     productSalesReceived,
     packageSalesReceived,
+    otherSalesReceived,
     totalSalesReceived
   };
 }

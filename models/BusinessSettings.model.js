@@ -135,6 +135,21 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   attendanceEnabled: { type: Boolean, default: false },
   /**
+   * When true, Other Revenue (additional inflows outside jobs/products/variable sales) is available.
+   * Off by default — Settings → enable + manage revenue types.
+   */
+  otherRevenueEnabled: { type: Boolean, default: false },
+  /**
+   * When true (and attendanceEnabled), punch in/out require the employee to be inside
+   * the configured geo perimeter around attendanceLatitude/Longitude.
+   */
+  attendanceGeoFenceEnabled: { type: Boolean, default: false },
+  /** Shop / office center for attendance geofence (WGS84). */
+  attendanceLatitude: { type: Number, default: null },
+  attendanceLongitude: { type: Number, default: null },
+  /** Allowed radius in meters (e.g. 50 or 1000). */
+  attendancePerimeterMeters: { type: Number, default: null, min: 0 },
+  /**
    * When true, customer phone fields show a country-code selector (international numbers).
    * Off by default — classic local mobile input remains (server defaults missing codes to +91).
    */

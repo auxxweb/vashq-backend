@@ -10,6 +10,10 @@ import {
   invoiceSettlementAggregationStages
 } from '../../utils/paymentChannelAmounts.js';
 import { deriveCollectionDisplayStatus, getTotalCollected } from './outstandingService.js';
+import {
+  isOtherRevenueEnabled,
+  sumOtherRevenueCollectedChannels
+} from '../../utils/otherRevenueSales.js';
 
 function roundSummary(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -421,9 +425,23 @@ export async function getTodayCashReceived(
   const advCardResolved = advanceUpi == null && advanceCard == null
     ? 0
     : roundSummary(advanceCard);
-  const todayCashReceivedCash = roundSummary(advCash + fullPayCash + creditCheckoutCash + recoveryCash);
-  const todayCashReceivedOnline = roundSummary(advOnline + fullPayOnline + creditCheckoutOnline + recoveryOnline);
-  const todayCashReceivedUpi = roundSummary(advUpiResolved + fullPayUpi + creditCheckoutUpi + recoveryUpi);
+
+  let otherCash = 0;
+  let otherOnline = 0;
+  if (await isOtherRevenueEnabled(businessId)) {
+    const otherCollected = await sumOtherRevenueCollectedChannels(
+      businessId,
+      startUtc,
+      endUtc,
+      branchId
+    );
+    otherCash = roundSummary(otherCollected.cash);
+    otherOnline = roundSummary(otherCollected.online);
+  }
+
+  const todayCashReceivedCash = roundSummary(advCash + fullPayCash + creditCheckoutCash + recoveryCash + otherCash);
+  const todayCashReceivedOnline = roundSummary(advOnline + fullPayOnline + creditCheckoutOnline + recoveryOnline + otherOnline);
+  const todayCashReceivedUpi = roundSummary(advUpiResolved + fullPayUpi + creditCheckoutUpi + recoveryUpi + otherOnline);
   const todayCashReceivedCard = roundSummary(advCardResolved + fullPayCard + creditCheckoutCard + recoveryCard);
 
   return {
@@ -435,7 +453,8 @@ export async function getTodayCashReceived(
     todayFullPayCheckout: roundSummary(fullPayCash + fullPayOnline),
     todayCreditCheckout: roundSummary(creditCheckoutTotal),
     todayCreditRecovery: roundSummary(todayCreditRecovery),
-    todayAdvances: roundSummary(advCash + advOnline)
+    todayAdvances: roundSummary(advCash + advOnline),
+    todayOtherRevenueCollected: roundSummary(otherCash + otherOnline)
   };
 }
 

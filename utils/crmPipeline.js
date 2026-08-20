@@ -48,8 +48,32 @@ const DEFAULT_STATUSES = [
   { name: 'Contacted', sortOrder: 3, color: '#8b5cf6', isTerminal: false, isFollowUp: false },
   { name: 'Follow-up', sortOrder: 4, color: '#f59e0b', isTerminal: false, isFollowUp: true },
   { name: 'Interested', sortOrder: 5, color: '#10b981', isTerminal: false, isFollowUp: false },
+  { name: 'Estimate shared', sortOrder: 55, color: '#0ea5e9', isTerminal: false, isFollowUp: false },
   { name: 'Converted', sortOrder: 6, color: '#059669', isTerminal: true, isFollowUp: false }
 ];
+
+async function ensureEstimateSharedStatus(businessId) {
+  const existing = await LeadStatus.findOne({ businessId, name: /^estimate shared$/i });
+  if (existing) {
+    if (existing.isActive === false || existing.isTerminal === true) {
+      await LeadStatus.updateOne(
+        { _id: existing._id },
+        { $set: { isActive: true, isTerminal: false, isFollowUp: false } }
+      );
+    }
+    return;
+  }
+  await LeadStatus.create({
+    businessId,
+    name: 'Estimate shared',
+    sortOrder: 55,
+    color: '#0ea5e9',
+    isTerminal: false,
+    isFollowUp: false,
+    isSystem: true,
+    isActive: true
+  });
+}
 
 const DEFAULT_SOURCES = [
   'Walk-in',
@@ -65,7 +89,11 @@ const crmDefaultsReady = new Set();
 
 export async function ensureCrmDefaults(businessId) {
   const key = String(businessId || '');
-  if (key && crmDefaultsReady.has(key)) {
+  // Always ensure Estimate shared exists (safe upsert) even when defaults are cached
+  if (key && !crmDefaultsReady.has(key)) {
+    // fall through to full seed below
+  } else if (key && crmDefaultsReady.has(key)) {
+    await ensureEstimateSharedStatus(businessId);
     return {};
   }
 
@@ -85,6 +113,7 @@ export async function ensureCrmDefaults(businessId) {
       { businessId, name: /^converted$/i },
       { $set: { isTerminal: true, isFollowUp: false } }
     );
+    await ensureEstimateSharedStatus(businessId);
   }
 
   const existingSources = await LeadSource.countDocuments({ businessId });

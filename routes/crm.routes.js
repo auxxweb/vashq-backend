@@ -41,6 +41,7 @@ import {
   listSalesStaff,
   resolveSalesAssignee
 } from '../utils/crmAccess.js';
+import estimatesRoutes from './crmEstimates.routes.js';
 
 const router = express.Router();
 
@@ -566,10 +567,10 @@ router.post('/leads/import', adminPanelOnly, [
   }
 });
 
-/** Bulk assign / status / edit — business & branch admins only */
+/** Bulk assign / status / edit / delete — business & branch admins only */
 router.post('/leads/bulk', adminPanelOnly, [
   body('leadIds').isArray({ min: 1 }).withMessage('Select at least one lead'),
-  body('action').isIn(['assign', 'status', 'edit']).withMessage('Invalid bulk action')
+  body('action').isIn(['assign', 'status', 'edit', 'delete']).withMessage('Invalid bulk action')
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;
@@ -594,7 +595,16 @@ router.post('/leads/bulk', adminPanelOnly, [
     let updated = 0;
     const errors = [];
 
-    if (action === 'assign') {
+    if (action === 'delete') {
+      for (const lead of leads) {
+        try {
+          await Lead.deleteOne({ _id: lead._id, businessId: req.businessId });
+          updated += 1;
+        } catch (rowErr) {
+          errors.push({ leadId: String(lead._id), message: rowErr.message || 'Failed' });
+        }
+      }
+    } else if (action === 'assign') {
       let assigneeId = req.body.assignedTo;
       if (assigneeId === '' || assigneeId === undefined) assigneeId = null;
       let assignee = null;
@@ -1294,5 +1304,7 @@ router.post('/leads/:id/convert-job', async (req, res) => {
     res.status(e.status || 500).json({ success: false, message: e.message || 'Failed to create job' });
   }
 });
+
+router.use(estimatesRoutes);
 
 export default router;

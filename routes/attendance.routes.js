@@ -88,7 +88,13 @@ router.post('/punch-in', async (req, res) => {
     const payload = await punchIn(req, req.user._id);
     res.json({ success: true, ...payload });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
+    res.status(e.status || 500).json({
+      success: false,
+      message: e.message || 'Server error',
+      ...(e.code ? { code: e.code } : {}),
+      ...(e.distanceMeters != null ? { distanceMeters: e.distanceMeters } : {}),
+      ...(e.perimeterMeters != null ? { perimeterMeters: e.perimeterMeters } : {})
+    });
   }
 });
 
@@ -100,7 +106,13 @@ router.post('/punch-out', async (req, res) => {
     const payload = await punchOut(req, req.user._id);
     res.json({ success: true, ...payload });
   } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
+    res.status(e.status || 500).json({
+      success: false,
+      message: e.message || 'Server error',
+      ...(e.code ? { code: e.code } : {}),
+      ...(e.distanceMeters != null ? { distanceMeters: e.distanceMeters } : {}),
+      ...(e.perimeterMeters != null ? { perimeterMeters: e.perimeterMeters } : {})
+    });
   }
 });
 
