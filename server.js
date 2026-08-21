@@ -34,8 +34,39 @@ import { resolveCorsAllowlist } from './utils/frontendUrl.js';
 
 const app = express();
 
+/**
+ * Cloudflare / Nginx set X-Forwarded-For. express-rate-limit throws
+ * ERR_ERL_UNEXPECTED_X_FORWARDED_FOR unless Express trusts the proxy.
+ *
+ * TRUST_PROXY:
+ *   unset + production → 1 (safe default behind Cloudflare or Nginx)
+ *   1                  → one hop (Cloudflare→Node or Nginx→Node)
+ *   2                  → Cloudflare→Nginx→Node
+ *   false / 0          → disable (local direct access only)
+ */
+function resolveTrustProxy() {
+  const raw = process.env.TRUST_PROXY
+  if (raw !== undefined && String(raw).trim() !== '') {
+    const v = String(raw).trim().toLowerCase()
+    if (v === 'false' || v === '0') return false
+    if (v === 'true') return 1
+    const n = Number(v)
+    if (Number.isFinite(n) && n >= 0) return n
+    return raw.trim()
+  }
+  if (process.env.NODE_ENV === 'production') return 1
+  // Staging / mis-set env still often sits behind Cloudflare — prefer explicit TRUST_PROXY
+  if (process.env.NODE_ENV && process.env.NODE_ENV !== 'development') return 1
+  return false
+}
+
+const trustProxy = resolveTrustProxy()
+if (trustProxy !== false) {
+  app.set('trust proxy', trustProxy)
+  console.log(`Express trust proxy: ${JSON.stringify(trustProxy)}`)
+}
+
 if (process.env.NODE_ENV === 'production') {
-  app.set('trust proxy', 1);
   const secret = process.env.JWT_SECRET || '';
   if (!secret || secret === 'your-secret-key-change-in-production') {
     console.error('FATAL: Set a strong JWT_SECRET in production.');
