@@ -27,12 +27,18 @@ async function findOrCreateCar(businessId, customerId, vehicle) {
   const carNumber = String(vehicle.vehicleNumber || '').trim().toUpperCase();
   if (!carNumber) throw new Error('Vehicle number is required');
 
-  let car = await Car.findOne({ businessId, customerId, carNumber });
+  // Unique plate per business — link additional customers as co-owners
+  let car = await Car.findOne({ businessId, carNumber });
   if (car) {
-    let changed = false;
-    if (vehicle.vehicleBrand && !car.brand) { car.brand = vehicle.vehicleBrand; changed = true; }
-    if (vehicle.vehicleModel && !car.model) { car.model = vehicle.vehicleModel; changed = true; }
-    if (vehicle.vehicleType && !car.vehicleType) { car.vehicleType = vehicle.vehicleType; changed = true; }
+    const owners = new Set(
+      [...(car.customerIds || []), car.customerId, customerId].filter(Boolean).map((id) => String(id))
+    );
+    car.customerIds = [...owners];
+    car.customerId = customerId;
+    let changed = true;
+    if (vehicle.vehicleBrand && !car.brand) { car.brand = vehicle.vehicleBrand; }
+    if (vehicle.vehicleModel && !car.model) { car.model = vehicle.vehicleModel; }
+    if (vehicle.vehicleType && !car.vehicleType) { car.vehicleType = vehicle.vehicleType; }
     if (changed) await car.save();
     return car;
   }
@@ -40,6 +46,7 @@ async function findOrCreateCar(businessId, customerId, vehicle) {
   car = await Car.create({
     businessId,
     customerId,
+    customerIds: [customerId],
     carNumber,
     brand: vehicle.vehicleBrand || undefined,
     model: vehicle.vehicleModel || undefined,

@@ -4288,7 +4288,18 @@ router.get('/cars', async (req, res) => {
   try {
     const { customerId, search, page = 1, limit = 20 } = req.query;
     const query = applyBranchScope({ businessId: req.businessId }, req);
-    if (customerId) query.customerId = customerId;
+    if (customerId) {
+      // Include vehicles where this customer is primary OR a shared owner
+      query.$and = [
+        ...(query.$and || []),
+        {
+          $or: [
+            { customerId },
+            { customerIds: customerId }
+          ]
+        }
+      ];
+    }
     if (search && typeof search === 'string' && search.trim()) {
       const term = escapeRegex(search);
       const customerIds = await distinctCustomerIdsBySearch(Customer, req.businessId, search);
@@ -4297,7 +4308,7 @@ router.get('/cars', async (req, res) => {
         { brand: { $regex: term, $options: 'i' } },
         { model: { $regex: term, $options: 'i' } },
         { color: { $regex: term, $options: 'i' } },
-        ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : [])
+        ...(customerIds.length ? [{ customerId: { $in: customerIds } }, { customerIds: { $in: customerIds } }] : [])
       ];
     }
     const total = await Car.countDocuments(query);
@@ -4322,7 +4333,7 @@ router.get('/cars', async (req, res) => {
 });
 
 // @route   POST /api/admin/cars
-// @desc    Create new car
+// @desc    Create new car — plate is unique per business; extra customers are linked as co-owners
 // @access  Private (Car Wash Admin)
 router.post('/cars', [
   body('customerId').notEmpty(),
@@ -4344,6 +4355,35 @@ router.post('/cars', [
     assertBranchAccess(req, customer);
 
     const plate = String(req.body.carNumber || '').trim().toUpperCase();
+    const branchScope = applyBranchScope({ businessId: req.businessId }, req);
+
+    // Business-unique plate: reuse existing vehicle and link this customer as owner
+    const existingByPlate = await Car.findOne({
+      ...branchScope,
+      carNumber: new RegExp(`^${escapeRegex(plate)}$`, 'i')
+    });
+
+    if (existingByPlate) {
+      const ownerIds = new Set(
+        [...(existingByPlate.customerIds || []), existingByPlate.customerId]
+          .filter(Boolean)
+          .map((id) => String(id))
+      );
+      ownerIds.add(String(customer._id));
+      existingByPlate.customerIds = [...ownerIds];
+      existingByPlate.customerId = customer._id;
+      if (req.body.brand) existingByPlate.brand = req.body.brand;
+      if (req.body.model) existingByPlate.model = req.body.model;
+      if (req.body.color) existingByPlate.color = req.body.color;
+      existingByPlate.carNumber = plate;
+      await existingByPlate.save();
+      return res.status(200).json({
+        success: true,
+        car: existingByPlate,
+        linkedExisting: true
+      });
+    }
+
     const recentCar = await findRecentDuplicate(Car, {
       businessId: req.businessId,
       customerId: customer._id,
@@ -4356,6 +4396,8 @@ router.post('/cars', [
     const car = await Car.create({
       ...req.body,
       carNumber: plate || req.body.carNumber,
+      customerId: customer._id,
+      customerIds: [customer._id],
       businessId: req.businessId,
       branchId: customer.branchId || req.branchId || branchIdForCreate(req)
     });
@@ -4370,6 +4412,121 @@ router.post('/cars', [
       success: false,
       message: 'Server error'
     });
+  }
+});
+
+// @route   GET /api/admin/cars/:id
+// @desc    Vehicle profile with owners + job history (date filter)
+// @access  Private (Car Wash Admin)
+router.get('/cars/:id', async (req, res) => {
+  try {
+    const car = await findScoped(Car, req, { _id: req.params.id });
+    if (!car) {
+      return res.status(404).json({ success: false, message: 'Vehicle not found' });
+    }
+    assertBranchAccess(req, car);
+
+    const {
+      range = 'all',
+      from: fromQ = '',
+      to: toQ = '',
+      page = 1,
+      limit = 25
+    } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
+
+    const ownerIdSet = new Set(
+      [...(car.customerIds || []), car.customerId]
+        .filter(Boolean)
+        .map((id) => String(id))
+    );
+    const ownerObjectIds = [...ownerIdSet]
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const settings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('timezone')
+      .lean();
+    const businessTz = settings?.timezone || process.env.CRON_TZ || 'UTC';
+    let startUtc = null;
+    let endUtc = null;
+    let rangeLabel = 'All time';
+    try {
+      ({ startUtc, endUtc, rangeLabel } = parseBusinessDateRange(
+        businessTz,
+        range === 'ALL' ? 'all' : range,
+        fromQ,
+        toQ
+      ));
+    } catch (e) {
+      return res.status(e.statusCode || 400).json({
+        success: false,
+        message: e.message || 'Invalid date range'
+      });
+    }
+
+    const jobBase = applyBranchScope({ businessId: req.businessId, carId: car._id }, req);
+    const jobFilter = applyCreatedAtRange({ ...jobBase }, startUtc, endUtc);
+
+    const [owners, jobs, totalJobs, allTimeCount, lastJob] = await Promise.all([
+      ownerObjectIds.length
+        ? Customer.find(applyBranchScope({
+            businessId: req.businessId,
+            _id: { $in: ownerObjectIds }
+          }, req))
+            .select('name phone whatsappNumber email')
+            .lean()
+        : Promise.resolve([]),
+      Job.find(jobFilter)
+        .populate('customerId', 'name phone')
+        .populate('branchId', 'name')
+        .populate({ path: 'services.serviceId', select: 'name isVariable skipWorkProcess' })
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean(),
+      Job.countDocuments(jobFilter),
+      Job.countDocuments(jobBase),
+      Job.find(jobBase)
+        .sort({ createdAt: -1 })
+        .limit(1)
+        .select('createdAt actualDelivery status')
+        .lean()
+    ]);
+
+    // Keep primary owner first
+    const primaryId = String(car.customerId?._id || car.customerId || '');
+    owners.sort((a, b) => {
+      const aPrimary = String(a._id) === primaryId ? 0 : 1;
+      const bPrimary = String(b._id) === primaryId ? 0 : 1;
+      return aPrimary - bPrimary || String(a.name || '').localeCompare(String(b.name || ''));
+    });
+
+    const last = lastJob[0] || null;
+
+    res.json({
+      success: true,
+      car,
+      owners,
+      jobs,
+      rangeLabel,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalJobs,
+        totalPages: Math.ceil(totalJobs / limitNum) || 0
+      },
+      stats: {
+        totalJobsFiltered: totalJobs,
+        totalJobsAllTime: allTimeCount,
+        lastVisitAt: last ? (last.actualDelivery || last.createdAt) : null,
+        ownerCount: owners.length
+      }
+    });
+  } catch (error) {
+    console.error('Get car detail error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -4403,9 +4560,21 @@ router.put('/cars/:id', [
       });
     }
     assertBranchAccess(req, car);
+    const update = { ...req.body };
+    if (update.carNumber) {
+      update.carNumber = String(update.carNumber).trim().toUpperCase();
+    }
+    if (update.customerId) {
+      const owners = new Set(
+        [...(car.customerIds || []), car.customerId, update.customerId]
+          .filter(Boolean)
+          .map((id) => String(id))
+      );
+      update.customerIds = [...owners];
+    }
     const updated = await Car.findOneAndUpdate(
       scopedFilter(req, { _id: req.params.id }),
-      req.body,
+      update,
       { new: true, runValidators: true }
     );
     if (!updated) {

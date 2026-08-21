@@ -430,12 +430,13 @@ export async function ensureCustomerAndCarFromLead(lead, businessId, branchId, o
   const plate = String(overrides.vehicleNumber || lead.vehicleNumber || '').trim().toUpperCase();
   let car = null;
   if (plate) {
-    car = await Car.findOne({ businessId, carNumber: plate, customerId: customer._id });
+    car = await Car.findOne({ businessId, carNumber: plate });
     if (!car) {
       car = await Car.create({
         businessId,
         branchId: branchId || null,
         customerId: customer._id,
+        customerIds: [customer._id],
         carNumber: plate,
         brand: String(overrides.vehicleBrand || lead.vehicleBrand || '').trim() || undefined,
         model: String(overrides.vehicleModel || lead.vehicleModel || '').trim() || undefined,
@@ -443,15 +444,20 @@ export async function ensureCustomerAndCarFromLead(lead, businessId, branchId, o
         vehicleType: String(overrides.vehicleType || lead.vehicleType || '').trim() || undefined
       });
     } else {
-      let dirty = false;
+      const owners = new Set(
+        [...(car.customerIds || []), car.customerId, customer._id].filter(Boolean).map((id) => String(id))
+      );
+      car.customerIds = [...owners];
+      car.customerId = customer._id;
+      let dirty = true;
       const brand = String(overrides.vehicleBrand || '').trim();
       const model = String(overrides.vehicleModel || '').trim();
       const color = String(overrides.vehicleColor || '').trim();
       const vehicleType = String(overrides.vehicleType || '').trim();
-      if (brand && car.brand !== brand) { car.brand = brand; dirty = true; }
-      if (model && car.model !== model) { car.model = model; dirty = true; }
-      if (color && car.color !== color) { car.color = color; dirty = true; }
-      if (vehicleType && car.vehicleType !== vehicleType) { car.vehicleType = vehicleType; dirty = true; }
+      if (brand && car.brand !== brand) { car.brand = brand; }
+      if (model && car.model !== model) { car.model = model; }
+      if (color && car.color !== color) { car.color = color; }
+      if (vehicleType && car.vehicleType !== vehicleType) { car.vehicleType = vehicleType; }
       if (dirty) await car.save();
     }
   }
