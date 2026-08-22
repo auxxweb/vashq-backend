@@ -21,7 +21,11 @@ export function applyDefaultCountryCode(phone, defaultDial = DEFAULT_STORAGE_DIA
   if (digits.startsWith('0')) digits = digits.replace(/^0+/, '');
 
   const dial = String(defaultDial || DEFAULT_STORAGE_DIAL_CODE).replace(/\D/g, '') || '91';
-  if (digits.startsWith(dial) && digits.length > dial.length + 5) {
+  // Only treat as "already has country code" when long enough to be dial + national.
+  // 10-digit Indian mobiles can start with "91" (e.g. 9136775057) — those need +91 prefix
+  // (+919136775057), not storage as +9136775057. Require dial + at least 9 more digits
+  // (India: 11+; typical full IN mobile with code is 12).
+  if (digits.startsWith(dial) && digits.length >= dial.length + 9) {
     return `+${digits}`;
   }
   return `+${dial}${digits}`;
