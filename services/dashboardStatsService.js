@@ -249,7 +249,7 @@ export async function loadDashboardStats({
       ]),
     isEmployee
       ? Promise.resolve(null)
-      : BusinessSettings.findOne({ businessId }).select('otherRevenueEnabled').lean()
+      : BusinessSettings.findOne({ businessId }).select('otherRevenueEnabled cashAndBankEnabled').lean()
   ]);
 
   const statsPayload = {
@@ -291,6 +291,7 @@ export async function loadDashboardStats({
   const todayExpenses = todayExpResult[0]?.total ?? 0;
   const todayOtherRevenue = todayOtherRevResult[0]?.total ?? 0;
   const otherRevenueEnabled = !!otherRevenueSetting?.otherRevenueEnabled;
+  const cashAndBankEnabled = !!otherRevenueSetting?.cashAndBankEnabled;
   const monthBounds = parseBusinessDateRange(businessTz, 'month');
 
   const modules = businessModules || await getBusinessModules(businessId);
@@ -358,6 +359,7 @@ export async function loadDashboardStats({
   statsPayload.todayExpenses = todayExpenses;
   statsPayload.todayOtherRevenue = otherRevenueEnabled ? todayOtherRevenue : 0;
   statsPayload.otherRevenueEnabled = otherRevenueEnabled;
+  statsPayload.cashAndBankEnabled = cashAndBankEnabled;
   // Cash received already includes other-revenue collections when enabled.
   statsPayload.closingBalance = (cashReceived.todayCashReceived || 0) - todayExpenses;
   statsPayload.monthlyRevenue = monthlyReceived.jobSalesReceived;
@@ -366,6 +368,25 @@ export async function loadDashboardStats({
   statsPayload.monthlyProductSalesReceived = monthlyReceived.productSalesReceived;
   statsPayload.monthlyPackageSalesReceived = monthlyReceived.packageSalesReceived;
   statsPayload.monthlyOtherSalesReceived = monthlyReceived.otherSalesReceived || 0;
+
+  if (cashAndBankEnabled) {
+    try {
+      const { getBranchBalances, getBusinessBalances } = await import('./moneyBookService.js');
+      const bal = scopedBranchId
+        ? await getBranchBalances(businessId, scopedBranchId)
+        : await getBusinessBalances(businessId);
+      statsPayload.cashInHand = bal.cash || 0;
+      statsPayload.bankBalance = bal.bank || 0;
+      statsPayload.liquidTotal = bal.total || ((bal.cash || 0) + (bal.bank || 0));
+      // Prefer ledger closing when Cash & Bank is on
+      statsPayload.closingBalance = statsPayload.liquidTotal;
+    } catch (e) {
+      console.warn('Dashboard cash book balances:', e?.message || e);
+      statsPayload.cashInHand = 0;
+      statsPayload.bankBalance = 0;
+      statsPayload.liquidTotal = 0;
+    }
+  }
 
   return statsPayload;
 }

@@ -43,7 +43,11 @@ export async function deductProductStockOnWashJobDelivery(job, businessId) {
 
   let deductions = [];
   try {
-    deductions = await deductServiceStockForSale(businessId, job.services, catalogServices);
+    deductions = await deductServiceStockForSale(businessId, job.services, catalogServices, {
+      refType: 'JOB',
+      refId: job._id,
+      movementDate: new Date()
+    });
     job.productStockDeductedAt = new Date();
     return { deducted: deductions.length > 0, deductions };
   } catch (err) {

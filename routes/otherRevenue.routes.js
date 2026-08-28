@@ -24,6 +24,23 @@ import { parseBusinessDateRange } from '../utils/businessDateRange.js';
 
 const router = express.Router();
 
+/**
+ * This router is mounted at /api/admin. Skip immediately for unrelated paths so we do not
+ * double-run auth/branch/subscription on dashboard, jobs, etc. (next('router') leaves this router).
+ */
+router.use((req, res, next) => {
+  const p = req.path || '';
+  const isOtherRevenue =
+    p === '/other-revenue-types' ||
+    p.startsWith('/other-revenue-types/') ||
+    p === '/other-revenues' ||
+    p.startsWith('/other-revenues/') ||
+    p === '/reports/other-revenues' ||
+    p.startsWith('/reports/other-revenues');
+  if (!isOtherRevenue) return next('router');
+  return next();
+});
+
 router.use(authenticate);
 router.use((req, res, next) => {
   if (!req.user?.businessId) {
@@ -333,6 +350,10 @@ router.post('/other-revenues', requireOtherRevenueEnabled, [
       });
       await row.populate('otherRevenueTypeId', 'revenueName');
       created.push(row);
+      try {
+        const { syncMoneyBookFromOtherRevenue } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromOtherRevenue(row, { createdBy: req.user._id });
+      } catch (_) {}
     }
     res.status(201).json({ success: true, otherRevenues: created });
   } catch (error) {
@@ -418,6 +439,10 @@ router.put('/other-revenues/:id', requireOtherRevenueEnabled, [
     }
     await row.save();
     await row.populate('otherRevenueTypeId', 'revenueName');
+    try {
+      const { syncMoneyBookFromOtherRevenue } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromOtherRevenue(row, { createdBy: req.user._id });
+    } catch (_) {}
     res.json({ success: true, otherRevenue: row });
   } catch (error) {
     console.error('Update other revenue error:', error);
@@ -464,6 +489,10 @@ router.delete('/other-revenues/:id', requireOtherRevenueEnabled, async (req, res
     if (!row) {
       return res.status(404).json({ success: false, message: 'Other revenue not found' });
     }
+    try {
+      const { reverseLedgerBySource } = await import('../services/moneyBookService.js');
+      await reverseLedgerBySource(req.businessId, 'OTHER_REVENUE', row._id);
+    } catch (_) {}
     res.json({ success: true, message: 'Other revenue deleted' });
   } catch (error) {
     console.error('Delete other revenue error:', error);

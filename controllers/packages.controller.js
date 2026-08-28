@@ -424,7 +424,7 @@ export async function purchasePackage(req, res) {
 
     let invoiceNumber = await generateInvoiceNumberForBusiness(req.businessId);
 
-    const company = await getInvoiceCompanySnapshot(req.businessId);
+    const company = await getInvoiceCompanySnapshot(req.businessId, { branchId: purchaseBranchId });
     const subtotal = roundMoney(template.price);
     const gstFields = await buildGstFieldsForNewInvoice(req.businessId, {
       companyGst: company?.gstNumber,
@@ -693,6 +693,10 @@ export async function closePackageSale(req, res) {
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
     invalidateDashboardForBusiness(req.businessId);
+    try {
+      const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromInvoice(invoice, { createdBy: req.user._id });
+    } catch (_) {}
 
     res.json({ success: true, invoice, message: 'Package marked paid' });
   } catch (error) {

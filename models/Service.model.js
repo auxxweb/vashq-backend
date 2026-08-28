@@ -72,6 +72,24 @@ const serviceSchema = new mongoose.Schema({
     default: 5,
     min: [0, 'Low stock threshold cannot be negative']
   },
+  /** Weighted average unit cost (inventory module). Used for COGS / stock valuation. */
+  avgCost: {
+    type: Number,
+    default: 0,
+    min: [0, 'Average cost cannot be negative']
+  },
+  /** Optional SKU / barcode for inventory products. */
+  sku: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  /** Unit label e.g. pcs, bottle, litre (inventory products). */
+  unit: {
+    type: String,
+    trim: true,
+    default: 'pcs'
+  },
   isActive: {
     type: Boolean,
     default: true

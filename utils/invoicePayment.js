@@ -65,6 +65,15 @@ export function normalizeInvoicePaymentFields(invoice, body, opts = {}) {
   const due = balanceDue(final, adv);
   const method = body.paymentMethod !== undefined ? body.paymentMethod : invoice.paymentMethod;
 
+  // Fully covered by advance — checkout must not store any cash/online (prevents double-count).
+  if (due <= EPS) {
+    invoice.paymentMethod = method || invoice.paymentMethod || 'CASH';
+    invoice.paymentCashAmount = 0;
+    invoice.paymentOnlineAmount = 0;
+    invoice.onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
+    return;
+  }
+
   let pCash = body.paymentCashAmount !== undefined ? Number(body.paymentCashAmount) : Number(invoice.paymentCashAmount) || 0;
   let pOnline = body.paymentOnlineAmount !== undefined ? Number(body.paymentOnlineAmount) : Number(invoice.paymentOnlineAmount) || 0;
 
@@ -126,11 +135,22 @@ export function normalizeInvoicePaymentFields(invoice, body, opts = {}) {
 export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod, onlinePaymentMode, opts = {}) {
   const method = paymentMethod || invoice.paymentMethod;
   const allowCard = opts.cardEnabled === true;
-  const total = roundMoney(
+  const due = balanceDue(invoice.finalAmount, invoice.advancePayment);
+  const storedTotal = roundMoney(
     (Number(invoice.paymentCashAmount) || 0) + (Number(invoice.paymentOnlineAmount) || 0)
   );
+  // Never keep checkout totals above balance due (advance is separate).
+  const total = roundMoney(Math.min(storedTotal, due));
   const cash = roundMoney(Number(invoice.paymentCashAmount) || 0);
   const online = roundMoney(Number(invoice.paymentOnlineAmount) || 0);
+
+  if (due <= EPS) {
+    invoice.paymentCashAmount = 0;
+    invoice.paymentOnlineAmount = 0;
+    invoice.paymentMethod = method || 'CASH';
+    invoice.onlinePaymentMode = DEFAULT_ONLINE_PAYMENT_MODE;
+    return;
+  }
 
   if (method === 'ONLINE') {
     invoice.paymentMethod = 'ONLINE';
@@ -147,9 +167,16 @@ export function relabelLockedInvoicePaymentMethod(invoice, paymentMethod, online
   }
   if (method === 'SPLIT') {
     if (cash > EPS && online > EPS) {
+      const capped = (() => {
+        const sum = roundMoney(cash + online);
+        if (sum <= due + EPS) return { cash, online };
+        const scale = due / sum;
+        const nextCash = roundMoney(cash * scale);
+        return { cash: nextCash, online: roundMoney(due - nextCash) };
+      })();
       invoice.paymentMethod = 'SPLIT';
-      invoice.paymentCashAmount = cash;
-      invoice.paymentOnlineAmount = online;
+      invoice.paymentCashAmount = capped.cash;
+      invoice.paymentOnlineAmount = capped.online;
       if (String(onlinePaymentMode || '').toUpperCase() === 'CARD') {
         assertOnlinePaymentModeAllowed('CARD', allowCard);
       }

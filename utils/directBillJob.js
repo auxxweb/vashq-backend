@@ -78,7 +78,7 @@ export async function createInvoiceForJobRecord({
     0
   );
   const advanceFromJob = Math.max(0, Number(job.advancePayment) || 0);
-  const company = await getInvoiceCompanySnapshot(businessId);
+  const company = await getInvoiceCompanySnapshot(businessId, { branchId: job.branchId });
   const subtotalRounded = roundMoney(subtotal);
   const gstFields = await buildGstFieldsForNewInvoice(businessId, {
     companyGst: company?.gstNumber,
@@ -268,7 +268,14 @@ export async function finalizeDirectBillSale({
       car,
       catalogServices
     });
-    stockDeductions = await deductServiceStockForSale(businessId, job.services, catalogServices);
+    stockDeductions = await deductServiceStockForSale(businessId, job.services, catalogServices, {
+      refType: 'JOB',
+      refId: job._id,
+      createdBy: userId || null,
+      movementDate: new Date()
+    });
+    job.productStockDeductedAt = new Date();
+    await job.save().catch(() => {});
   } catch (billErr) {
     if (stockDeductions.length) {
       await restoreServiceStock(businessId, stockDeductions).catch(() => {});

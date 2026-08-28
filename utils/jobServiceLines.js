@@ -6,7 +6,7 @@ import { assertSufficientStock, deductServiceStockForSale, restoreServiceStock }
 import { isProductCatalogService } from './jobCart.js';
 import { resolveInvoiceDiscount, syncInvoiceDiscountAmount } from './invoiceDiscount.js';
 import { applyComputedGstAmount } from './invoiceGst.js';
-import { roundMoney } from './invoicePayment.js';
+import { balanceDue, roundMoney } from './invoicePayment.js';
 
 function isInvoiceFinanciallyClosed(invoice) {
   if (!invoice) return false;
@@ -24,24 +24,35 @@ export function reconcileClosedInvoiceAfterTotalChange(invoice) {
   if (!invoice || !isInvoiceFinanciallyClosed(invoice)) return invoice;
 
   const final = roundMoney(invoice.finalAmount);
+  const due = balanceDue(final, invoice.advancePayment);
   const cash = roundMoney(Number(invoice.paymentCashAmount) || 0);
   const online = roundMoney(Number(invoice.paymentOnlineAmount) || 0);
   const collected = roundMoney(cash + online);
 
   if (invoice.paymentStatus === 'RECEIVED') {
-    if (Math.abs(collected - final) <= 0.02) {
+    // Checkout amounts must match balance due (final − advance), never the full final.
+    if (Math.abs(collected - due) <= 0.02) {
+      invoice.paymentCashAmount = cash;
+      invoice.paymentOnlineAmount = online;
+      if (due <= 0.02) {
+        invoice.paymentCashAmount = 0;
+        invoice.paymentOnlineAmount = 0;
+      }
       invoice.outstandingAmount = 0;
       return invoice;
     }
     if (collected <= 0.02) {
-      invoice.paymentCashAmount = final;
+      invoice.paymentCashAmount = due;
       invoice.paymentOnlineAmount = 0;
-      if (final > 0) invoice.paymentMethod = 'CASH';
+      if (due > 0) invoice.paymentMethod = 'CASH';
+    } else if (due <= 0.02) {
+      invoice.paymentCashAmount = 0;
+      invoice.paymentOnlineAmount = 0;
     } else {
-      const ratio = final / collected;
+      const ratio = due / collected;
       const nextCash = roundMoney(cash * ratio);
       invoice.paymentCashAmount = nextCash;
-      invoice.paymentOnlineAmount = roundMoney(final - nextCash);
+      invoice.paymentOnlineAmount = roundMoney(due - nextCash);
       if (invoice.paymentCashAmount > 0 && invoice.paymentOnlineAmount > 0) {
         invoice.paymentMethod = 'SPLIT';
       } else if (invoice.paymentOnlineAmount > 0) {
@@ -54,8 +65,9 @@ export function reconcileClosedInvoiceAfterTotalChange(invoice) {
     return invoice;
   }
 
-  // Credit-closed
-  invoice.outstandingAmount = Math.max(0, roundMoney(final - collected));
+  // Credit-closed: collected at checkout excludes advance (advance is separate).
+  const adv = roundMoney(Math.min(Number(invoice.advancePayment) || 0, final));
+  invoice.outstandingAmount = Math.max(0, roundMoney(final - adv - collected));
   return invoice;
 }
 
@@ -559,7 +571,10 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
   await job.save();
 
   if (alreadyDeducted) {
-    await deductServiceStockForSale(businessId, newLines, catalogServices);
+    await deductServiceStockForSale(businessId, newLines, catalogServices, {
+      refType: 'INVOICE',
+      refId: invoice?._id || null
+    });
   }
 
   await syncDraftInvoiceFromJob(invoice, job, { force: closed });

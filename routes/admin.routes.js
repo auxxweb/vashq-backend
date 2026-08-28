@@ -128,6 +128,8 @@ import {
 import { DEFAULT_WHATSAPP_TEMPLATES, normalizeWhatsappTemplates } from '../utils/whatsappTemplates.js';
 import {
   applyBranchWhatsAppSettings,
+  applyBranchPaymentSettings,
+  syncBusinessPaymentToDefaultBranch,
   resolveWhatsAppBranchId
 } from '../utils/whatsappSettingsMerge.js';
 import { DateTime } from 'luxon';
@@ -1068,6 +1070,10 @@ router.post('/expenses', [
       });
       await exp.populate('expenseTypeId', 'expenseName');
       created.push(exp);
+      try {
+        const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromExpense(exp, { createdBy: req.user._id });
+      } catch (_) {}
     }
     res.status(201).json({ success: true, expenses: created });
   } catch (error) {
@@ -1159,6 +1165,10 @@ router.put('/expenses/:id', [
     }
     await expense.save();
     await expense.populate('expenseTypeId', 'expenseName');
+    try {
+      const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromExpense(expense, { createdBy: req.user._id });
+    } catch (_) {}
     res.json({ success: true, expense });
   } catch (error) {
     console.error('Update expense error:', error);
@@ -1194,6 +1204,10 @@ router.post('/expenses/:id/pay', [
     }
     await expense.save();
     await expense.populate('expenseTypeId', 'expenseName');
+    try {
+      const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromExpense(expense, { createdBy: req.user._id });
+    } catch (_) {}
     res.json({ success: true, expense });
   } catch (error) {
     console.error('Pay expense payable error:', error);
@@ -1211,6 +1225,10 @@ router.delete('/expenses/:id', async (req, res) => {
     if (!expense) {
       return res.status(404).json({ success: false, message: 'Expense not found' });
     }
+    try {
+      const { reverseLedgerBySource } = await import('../services/moneyBookService.js');
+      await reverseLedgerBySource(req.businessId, 'EXPENSE', expense._id);
+    } catch (_) {}
     res.json({ success: true, message: 'Expense deleted' });
   } catch (error) {
     console.error('Delete expense error:', error);
@@ -1383,11 +1401,19 @@ router.get('/invoices/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
     assertBranchAccess(req, invoice, { allowLegacyNull: true });
-    const companySnapshot = await getInvoiceCompanySnapshot(req.businessId);
+    const invoiceBranchId =
+      invoice.branchId ||
+      invoice.jobId?.branchId ||
+      null;
+    const companySnapshot = await getInvoiceCompanySnapshot(req.businessId, { branchId: invoiceBranchId });
     const toPersist = companyFieldsToPersist(invoice, companySnapshot);
     if (toPersist) {
-      await Invoice.updateOne({ _id: req.params.id, businessId: req.businessId }, { $set: toPersist });
-      invoice = { ...invoice, ...toPersist };
+      const persistPayload = { ...toPersist };
+      if (!invoice.branchId && invoiceBranchId) {
+        persistPayload.branchId = invoiceBranchId;
+      }
+      await Invoice.updateOne({ _id: req.params.id, businessId: req.businessId }, { $set: persistPayload });
+      invoice = { ...invoice, ...persistPayload };
     }
     invoice = mergeInvoiceWithCompanySnapshot(invoice, companySnapshot);
 
@@ -1910,6 +1936,10 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     invoice.paymentReceivedAt = new Date();
     await invoice.save();
     invalidateDashboardForBusiness(req.businessId);
+    try {
+      const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromInvoice(invoice, { createdBy: req.user._id });
+    } catch (_) {}
     await Job.findOneAndUpdate(
       { _id: invoice.jobId, businessId: req.businessId },
       { $set: { status: 'DELIVERED', actualDelivery: new Date() } }
@@ -2591,8 +2621,9 @@ router.get('/reports/outstanding', adminPanelOnly, async (req, res) => {
 router.get('/reports/sales-expenses', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'this_month', from, to } = req.query;
+    const scopedBranchId = req.branchScope === 'all' ? null : (req.branchId || null);
     const { buildSalesExpensesStatement } = await import('../services/financialStatementsService.js');
-    const statement = await buildSalesExpensesStatement(req.businessId, range, from, to);
+    const statement = await buildSalesExpensesStatement(req.businessId, range, from, to, scopedBranchId);
     res.json({ success: true, statement });
   } catch (error) {
     console.error('Sales & expenses statement error:', error);
@@ -2604,8 +2635,9 @@ router.get('/reports/sales-expenses', adminPanelOnly, async (req, res) => {
 router.get('/reports/trial-balance', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'this_month', from, to } = req.query;
+    const scopedBranchId = req.branchScope === 'all' ? null : (req.branchId || null);
     const { buildTrialBalance } = await import('../services/financialStatementsService.js');
-    const statement = await buildTrialBalance(req.businessId, range, from, to);
+    const statement = await buildTrialBalance(req.businessId, range, from, to, scopedBranchId);
     res.json({ success: true, statement });
   } catch (error) {
     console.error('Trial balance error:', error);
@@ -2617,8 +2649,9 @@ router.get('/reports/trial-balance', adminPanelOnly, async (req, res) => {
 router.get('/reports/profit-loss', adminPanelOnly, async (req, res) => {
   try {
     const { range = 'this_month', from, to } = req.query;
+    const scopedBranchId = req.branchScope === 'all' ? null : (req.branchId || null);
     const { buildProfitLossStatement } = await import('../services/financialStatementsService.js');
-    const statement = await buildProfitLossStatement(req.businessId, range, from, to);
+    const statement = await buildProfitLossStatement(req.businessId, range, from, to, scopedBranchId);
     res.json({ success: true, statement });
   } catch (error) {
     console.error('Profit & loss statement error:', error);
@@ -5505,6 +5538,11 @@ router.post('/jobs', [
       throw new Error('Failed to create job after multiple attempts');
     }
 
+    try {
+      const { syncMoneyBookFromJobAdvance } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromJobAdvance(job, { createdBy: req.user._id });
+    } catch (_) {}
+
     if (directBill) {
       let invoice;
       let paid = false;
@@ -6239,11 +6277,11 @@ router.patch('/notifications/read-all', async (req, res) => {
 // ==================== BUSINESS MANAGEMENT ====================
 
 // @route   GET /api/admin/business
-// @desc    Get business information
+// @desc    Get business information (non-main branch scope returns that branch's address)
 // @access  Private (Car Wash Admin)
 router.get('/business', async (req, res) => {
   try {
-    const business = await Business.findById(req.businessId);
+    const business = await Business.findById(req.businessId).lean();
     if (!business) {
       return res.status(404).json({
         success: false,
@@ -6251,9 +6289,39 @@ router.get('/business', async (req, res) => {
       });
     }
 
+    // Prefer explicit non-default branch from header (works for scope=branch and scope=all+branchId)
+    const profileBranch =
+      req.branch && !req.branch.isDefault
+        ? req.branch
+        : null;
+
+    if (profileBranch) {
+      return res.json({
+        success: true,
+        business: {
+          ...business,
+          businessName: profileBranch.name || business.businessName,
+          address: profileBranch.address || '',
+          location: profileBranch.location || '',
+          phone: profileBranch.phone || '',
+          email: profileBranch.email || business.email || '',
+          workingHoursStart: profileBranch.workingHoursStart || business.workingHoursStart || '09:00',
+          workingHoursEnd: profileBranch.workingHoursEnd || business.workingHoursEnd || '18:00',
+          _isBranchProfile: true,
+          _profileBranchId: profileBranch._id,
+          _profileBranchName: profileBranch.name || ''
+        }
+      });
+    }
+
     res.json({
       success: true,
-      business
+      business: {
+        ...business,
+        _isBranchProfile: false,
+        _profileBranchId: req.branch?._id || null,
+        _profileBranchName: req.branch?.name || ''
+      }
     });
   } catch (error) {
     console.error('Get business error:', error);
@@ -6265,7 +6333,7 @@ router.get('/business', async (req, res) => {
 });
 
 // @route   PUT /api/admin/business
-// @desc    Update business information
+// @desc    Update business information (or active non-main branch address when branch-scoped)
 // @access  Private (Car Wash Admin)
 router.put('/business', [
   body('businessName').optional().trim(),
@@ -6281,12 +6349,69 @@ router.put('/business', [
   body('maxConcurrentJobs').optional().isInt({ min: 1 })
 ], async (req, res) => {
   try {
-    if (!isBusinessOwner(req.user.role)) {
-      return res.status(403).json({ success: false, message: 'Only the business owner can update business profile.' });
-    }
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const profileBranch =
+      req.branch && !req.branch.isDefault
+        ? req.branch
+        : null;
+
+    // Non-main branch selected: save address/contact onto that Branch document
+    if (profileBranch) {
+      if (
+        isBranchAdmin(req.user.role) &&
+        String(req.user.branchId?._id || req.user.branchId || '') !== String(profileBranch._id)
+      ) {
+        return res.status(403).json({ success: false, message: 'You can only update your assigned branch.' });
+      }
+      if (!isBusinessOwner(req.user.role) && !isBranchAdmin(req.user.role)) {
+        return res.status(403).json({ success: false, message: 'Insufficient permissions to update branch profile.' });
+      }
+
+      const branchUpdate = {};
+      if (req.body.businessName !== undefined) branchUpdate.name = String(req.body.businessName || '').trim();
+      if (req.body.address !== undefined) branchUpdate.address = String(req.body.address || '').trim();
+      if (req.body.location !== undefined) branchUpdate.location = String(req.body.location || '').trim();
+      if (req.body.phone !== undefined) branchUpdate.phone = String(req.body.phone || '').trim();
+      if (req.body.email !== undefined) branchUpdate.email = String(req.body.email || '').trim().toLowerCase();
+      if (req.body.workingHoursStart !== undefined) branchUpdate.workingHoursStart = req.body.workingHoursStart;
+      if (req.body.workingHoursEnd !== undefined) branchUpdate.workingHoursEnd = req.body.workingHoursEnd;
+
+      const updatedBranch = await Branch.findOneAndUpdate(
+        { _id: profileBranch._id, businessId: req.businessId },
+        { $set: branchUpdate },
+        { new: true }
+      ).lean();
+
+      if (!updatedBranch) {
+        return res.status(404).json({ success: false, message: 'Branch not found' });
+      }
+
+      const business = await Business.findById(req.businessId).lean();
+      return res.json({
+        success: true,
+        message: 'Branch information updated',
+        business: {
+          ...business,
+          businessName: updatedBranch.name || business.businessName,
+          address: updatedBranch.address || '',
+          location: updatedBranch.location || '',
+          phone: updatedBranch.phone || '',
+          email: updatedBranch.email || business.email || '',
+          workingHoursStart: updatedBranch.workingHoursStart || business.workingHoursStart || '09:00',
+          workingHoursEnd: updatedBranch.workingHoursEnd || business.workingHoursEnd || '18:00',
+          _isBranchProfile: true,
+          _profileBranchId: updatedBranch._id,
+          _profileBranchName: updatedBranch.name || ''
+        }
+      });
+    }
+
+    if (!isBusinessOwner(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only the business owner can update business profile.' });
     }
 
     const allowedFields = [
@@ -6312,6 +6437,18 @@ router.put('/business', [
       });
     }
 
+    // Keep main/default branch contact fields aligned with shop profile
+    const defaultBranchSync = {};
+    for (const key of ['address', 'phone', 'email', 'location', 'workingHoursStart', 'workingHoursEnd']) {
+      if (update[key] !== undefined) defaultBranchSync[key] = update[key];
+    }
+    if (Object.keys(defaultBranchSync).length) {
+      await Branch.updateOne(
+        { businessId: req.businessId, isDefault: true },
+        { $set: defaultBranchSync }
+      );
+    }
+
     if (req.body.maxConcurrentJobs != null || req.body.carHandlingCapacity != null) {
       const { syncMaxConcurrentJobsForBusiness } = await import('../services/branchService.js');
       await syncMaxConcurrentJobsForBusiness(req.businessId, { business });
@@ -6319,7 +6456,11 @@ router.put('/business', [
 
     res.json({
       success: true,
-      business
+      message: 'Business information updated',
+      business: {
+        ...(business.toObject ? business.toObject() : business),
+        _isBranchProfile: false
+      }
     });
   } catch (error) {
     console.error('Update business error:', error);
@@ -6381,11 +6522,23 @@ router.get('/settings', async (req, res) => {
       queryBranchId: req.query.branchId,
       requestBranchId: req.branchId
     });
-    const mergedSettings = await applyBranchWhatsAppSettings(
+    let mergedSettings = await applyBranchWhatsAppSettings(
       settingsObj,
       req.businessId,
       whatsAppBranchId
     );
+    // Payment/GST: merge for the active branch unless Settings editor asks for main-only values
+    if (String(req.query.paymentScope || '').toLowerCase() !== 'business') {
+      const paymentBranchId = await resolveWhatsAppBranchId(req.businessId, {
+        queryBranchId: req.query.branchId,
+        requestBranchId: req.branchId
+      });
+      mergedSettings = await applyBranchPaymentSettings(
+        mergedSettings,
+        req.businessId,
+        paymentBranchId
+      );
+    }
 
     res.json({
       success: true,
@@ -6425,6 +6578,7 @@ router.put('/settings', [
   body('upiId').optional().trim().isString(),
   body('qrCodeImage').optional().trim().isString(),
   body('paymentMobileNumber').optional().trim().isString(),
+  body('showPaymentQrOnInvoice').optional().isBoolean(),
   body('gstNumber').optional({ nullable: true }).trim().isString(),
   body('taxPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
   body('jobImagesMin').optional({ nullable: true }).isInt({ min: 0, max: 20 }),
@@ -6439,8 +6593,10 @@ router.put('/settings', [
   body('crmEnabled').optional().isBoolean(),
   body('vehicleScannerEnabled').optional().isBoolean(),
   body('attendanceEnabled').optional().isBoolean(),
-  body('otherRevenueEnabled').optional().isBoolean(),
-  body('attendanceGeoFenceEnabled').optional().isBoolean(),
+  body('otherRevenueEnabled').optional({ values: 'null' }).isBoolean(),
+  body('inventoryManagementEnabled').optional({ values: 'null' }).isBoolean(),
+  body('cashAndBankEnabled').optional({ values: 'null' }).isBoolean(),
+  body('attendanceGeoFenceEnabled').optional({ values: 'null' }).isBoolean(),
   body('attendanceLatitude').optional({ nullable: true }).isFloat({ min: -90, max: 90 }),
   body('attendanceLongitude').optional({ nullable: true }).isFloat({ min: -180, max: 180 }),
   body('attendancePerimeterMeters').optional({ nullable: true }).isFloat({ min: 1, max: 100000 }),
@@ -6464,6 +6620,8 @@ router.put('/settings', [
     }
 
     let settings = await BusinessSettings.findOne({ businessId: req.businessId });
+    const wasInventoryEnabled = !!settings?.inventoryManagementEnabled;
+    const wasCashAndBankEnabled = !!settings?.cashAndBankEnabled;
 
     const updateFields = {};
     if (req.body.capacity !== undefined) updateFields.capacity = req.body.capacity;
@@ -6483,6 +6641,9 @@ router.put('/settings', [
     if (req.body.upiId !== undefined) updateFields.upiId = req.body.upiId?.trim() || null;
     if (req.body.qrCodeImage !== undefined) updateFields.qrCodeImage = req.body.qrCodeImage?.trim() || null;
     if (req.body.paymentMobileNumber !== undefined) updateFields.paymentMobileNumber = req.body.paymentMobileNumber?.trim() || null;
+    if (req.body.showPaymentQrOnInvoice !== undefined) {
+      updateFields.showPaymentQrOnInvoice = !!req.body.showPaymentQrOnInvoice;
+    }
     if (req.body.gstNumber !== undefined) {
       updateFields.gstNumber = req.body.gstNumber?.trim() || null;
       if (!updateFields.gstNumber) updateFields.taxPercentage = null;
@@ -6534,6 +6695,12 @@ router.put('/settings', [
     }
     if (req.body.otherRevenueEnabled !== undefined) {
       updateFields.otherRevenueEnabled = !!req.body.otherRevenueEnabled;
+    }
+    if (req.body.inventoryManagementEnabled !== undefined) {
+      updateFields.inventoryManagementEnabled = !!req.body.inventoryManagementEnabled;
+    }
+    if (req.body.cashAndBankEnabled !== undefined) {
+      updateFields.cashAndBankEnabled = !!req.body.cashAndBankEnabled;
     }
     if (req.body.attendanceGeoFenceEnabled !== undefined) {
       updateFields.attendanceGeoFenceEnabled = !!req.body.attendanceGeoFenceEnabled;
@@ -6680,6 +6847,36 @@ router.put('/settings', [
       } catch (crmErr) {
         console.warn('ensureCrmDefaults on settings save:', crmErr?.message || crmErr);
       }
+    }
+    if (settingsObj.inventoryManagementEnabled && !wasInventoryEnabled) {
+      try {
+        const { seedOpeningStockFromCatalog } = await import('../utils/stockLedger.js');
+        await seedOpeningStockFromCatalog({
+          businessId: req.businessId,
+          createdBy: req.user._id
+        });
+      } catch (invErr) {
+        console.warn('seedOpeningStockFromCatalog on settings save:', invErr?.message || invErr);
+      }
+    }
+    if (settingsObj.cashAndBankEnabled && !wasCashAndBankEnabled) {
+      try {
+        const { enableCashAndBankForBusiness } = await import('../services/moneyBookService.js');
+        await enableCashAndBankForBusiness(req.businessId, req.user._id);
+      } catch (cashErr) {
+        console.warn('enableCashAndBankForBusiness on settings save:', cashErr?.message || cashErr);
+      }
+    }
+    try {
+      await syncBusinessPaymentToDefaultBranch(req.businessId, {
+        upiId: updateFields.upiId,
+        qrCodeImage: updateFields.qrCodeImage,
+        paymentMobileNumber: updateFields.paymentMobileNumber,
+        gstNumber: updateFields.gstNumber,
+        taxPercentage: updateFields.taxPercentage
+      });
+    } catch (paySyncErr) {
+      console.warn('syncBusinessPaymentToDefaultBranch on settings save:', paySyncErr?.message || paySyncErr);
     }
     res.json({
       success: true,

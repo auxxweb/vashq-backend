@@ -331,6 +331,19 @@ export async function recordCollection({
 
     invalidateDashboardForBusiness(businessId);
 
+    try {
+      const { syncMoneyBookFromCollection } = await import('../../utils/cashBankSync.js');
+      let branchId = null;
+      if (allocations?.[0]?.invoiceId) {
+        const Invoice = (await import('../../models/Invoice.model.js')).default;
+        const inv = await Invoice.findById(allocations[0].invoiceId).select('branchId').lean();
+        branchId = inv?.branchId || null;
+      }
+      await syncMoneyBookFromCollection(collection, { createdBy: collectedBy, branchId });
+    } catch (cashErr) {
+      console.error('Cash & Bank collection sync failed:', cashErr?.message || cashErr);
+    }
+
     for (const invoiceId of invoicesForLoyaltyEarn) {
       await maybeEarnLoyaltyForPaidInvoice(businessId, invoiceId).catch((err) => {
         console.error('Loyalty earn after collection failed:', invoiceId, err?.message || err);

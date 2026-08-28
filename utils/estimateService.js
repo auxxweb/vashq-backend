@@ -100,8 +100,10 @@ export async function nextEstimateNumber(businessId) {
   return `${prefix}${String(seq).padStart(4, '0')}`;
 }
 
-export async function applyCompanySnapshot(estimate, businessId) {
-  const snap = await getInvoiceCompanySnapshot(businessId);
+export async function applyCompanySnapshot(estimate, businessId, branchId = null) {
+  const snap = await getInvoiceCompanySnapshot(businessId, {
+    branchId: branchId ?? estimate?.branchId
+  });
   if (!snap) return estimate;
   estimate.companyName = snap.businessName || '';
   estimate.companyOwnerName = snap.ownerName || '';

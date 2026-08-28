@@ -14,6 +14,7 @@ import { invoiceSettlementCashOnline, creditCheckoutCashOnline } from '../utils/
 import { parseAiInsightsDateRange } from '../utils/aiInsightsDateRange.js';
 import { buildCollectionReport, getTodayCashReceived } from './credit/creditReportsService.js';
 import { isOtherRevenueEnabled } from '../utils/otherRevenueSales.js';
+import { getCashBookStatementExtras, isCashAndBankEnabled } from './moneyBookService.js';
 
 export { parseAiInsightsDateRange as parseStatementDateRange };
 
@@ -63,12 +64,15 @@ async function getBusinessMeta(businessId) {
   };
 }
 
-async function gatherPeriodFinancials(businessId, start, end) {
+async function gatherPeriodFinancials(businessId, start, end, branchId = null) {
   const bid = bizOid(businessId);
   const meta = await getBusinessMeta(businessId);
+  const branchOid = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
+  const branchFilter = branchOid ? { branchId: branchOid } : {};
 
   const revenueInvoices = await Invoice.find({
     businessId: bid,
+    ...branchFilter,
     ...revenueInPeriodFilter(start, end)
   }).select(
     'saleType finalAmount subtotal discount gstAmount paymentMethod paymentCashAmount paymentOnlineAmount paymentStatus advancePayment paymentReceivedAt settlementMode saleConfirmedAt outstandingAmount amountCollectedLater'
@@ -120,6 +124,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
   if (await isOtherRevenueEnabled(businessId)) {
     const otherRows = await OtherRevenue.find({
       businessId: bid,
+      ...branchFilter,
       revenueDate: { $gte: start, $lte: end }
     }).select(
       'amount settlementMode outstandingAmount paymentCashAmount paymentOnlineAmount paymentMethod paymentStatus'
@@ -163,6 +168,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
 
   const expenses = await Expense.find({
     businessId: bid,
+    ...branchFilter,
     expenseDate: { $gte: start, $lte: end }
   }).populate('expenseTypeId', 'expenseName').lean();
 
@@ -179,14 +185,15 @@ async function gatherPeriodFinancials(businessId, start, end) {
   const expenseTotals = sumExpenseChannelTotals(expenses);
   const totalExpenses = expenseTotals.totalAmount;
 
-  const collectionsReport = await buildCollectionReport(businessId, start, end, false);
+  const collectionsReport = await buildCollectionReport(businessId, start, end, false, branchId || null);
   const creditRecovery = roundMoney(collectionsReport.summary?.creditRecovery ?? 0);
   const collectionCash = roundMoney(collectionsReport.summary?.totalCash ?? 0);
   const collectionOnline = roundMoney(collectionsReport.summary?.totalOnline ?? 0);
 
   const endExclusive = new Date(end.getTime() + 1);
+  const advanceMatch = { businessId: bid, createdAt: { $gte: start, $lte: end }, ...branchFilter };
   const advanceRows = await Job.aggregate([
-    { $match: { businessId: bid, createdAt: { $gte: start, $lte: end } } },
+    { $match: advanceMatch },
     {
       $addFields: {
         advCash: {
@@ -253,7 +260,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
     endExclusive,
     advCash,
     advOnline,
-    null,
+    branchId || null,
     advUpi,
     advCard
   );
@@ -263,10 +270,20 @@ async function gatherPeriodFinancials(businessId, start, end) {
   const cashBalance = roundMoney(Math.max(0, cashInPeriod - expenseTotals.totalCashAmount));
   const bankBalance = roundMoney(Math.max(0, bankInPeriod - expenseTotals.totalOnlineAmount));
 
+  let cashBookExtras = null;
+  if (await isCashAndBankEnabled(businessId)) {
+    try {
+      cashBookExtras = await getCashBookStatementExtras(businessId, start, end, branchId || null);
+    } catch (e) {
+      console.warn('Cash book statement extras:', e?.message || e);
+    }
+  }
+
   const debtorsAgg = await Invoice.aggregate([
     {
       $match: {
         businessId: bid,
+        ...branchFilter,
         settlementMode: 'CREDIT',
         outstandingAmount: { $gt: 0.01 },
         saleConfirmedAt: { $lte: end }
@@ -281,6 +298,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
       {
         $match: {
           businessId: bid,
+          ...branchFilter,
           settlementMode: 'CREDIT',
           outstandingAmount: { $gt: 0.01 },
           revenueDate: { $lte: end }
@@ -312,6 +330,7 @@ async function gatherPeriodFinancials(businessId, start, end) {
     collectionOnline,
     cashBalance,
     bankBalance,
+    cashBookExtras,
     debtors,
     totalDiscount: roundMoney(totalDiscount),
     totalGst: roundMoney(totalGst),
@@ -320,7 +339,8 @@ async function gatherPeriodFinancials(businessId, start, end) {
     totalExpenses,
     netProfit,
     invoiceCount: revenueInvoices.length,
-    expenseCount: expenses.length
+    expenseCount: expenses.length,
+    branchId: branchId || null
   };
 }
 
@@ -363,14 +383,24 @@ function balanceTrialRows(rows) {
 /**
  * Trial balance — car wash accounts (sales, expenses, credit / pay-later).
  */
-export async function buildTrialBalance(businessId, range, from, to) {
+export async function buildTrialBalance(businessId, range, from, to, branchId = null) {
   const { start, end, label } = parseAiInsightsDateRange(range, from, to);
-  const data = await gatherPeriodFinancials(businessId, start, end);
+  const data = await gatherPeriodFinancials(businessId, start, end, branchId);
   const rows = [];
 
-  pushTrialRow(rows, 'Cash A/c', data.cashBalance, 0);
-  pushTrialRow(rows, 'Bank A/c', data.bankBalance, 0);
+  // When Cash & Bank is on, use ledger closing balances (true books).
+  // When off, keep legacy period cash-flow synthetic balances.
+  const cashBal = data.cashBookExtras ? data.cashBookExtras.closingCash : data.cashBalance;
+  const bankBal = data.cashBookExtras ? data.cashBookExtras.closingBank : data.bankBalance;
+
+  pushTrialRow(rows, 'Cash A/c', cashBal, 0);
+  pushTrialRow(rows, 'Bank A/c', bankBal, 0);
   pushTrialRow(rows, 'Debtors A/c (Amount due / Credit)', data.debtors, 0);
+
+  if (data.cashBookExtras) {
+    pushTrialRow(rows, 'Drawings A/c (Owner withdrawals)', data.cashBookExtras.drawings, 0);
+    pushTrialRow(rows, 'Owner capital introduced', 0, data.cashBookExtras.capitalIntroduced);
+  }
 
   for (const line of data.expenseLines) {
     const name = line.name.toLowerCase().includes('salary')
@@ -393,25 +423,70 @@ export async function buildTrialBalance(businessId, range, from, to) {
       cashReceived: data.cashInPeriod,
       onlineReceived: data.bankInPeriod,
       creditRecovery: data.creditRecovery,
-      creditOutstanding: data.debtors
+      creditOutstanding: data.debtors,
+      cashAndBankEnabled: !!data.cashBookExtras,
+      drawings: data.cashBookExtras?.drawings || 0,
+      capitalIntroduced: data.cashBookExtras?.capitalIntroduced || 0
     },
-    disclaimer: 'Derived from VashQ job, package, and other revenue sales, daily expenses, cash/online collections, and pay-later (credit) balances for the selected period.'
+    disclaimer: data.cashBookExtras
+      ? 'Cash/Bank balances from Cash & Bank ledger (opening + movements). Owner deposits/withdrawals are capital/drawings — not P&L sales or expenses.'
+      : 'Derived from VashQ job, package, and other revenue sales, daily expenses, cash/online collections, and pay-later (credit) balances for the selected period.'
   };
 }
 
 /**
- * Trading & Profit and Loss — T-account format for car wash (no inventory).
+ * Trading & Profit and Loss — T-account format.
+ * When inventoryManagementEnabled: includes opening/closing stock and purchases (COGS).
+ * When off: unchanged legacy service-business P&L (no stock).
  */
-export async function buildProfitLossStatement(businessId, range, from, to) {
+export async function buildProfitLossStatement(businessId, range, from, to, branchId = null) {
   const { start, end, label } = parseAiInsightsDateRange(range, from, to);
-  const data = await gatherPeriodFinancials(businessId, start, end);
+  const data = await gatherPeriodFinancials(businessId, start, end, branchId);
 
-  const grossProfit = data.totalSales;
-  const netProfit = data.netProfit;
+  const { isInventoryManagementEnabled } = await import('../utils/inventoryEnabled.js');
+  const inventoryOn = await isInventoryManagementEnabled(businessId);
 
-  const tradingDebit = [
-    { label: 'Gross Profit c/d', amount: grossProfit, prefix: 'To', bold: true }
-  ];
+  let openingStock = 0;
+  let closingStock = 0;
+  let purchases = 0;
+  let cogs = 0;
+  let grossProfit = data.totalSales;
+
+  if (inventoryOn) {
+    const {
+      stockSnapshotAsOf,
+      purchasesTotalInPeriod
+    } = await import('../utils/stockLedger.js');
+    // gatherPeriodFinancials uses inclusive end; convert to exclusive for snapshot/purchases
+    const endExclusive = new Date(end.getTime() + 1);
+    const openingAsOf = new Date(start.getTime() - 1);
+    const [openRows, closeRows, purch] = await Promise.all([
+      stockSnapshotAsOf(businessId, openingAsOf),
+      stockSnapshotAsOf(businessId, end),
+      purchasesTotalInPeriod(businessId, start, endExclusive)
+    ]);
+    openingStock = roundMoney(openRows.reduce((s, r) => s + (r.value || 0), 0));
+    closingStock = roundMoney(closeRows.reduce((s, r) => s + (r.value || 0), 0));
+    purchases = purch;
+    cogs = roundMoney(openingStock + purchases - closingStock);
+    grossProfit = roundMoney(data.totalSales - cogs);
+  }
+
+  const netProfit = roundMoney(grossProfit - data.totalExpenses);
+
+  const tradingDebit = [];
+  if (inventoryOn) {
+    if (openingStock > 0.009) {
+      tradingDebit.push({ label: 'Opening Stock', amount: openingStock, prefix: 'To' });
+    }
+    if (purchases > 0.009) {
+      tradingDebit.push({ label: 'Purchases', amount: purchases, prefix: 'To' });
+    }
+  }
+  tradingDebit.push({ label: 'Gross Profit c/d', amount: Math.max(0, grossProfit), prefix: 'To', bold: true });
+  if (grossProfit < -0.009) {
+    // Gross loss shown on credit side below
+  }
 
   const tradingCredit = [];
   if (data.jobSales > 0.009) {
@@ -425,6 +500,12 @@ export async function buildProfitLossStatement(businessId, range, from, to) {
   }
   if (tradingCredit.length === 0 && data.totalSales > 0.009) {
     tradingCredit.push({ label: 'Sales', amount: data.totalSales, prefix: 'By' });
+  }
+  if (inventoryOn && closingStock > 0.009) {
+    tradingCredit.push({ label: 'Closing Stock', amount: closingStock, prefix: 'By' });
+  }
+  if (inventoryOn && grossProfit < -0.009) {
+    tradingCredit.push({ label: 'Gross Loss c/d', amount: Math.abs(grossProfit), prefix: 'By', bold: true });
   }
 
   const tradingDebitTotal = roundMoney(tradingDebit.reduce((s, r) => s + r.amount, 0));
@@ -440,9 +521,12 @@ export async function buildProfitLossStatement(businessId, range, from, to) {
     plDebit.push({ label: 'Net Profit', amount: netProfit, prefix: 'To', bold: true });
   }
 
-  const plCredit = [
-    { label: 'Gross Profit b/d', amount: grossProfit, prefix: 'By', bold: true }
-  ];
+  const plCredit = [];
+  if (grossProfit >= -0.009) {
+    plCredit.push({ label: 'Gross Profit b/d', amount: Math.max(0, grossProfit), prefix: 'By', bold: true });
+  } else {
+    plDebit.unshift({ label: 'Gross Loss b/d', amount: Math.abs(grossProfit), prefix: 'To', bold: true });
+  }
 
   if (netProfit < -0.009) {
     plCredit.push({ label: 'Net Loss', amount: Math.abs(netProfit), prefix: 'By', bold: true });
@@ -479,16 +563,30 @@ export async function buildProfitLossStatement(businessId, range, from, to) {
       totalExpenses: data.totalExpenses,
       gstCollected: data.totalGst,
       discountsGiven: data.totalDiscount,
+      inventoryEnabled: inventoryOn,
+      openingStock: inventoryOn ? openingStock : undefined,
+      purchases: inventoryOn ? purchases : undefined,
+      closingStock: inventoryOn ? closingStock : undefined,
+      cogs: inventoryOn ? cogs : undefined,
       grossProfit,
-      netProfit
+      netProfit,
+      cashAndBankEnabled: !!data.cashBookExtras,
+      cashClosing: data.cashBookExtras?.closingCash,
+      bankClosing: data.cashBookExtras?.closingBank,
+      drawings: data.cashBookExtras?.drawings || 0,
+      capitalIntroduced: data.cashBookExtras?.capitalIntroduced || 0
     },
-    disclaimer: 'Car wash service business — no opening/closing stock. Sales use invoice totals (GST-inclusive when GST is enabled). Credit recovery shows amount-due collections in the period.'
+    disclaimer: inventoryOn
+      ? 'Trading account includes opening stock, purchases, and closing stock (COGS). Owner cash deposits/withdrawals are capital/drawings (not P&L) when Cash & Bank is enabled.'
+      : (data.cashBookExtras
+        ? 'Sales and expenses only. Owner deposits/withdrawals are capital/drawings — see Trial Balance and Cash & Bank. Not included in net profit.'
+        : 'Car wash service business — no opening/closing stock. Sales use invoice totals (GST-inclusive when GST is enabled). Credit recovery shows amount-due collections in the period.')
   };
 }
 
-export async function buildSalesExpensesStatement(businessId, range, from, to) {
+export async function buildSalesExpensesStatement(businessId, range, from, to, branchId = null) {
   const { start, end, label } = parseAiInsightsDateRange(range, from, to);
-  const data = await gatherPeriodFinancials(businessId, start, end);
+  const data = await gatherPeriodFinancials(businessId, start, end, branchId);
 
   return {
     type: 'sales_expenses',

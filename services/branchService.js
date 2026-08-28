@@ -21,7 +21,7 @@ import { getBranchPlatformConfig, normalizeBranchCode, suggestBranchCode } from 
 import { getBusinessModules, isModuleEnabled } from './businessModulesService.js';
 import { expensePaidAmountAggregationExpr } from '../utils/expensePayment.js';
 import { cacheGetOrSet, cacheDelete } from '../utils/cache.js';
-import { syncDefaultBranchWhatsAppToBusiness } from '../utils/whatsappSettingsMerge.js';
+import { syncDefaultBranchWhatsAppToBusiness, syncDefaultBranchPaymentToBusiness } from '../utils/whatsappSettingsMerge.js';
 import { approximateValidityDays } from '../utils/packageValidity.js';
 
 const DEFAULT_BRANCH_CACHE_TTL = 120_000;
@@ -629,6 +629,14 @@ export async function updateBranchSettings(businessId, branchId, payload) {
   if (payload.whatsappTemplates !== undefined) whatsAppPayload.whatsappTemplates = payload.whatsappTemplates;
   if (Object.keys(whatsAppPayload).length) {
     await syncDefaultBranchWhatsAppToBusiness(businessId, branchId, whatsAppPayload);
+  }
+
+  const paymentPayload = {};
+  for (const key of ['upiId', 'qrCodeImage', 'paymentMobileNumber', 'gstNumber', 'taxPercentage']) {
+    if (payload[key] !== undefined) paymentPayload[key] = payload[key];
+  }
+  if (Object.keys(paymentPayload).length) {
+    await syncDefaultBranchPaymentToBusiness(businessId, branchId, paymentPayload);
   }
 
   return settings;

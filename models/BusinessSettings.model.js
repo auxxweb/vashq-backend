@@ -79,6 +79,11 @@ const businessSettingsSchema = new mongoose.Schema({
   upiId: { type: String, trim: true },
   qrCodeImage: { type: String, trim: true },
   paymentMobileNumber: { type: String, trim: true },
+  /**
+   * When true, unpaid / unclosed invoice preview, print, and PDF download show the payment QR
+   * (and related UPI details). Paid / fully settled invoices never show it.
+   */
+  showPaymentQrOnInvoice: { type: Boolean, default: false },
   // GST (optional) - shown on invoice when set
   gstNumber: { type: String, trim: true },
   taxPercentage: { type: Number, min: 0, max: 100 },
@@ -139,6 +144,22 @@ const businessSettingsSchema = new mongoose.Schema({
    * Off by default — Settings → enable + manage revenue types.
    */
   otherRevenueEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Inventory Management (purchases, stock ledger, opening/closing reports, COGS in P&L)
+   * is available. Off by default — existing product qty on Services continues unchanged.
+   */
+  inventoryManagementEnabled: { type: Boolean, default: false },
+  /**
+   * When true, Cash & Bank (opening/closing balances, cash/bank books, deposits,
+   * withdrawals, transfers, day close) is available. Off by default — existing
+   * dashboards and statements keep period cash-flow behaviour.
+   */
+  cashAndBankEnabled: { type: Boolean, default: false },
+  /**
+   * Set when historical invoices/expenses/collections were synced into the money ledger
+   * after enabling Cash & Bank (one-time backfill).
+   */
+  cashAndBankBackfilledAt: { type: Date, default: null },
   /**
    * When true (and attendanceEnabled), punch in/out require the employee to be inside
    * the configured geo perimeter around attendanceLatitude/Longitude.

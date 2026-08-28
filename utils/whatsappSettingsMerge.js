@@ -10,6 +10,15 @@ export const WHATSAPP_BRANCH_SETTING_KEYS = [
   'whatsappTemplates'
 ];
 
+/** Branch-scoped payment / GST fields for invoices & checkout. */
+export const PAYMENT_BRANCH_SETTING_KEYS = [
+  'upiId',
+  'qrCodeImage',
+  'paymentMobileNumber',
+  'gstNumber',
+  'taxPercentage'
+];
+
 /**
  * Overlay branch WhatsApp settings onto business settings (branch wins when set).
  */
@@ -28,6 +37,26 @@ export function mergeBranchWhatsAppIntoSettings(businessSettings, branchSettings
       ...(businessSettings?.whatsappTemplates || {}),
       ...branchSettings.whatsappTemplates
     });
+  }
+
+  return out;
+}
+
+/**
+ * Overlay branch payment/GST onto business settings (branch wins when set).
+ * Empty branch values keep the main shop defaults.
+ */
+export function mergeBranchPaymentIntoSettings(businessSettings, branchSettings) {
+  if (!branchSettings) return businessSettings || {};
+  const out = { ...(businessSettings || {}) };
+
+  for (const key of ['upiId', 'qrCodeImage', 'paymentMobileNumber', 'gstNumber']) {
+    const v = String(branchSettings[key] ?? '').trim();
+    if (v) out[key] = v;
+  }
+  if (branchSettings.taxPercentage != null && branchSettings.taxPercentage !== '') {
+    const n = Number(branchSettings.taxPercentage);
+    if (Number.isFinite(n)) out.taxPercentage = n;
   }
 
   return out;
@@ -53,6 +82,11 @@ export async function loadBranchSettingsForWhatsApp(businessId, branchId) {
 export async function applyBranchWhatsAppSettings(businessSettings, businessId, branchId) {
   const branchSettings = await loadBranchSettingsForWhatsApp(businessId, branchId);
   return mergeBranchWhatsAppIntoSettings(businessSettings, branchSettings);
+}
+
+export async function applyBranchPaymentSettings(businessSettings, businessId, branchId) {
+  const branchSettings = await loadBranchSettingsForWhatsApp(businessId, branchId);
+  return mergeBranchPaymentIntoSettings(businessSettings, branchSettings);
 }
 
 /**
@@ -83,5 +117,55 @@ export async function syncDefaultBranchWhatsAppToBusiness(businessId, branchId, 
     { businessId },
     { $set: update },
     { upsert: false }
+  );
+}
+
+/** Sync default-branch payment/GST edits back to BusinessSettings (main shop). */
+export async function syncDefaultBranchPaymentToBusiness(businessId, branchId, payload = {}) {
+  const branch = await Branch.findOne({ _id: branchId, businessId }).select('isDefault').lean();
+  if (!branch?.isDefault) return;
+
+  const update = {};
+  for (const key of PAYMENT_BRANCH_SETTING_KEYS) {
+    if (payload[key] === undefined) continue;
+    if (key === 'taxPercentage') {
+      update.taxPercentage =
+        payload.taxPercentage != null && payload.taxPercentage !== ''
+          ? Number(payload.taxPercentage)
+          : null;
+    } else {
+      update[key] = String(payload[key] || '').trim() || null;
+    }
+  }
+  if (!Object.keys(update).length) return;
+  await BusinessSettings.findOneAndUpdate(
+    { businessId },
+    { $set: update },
+    { upsert: false }
+  );
+}
+
+/** Keep default BranchSettings payment fields aligned when main Settings are saved. */
+export async function syncBusinessPaymentToDefaultBranch(businessId, payload = {}) {
+  const defaultBranch = await Branch.findOne({ businessId, isDefault: true }).select('_id').lean();
+  if (!defaultBranch) return;
+
+  const update = {};
+  for (const key of PAYMENT_BRANCH_SETTING_KEYS) {
+    if (payload[key] === undefined) continue;
+    if (key === 'taxPercentage') {
+      update.taxPercentage =
+        payload.taxPercentage != null && payload.taxPercentage !== ''
+          ? Number(payload.taxPercentage)
+          : null;
+    } else {
+      update[key] = String(payload[key] || '').trim() || null;
+    }
+  }
+  if (!Object.keys(update).length) return;
+  await BranchSettings.findOneAndUpdate(
+    { businessId, branchId: defaultBranch._id },
+    { $set: update },
+    { upsert: true, setDefaultsOnInsert: true }
   );
 }

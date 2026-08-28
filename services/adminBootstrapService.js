@@ -93,7 +93,9 @@ export async function loadAdminBootstrap({ businessId, user }) {
   const [subscriptionPayload, unreadCount, settings] = await Promise.all([
     getMySubscriptionPayload(businessId),
     Notification.countDocuments({ businessId, isRead: false }),
-    BusinessSettings.findOne({ businessId }).select('crmEnabled attendanceEnabled otherRevenueEnabled mixedCartEnabled').lean()
+    BusinessSettings.findOne({ businessId })
+      .select('crmEnabled attendanceEnabled otherRevenueEnabled mixedCartEnabled inventoryManagementEnabled cashAndBankEnabled')
+      .lean()
   ]);
 
   let branches = null;
@@ -109,6 +111,8 @@ export async function loadAdminBootstrap({ businessId, user }) {
     crmEnabled: !!settings?.crmEnabled,
     attendanceEnabled: !!settings?.attendanceEnabled,
     otherRevenueEnabled: !!settings?.otherRevenueEnabled,
-    mixedCartEnabled: !!settings?.mixedCartEnabled
+    mixedCartEnabled: !!settings?.mixedCartEnabled,
+    inventoryManagementEnabled: !!settings?.inventoryManagementEnabled,
+    cashAndBankEnabled: !!settings?.cashAndBankEnabled
   };
 }

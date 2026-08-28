@@ -248,25 +248,27 @@ router.get('/invoice/:id/view', async (req, res) => {
     }
 
     let isProductSale = false;
+    let jobBranchId = invoice.branchId || null;
     if (invoice.jobId) {
-      const job = await Job.findById(invoice.jobId).select('directBill').lean();
+      const job = await Job.findById(invoice.jobId).select('directBill branchId').lean();
       isProductSale = !!job?.directBill;
+      if (!jobBranchId && job?.branchId) jobBranchId = job.branchId;
     }
 
     const [platform, business] = await Promise.all([
       PlatformSettings.findOne({}).lean(),
-      getInvoiceCompanySnapshot(invoice.businessId)
+      getInvoiceCompanySnapshot(invoice.businessId, { branchId: jobBranchId })
     ]);
-
-    const toPersist = companyFieldsToPersist(invoice, business);
-    if (toPersist) {
-      await Invoice.updateOne({ _id: id, shareToken: token }, { $set: toPersist });
-    }
 
     const invoiceForView = {
       ...mergeInvoiceWithCompanySnapshot(invoice, business),
       isProductSale
     };
+    const livePersist = companyFieldsToPersist(invoice, business);
+    if (livePersist) {
+      await Invoice.updateOne({ _id: id, shareToken: token }, { $set: livePersist });
+      Object.assign(invoiceForView, livePersist);
+    }
     const currency = platform?.defaultCurrency || 'USD';
 
     res.json({ success: true, invoice: invoiceForView, currency, business });
@@ -296,7 +298,7 @@ router.get('/estimate/:id/view', async (req, res) => {
 
     const [platform, business] = await Promise.all([
       PlatformSettings.findOne({}).lean(),
-      getInvoiceCompanySnapshot(estimate.businessId)
+      getInvoiceCompanySnapshot(estimate.businessId, { branchId: estimate.branchId })
     ]);
 
     const currency = platform?.defaultCurrency || 'USD';
