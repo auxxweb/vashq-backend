@@ -390,10 +390,11 @@ async function aggregateWhatsApp(businessId, start, end) {
 }
 
 async function aggregateReports(businessId, start, end) {
-  const [jobs, employees, customers, services, packages, expenses, invoices, whatsapp] = await Promise.all([
+  const [jobs, employees, customers, cars, services, packages, expenses, invoices, whatsapp] = await Promise.all([
     aggregateJobs(businessId, start, end),
     aggregateEmployees(businessId, start, end),
     aggregateCustomers(businessId, start, end),
+    aggregateCars(businessId, start, end),
     aggregateServices(businessId, start, end),
     aggregatePackages(businessId, start, end),
     aggregateExpenses(businessId, start, end),
@@ -401,7 +402,7 @@ async function aggregateReports(businessId, start, end) {
     aggregateWhatsApp(businessId, start, end)
   ]);
 
-  return { jobs, employees, customers, services, packages, expenses, invoices, whatsapp };
+  return { jobs, employees, customers, cars, services, packages, expenses, invoices, whatsapp };
 }
 
 export async function gatherAiInsightsData(businessId, module, { range, from, to }) {

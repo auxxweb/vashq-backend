@@ -158,7 +158,12 @@ router.post('/ask', [
     } = req.body;
 
     const { label: rangeLabel } = parseAiInsightsDateRange(timeRange, from, to);
-    const businessData = await gatherQaBusinessData(req.businessId, { range: timeRange, from, to });
+    const businessData = await gatherQaBusinessData(req.businessId, {
+      range: timeRange,
+      from,
+      to,
+      module
+    });
 
     let result = await generateAiQaAnswer({
       businessData,
@@ -166,7 +171,11 @@ router.post('/ask', [
       module
     });
 
-    result = enrichQaResultWithCustomers(result, businessData.customerIndex);
+    result = enrichQaResultWithCustomers(
+      result,
+      businessData.customerIndex,
+      businessData.jobIndex || {}
+    );
 
     const business = await Business.findById(req.businessId).select('businessName').lean();
     const reportMarkdown = qaResultToMarkdown(result, {

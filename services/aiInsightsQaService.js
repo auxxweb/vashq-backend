@@ -6,7 +6,9 @@ const QA_OUTPUT_SCHEMA = {
     columns: ['string — column header labels'],
     rows: [
       {
-        customerId: 'string|null — MongoDB customer _id when row is a customer (from provided data only)',
+        customerId: 'string|null — MongoDB customer _id when row relates to a customer (from provided data only)',
+        jobId: 'string|null — MongoDB job _id when row is a job (from provided data only)',
+        invoiceId: 'string|null — MongoDB invoice _id when row is an invoice (from provided data only)',
         cells: ['string — cell values matching columns order']
       }
     ]
@@ -22,17 +24,33 @@ const QA_OUTPUT_SCHEMA = {
 };
 
 function buildQaSystemPrompt(module) {
-  return `You are VashQ AI — a smart business assistant for car wash owners.
+  const isReports = String(module || '').toLowerCase() === 'reports';
+  return `You are VashQ AI — a smart business assistant for car wash / detailing shop owners.
 You answer questions using ONLY the business JSON provided. You can:
-- Answer analytics questions (top customers, inactive customers, employee performance, services, revenue trends)
+- Answer analytics questions across jobs, revenue, invoices, expenses, employees, customers, vehicles, services, packages, and WhatsApp
+- Answer day-to-day job journey questions using jobJourneys (created / work started / completed / delivered dates)
 - Explain data patterns and clear operational doubts
 - Return structured tables when the owner asks for lists or rankings
 - Suggest WhatsApp retention actions for inactive or valuable customers
-
+${isReports ? `
+REPORTS MODULE — FULL BUSINESS ACCESS:
+- "analytics": period snapshot (jobs, employees, customers, cars, services, packages, expenses, invoices, whatsapp)
+- "jobJourneys": REAL job milestone dates in the business timezone. Use this for questions like:
+  "jobs created yesterday and closed/delivered today", "created today and delivered today", open jobs from yesterday, etc.
+- Prefer jobJourneys.precomputedJourneys.* when it matches the question (especially createdYesterdayDeliveredToday).
+- You can also filter jobJourneys.recentJobsWithMilestones by createdLocalDate / deliveredLocalDate / completedLocalDate / workStartedLocalDate.
+- "closed" usually means DELIVERED (or COMPLETED if they say completed). Use deliveredLocalDate for closed/delivered.
+- NEVER say milestone day-to-day data is unavailable when jobJourneys is present — use it.
+- Plus customer lists (top / inactive / new) and employee/service leaderboards
+` : ''}
 STRICT RULES:
-- Use customerId values EXACTLY from the provided data when listing customers — never invent IDs
+- Use customerId / jobId / invoiceId values EXACTLY from the provided data — never invent IDs
+- For every job row: set jobId (and customerId when known). Prefer showing tokenNumber in a "Token" column when available; you may also put jobId in a "Job ID" column
+- For every customer row: set customerId
+- For every invoice row: set invoiceId (and customerId/jobId when known)
+- These IDs power clickable links in the UI
 - If dataTable is not needed, set rows to empty array but keep title/columns
-- If the question cannot be answered from data, say so clearly in directAnswer
+- If the question cannot be answered from data, say so clearly in directAnswer and suggest what period or data would help
 - Do NOT invent metrics, customer names, or phone numbers
 - For "top N" questions, limit rows to what was asked (default 10 if unspecified)
 - Use the business currency when mentioning money
@@ -48,12 +66,15 @@ function buildQaUserPrompt(businessData, question) {
     JSON.stringify({
       period: businessData.period,
       business: businessData.business,
+      module: businessData.module,
       summary: businessData.summary,
       topCustomersAllTime: businessData.topCustomersAllTime,
       inactiveCustomers30d: businessData.inactiveCustomers30d,
       newCustomersInPeriod: businessData.newCustomersInPeriod,
       employeeLeaderboard: businessData.employeeLeaderboard,
-      topServicesInPeriod: businessData.topServicesInPeriod
+      topServicesInPeriod: businessData.topServicesInPeriod,
+      analytics: businessData.analytics,
+      jobJourneys: businessData.jobJourneys
     }, null, 2),
     '',
     '## Owner Question',
@@ -106,7 +127,7 @@ export async function generateAiQaAnswer({
     body: JSON.stringify({
       model,
       temperature: 0.35,
-      max_tokens: 3000,
+      max_tokens: 4000,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: buildQaSystemPrompt(module) },
