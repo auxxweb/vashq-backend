@@ -6,6 +6,7 @@ import MoneyAccount from '../models/MoneyAccount.model.js';
 import MoneyLedger from '../models/MoneyLedger.model.js';
 import CashMovementType from '../models/CashMovementType.model.js';
 import CashDaySession from '../models/CashDaySession.model.js';
+import Invoice from '../models/Invoice.model.js';
 import { roundMoney } from '../utils/invoicePayment.js';
 
 const EPS = 0.02;
@@ -643,6 +644,20 @@ export async function getAccountBook({
   let running = opening;
   let totalIn = 0;
   let totalOut = 0;
+
+  const invoiceIds = movements
+    .filter((m) => m.sourceType === 'INVOICE' && m.sourceId)
+    .map((m) => m.sourceId);
+  const invoiceNumberById = new Map();
+  if (invoiceIds.length) {
+    const invoices = await Invoice.find({ _id: { $in: invoiceIds } })
+      .select('invoiceNumber')
+      .lean();
+    for (const inv of invoices) {
+      invoiceNumberById.set(String(inv._id), inv.invoiceNumber || null);
+    }
+  }
+
   const rows = movements.map((m) => {
     if (m.direction === 'IN') {
       totalIn = roundMoney(totalIn + m.amount);
@@ -651,9 +666,12 @@ export async function getAccountBook({
       totalOut = roundMoney(totalOut + m.amount);
       running = roundMoney(running - m.amount);
     }
+    const isInvoice = m.sourceType === 'INVOICE' && m.sourceId;
     return {
       ...m,
-      runningBalance: running
+      runningBalance: running,
+      invoiceId: isInvoice ? String(m.sourceId) : null,
+      invoiceNumber: isInvoice ? (invoiceNumberById.get(String(m.sourceId)) || null) : null
     };
   });
 
