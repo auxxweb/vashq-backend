@@ -150,6 +150,14 @@ export async function reopenInvoiceAsUnpaid({
 
   await invoice.save();
 
+  // Remove Cash & Bank legs for this invoice so reopen + re-close does not double-post
+  try {
+    const { reverseLedgerBySource } = await import('../services/moneyBookService.js');
+    await reverseLedgerBySource(businessId, 'INVOICE', invoice._id);
+  } catch (err) {
+    console.error('Mark unpaid Cash & Bank reverse error:', err?.message || err);
+  }
+
   // Job: keep work done, but payment pending again
   if (invoice.jobId) {
     await Job.findOneAndUpdate(

@@ -6,19 +6,38 @@ import LeadStatus from '../models/LeadStatus.model.js';
 import { getInvoiceCompanySnapshot } from './invoiceCompany.js';
 import { normalizePhone, applyDefaultCountryCode } from './customer.utils.js';
 import { isSalesEmployee } from './employeeType.js';
+import { isAdminPanelRole } from './adminRoles.js';
 import { changeLeadStatus, pushLeadActivity } from './crmService.js';
 import { ensureCustomerAndCarFromLead } from './crmService.js';
 
+/**
+ * Estimate list/detail access:
+ * - Owners / branch managers: all estimates in business (and branch) scope,
+ *   including those created by sales employees.
+ * - Sales employees: only estimates they created or are assigned to.
+ */
 export function applySalesEstimateScope(user, filter = {}) {
+  if (isAdminPanelRole(user?.role)) return filter;
   if (!isSalesEmployee(user)) return filter;
+
   const uid = user._id;
-  return {
-    ...filter,
-    $or: [{ createdBy: uid }, { assignedTo: uid }]
-  };
+  const ownership = { $or: [{ createdBy: uid }, { assignedTo: uid }] };
+  const next = { ...filter };
+
+  if (next.$or) {
+    next.$and = [...(next.$and || []), { $or: next.$or }, ownership];
+    delete next.$or;
+  } else if (next.$and) {
+    next.$and = [...next.$and, ownership];
+  } else {
+    Object.assign(next, ownership);
+  }
+  return next;
 }
 
 export function assertSalesCanAccessEstimate(user, estimate) {
+  // Managers always allowed within branch/business checks done by the route
+  if (isAdminPanelRole(user?.role)) return;
   if (!isSalesEmployee(user)) return;
   const uid = String(user._id);
   const ok =
@@ -42,9 +61,12 @@ export function computeEstimateTotals({
     const unitPrice = Math.max(0, Number(raw.unitPrice) || 0);
     const amount = Math.round(qty * unitPrice * 100) / 100;
     let itemType = String(raw.itemType || 'SERVICE').toUpperCase();
-    if (!['SERVICE', 'PRODUCT', 'CUSTOM'].includes(itemType)) itemType = 'SERVICE';
+    if (!['SERVICE', 'VARIABLE', 'PRODUCT', 'PACKAGE', 'CUSTOM'].includes(itemType)) {
+      itemType = 'SERVICE';
+    }
     return {
       serviceId: raw.serviceId || null,
+      packageTemplateId: raw.packageTemplateId || null,
       name: String(raw.name || '').trim(),
       itemType,
       unitPrice,
@@ -120,11 +142,12 @@ export async function resolveCatalogItemMeta(businessId, serviceId) {
   const svc = await Service.findOne({ _id: serviceId, businessId, isActive: { $ne: false } }).lean();
   if (!svc) return null;
   const isProduct = !!(svc.isVariable && svc.skipWorkProcess);
+  const isVariable = !!(svc.isVariable && !svc.skipWorkProcess);
   return {
     serviceId: svc._id,
     name: svc.name,
     unitPrice: Number(svc.price) || 0,
-    itemType: isProduct ? 'PRODUCT' : 'SERVICE'
+    itemType: isProduct ? 'PRODUCT' : (isVariable ? 'VARIABLE' : 'SERVICE')
   };
 }
 

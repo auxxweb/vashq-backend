@@ -1167,8 +1167,21 @@ router.put('/expenses/:id', [
     await expense.populate('expenseTypeId', 'expenseName');
     try {
       const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
-      await syncMoneyBookFromExpense(expense, { createdBy: req.user._id });
-    } catch (_) {}
+      const dateChanged = req.body.expenseDate != null;
+      await syncMoneyBookFromExpense(expense, {
+        createdBy: req.user._id,
+        ...(dateChanged
+          ? { throwOnError: true, skipBalanceCheck: true, rebuildBalances: true }
+          : {})
+      });
+    } catch (syncErr) {
+      if (req.body.expenseDate != null) {
+        return res.status(500).json({
+          success: false,
+          message: syncErr.message || 'Expense saved but Cash & Bank could not be updated'
+        });
+      }
+    }
     res.json({ success: true, expense });
   } catch (error) {
     console.error('Update expense error:', error);
@@ -1597,6 +1610,38 @@ router.put('/invoices/:id', [
     }
 
     await invoice.save();
+
+    // Keep Cash & Bank in sync with post-discount settlement (final − advance)
+    const shouldResyncMoneyBook =
+      invoice.paymentStatus === 'RECEIVED' &&
+      (isLocked ||
+        req.body.paymentMethod !== undefined ||
+        req.body.onlinePaymentMode !== undefined ||
+        req.body.discount !== undefined ||
+        req.body.discountType !== undefined ||
+        req.body.discountAmount !== undefined ||
+        req.body.finalAmount !== undefined ||
+        req.body.items !== undefined ||
+        req.body.paymentCashAmount !== undefined ||
+        req.body.paymentOnlineAmount !== undefined);
+    if (shouldResyncMoneyBook) {
+      try {
+        const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromInvoice(invoice, {
+          createdBy: req.user._id,
+          throwOnError: true,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Invoice update Cash & Bank sync error:', syncErr?.message || syncErr);
+        return res.status(500).json({
+          success: false,
+          message: syncErr?.message || 'Invoice saved but Cash & Bank could not be updated'
+        });
+      }
+    }
+
     const updated = await Invoice.findById(invoice._id)
       .populate({
         path: 'jobId',
@@ -1657,6 +1702,19 @@ router.post('/invoices/:id/add-products', [
       });
     }
 
+    if (invoiceDoc.paymentStatus === 'RECEIVED') {
+      try {
+        const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromInvoice(invoiceDoc, {
+          createdBy: req.user._id,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Add products Cash & Bank sync error:', syncErr?.message || syncErr);
+      }
+    }
+
     const updated = await Invoice.findById(invoiceDoc._id)
       .populate({
         path: 'jobId',
@@ -1714,6 +1772,19 @@ router.post('/invoices/:id/remove-product', [
         success: false,
         message: removeErr.message || 'Could not remove product'
       });
+    }
+
+    if (invoiceDoc.paymentStatus === 'RECEIVED') {
+      try {
+        const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromInvoice(invoiceDoc, {
+          createdBy: req.user._id,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Remove product Cash & Bank sync error:', syncErr?.message || syncErr);
+      }
     }
 
     const updated = await Invoice.findById(invoiceDoc._id)
@@ -5429,7 +5500,9 @@ router.post('/jobs', [
     const advancePayment = directBill
       ? 0
       : (advanceBody != null && advanceBody !== '' ? Math.max(0, Number(advanceBody)) : 0);
-    if (advancePayment > totalPrice + 1e-6) {
+    // Variable visit jobs may open with ₹0 line totals (amounts set later). Allow advance then;
+    // only enforce the cap when a positive service total is already known.
+    if (totalPrice > 0 && advancePayment > totalPrice + 1e-6) {
       return res.status(400).json({
         success: false,
         message: 'Advance payment cannot exceed the job service total'
@@ -7373,7 +7446,8 @@ router.patch('/settlement-change-requests/:id/approve', adminPanelOnly, async (r
       job,
       invoice,
       proposedDeliveredAt: request.proposedDeliveredAt,
-      proposedInvoiceAt: request.proposedInvoiceAt
+      proposedInvoiceAt: request.proposedInvoiceAt,
+      createdBy: req.user._id
     });
 
     request.status = 'APPROVED';
@@ -7468,7 +7542,8 @@ router.patch('/jobs/:id/settlement-dates', adminPanelOnly, [
       job,
       invoice,
       proposedDeliveredAt: deliveredAtInput,
-      proposedInvoiceAt: invoiceAtInput
+      proposedInvoiceAt: invoiceAtInput,
+      createdBy: req.user._id
     });
 
     await SettlementChangeRequest.updateMany(

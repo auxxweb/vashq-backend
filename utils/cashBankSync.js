@@ -1,11 +1,13 @@
 /**
- * Fire-and-forget Cash & Bank ledger posts. Never throws to callers.
- * No-ops when cashAndBankEnabled is false.
+ * Cash & Bank ledger posts.
+ * Default: fire-and-forget (never throws) for checkout/create paths.
+ * Pass throwOnError: true for date realignment so callers cannot silently desync.
  */
 import {
   isCashAndBankEnabled,
   postPaymentChannels,
-  reverseLedgerBySource
+  reverseLedgerBySource,
+  rebuildAccountBalancesChronological
 } from '../services/moneyBookService.js';
 import { roundMoney } from './invoicePayment.js';
 
@@ -23,7 +25,10 @@ export async function syncMoneyBookFromChannels({
   entryDate = new Date(),
   notes = '',
   createdBy = null,
-  expenseOut = false
+  expenseOut = false,
+  throwOnError = false,
+  skipBalanceCheck = false,
+  rebuildBalances = false
 }) {
   try {
     if (!businessId || !sourceId) return;
@@ -35,6 +40,9 @@ export async function syncMoneyBookFromChannels({
     const online = roundMoney(onlineAmount);
     if (cash <= 0.02 && online <= 0.02) {
       await reverseLedgerBySource(businessId, sourceType, sourceId);
+      if (rebuildBalances) {
+        await rebuildAccountBalancesChronological(businessId);
+      }
       return;
     }
 
@@ -48,17 +56,34 @@ export async function syncMoneyBookFromChannels({
       entryDate,
       notes,
       createdBy,
-      expenseOut
+      expenseOut,
+      skipBalanceCheck
     });
+
+    if (rebuildBalances) {
+      await rebuildAccountBalancesChronological(businessId);
+    }
   } catch (err) {
     console.error('Cash & Bank sync error:', err?.message || err);
+    if (throwOnError) throw err;
   }
 }
 
-export async function syncMoneyBookFromInvoice(invoice, { createdBy = null } = {}) {
+export async function syncMoneyBookFromInvoice(invoice, { createdBy = null, ...opts } = {}) {
   if (!invoice?._id) return;
-  const cash = Number(invoice.paymentCashAmount) || 0;
-  const online = Number(invoice.paymentOnlineAmount) || 0;
+  // Always derive from post-discount finalAmount − advance (never subtotal / stale overpay).
+  const { invoiceSettlementCashOnline } = await import('./paymentChannelAmounts.js');
+  let cash = 0;
+  let online = 0;
+  if (invoice.paymentStatus === 'RECEIVED') {
+    const ch = invoiceSettlementCashOnline(invoice);
+    cash = ch.cash;
+    online = ch.online;
+  } else {
+    // Credit / open: only post what was collected at checkout (already capped by callers).
+    cash = Number(invoice.paymentCashAmount) || 0;
+    online = Number(invoice.paymentOnlineAmount) || 0;
+  }
   // Advances are posted separately as JOB_ADVANCE; settlement is checkout only.
   await syncMoneyBookFromChannels({
     businessId: invoice.businessId,
@@ -70,11 +95,28 @@ export async function syncMoneyBookFromInvoice(invoice, { createdBy = null } = {
     entryDate: invoice.paymentReceivedAt || invoice.saleConfirmedAt || new Date(),
     notes: `Invoice ${invoice.invoiceNumber || ''}`.trim(),
     createdBy,
-    expenseOut: false
+    expenseOut: false,
+    ...opts
   });
 }
 
-export async function syncMoneyBookFromJobAdvance(job, { createdBy = null } = {}) {
+/**
+ * Force ledger entryDate to match invoice payment date (settlement date edits).
+ * Throws when Cash & Bank is enabled and re-post fails — prevents silent desync.
+ */
+export async function realignInvoiceLedgerToPaymentDate(invoice, { createdBy = null } = {}) {
+  if (!invoice?._id) return;
+  if (!(await isCashAndBankEnabled(invoice.businessId))) return;
+
+  await syncMoneyBookFromInvoice(invoice, {
+    createdBy,
+    throwOnError: true,
+    skipBalanceCheck: true,
+    rebuildBalances: true
+  });
+}
+
+export async function syncMoneyBookFromJobAdvance(job, { createdBy = null, ...opts } = {}) {
   if (!job?._id) return;
   const adv = Number(job.advancePayment) || 0;
   if (adv <= 0.02) {
@@ -102,11 +144,12 @@ export async function syncMoneyBookFromJobAdvance(job, { createdBy = null } = {}
     entryDate: job.createdAt || new Date(),
     notes: `Advance ${job.tokenNumber || ''}`.trim(),
     createdBy,
-    expenseOut: false
+    expenseOut: false,
+    ...opts
   });
 }
 
-export async function syncMoneyBookFromExpense(expense, { createdBy = null } = {}) {
+export async function syncMoneyBookFromExpense(expense, { createdBy = null, ...opts } = {}) {
   if (!expense?._id) return;
   await syncMoneyBookFromChannels({
     businessId: expense.businessId,
@@ -118,11 +161,12 @@ export async function syncMoneyBookFromExpense(expense, { createdBy = null } = {
     entryDate: expense.expenseDate || expense.createdAt || new Date(),
     notes: 'Expense',
     createdBy,
-    expenseOut: true
+    expenseOut: true,
+    ...opts
   });
 }
 
-export async function syncMoneyBookFromOtherRevenue(row, { createdBy = null } = {}) {
+export async function syncMoneyBookFromOtherRevenue(row, { createdBy = null, ...opts } = {}) {
   if (!row?._id) return;
   await syncMoneyBookFromChannels({
     businessId: row.businessId,
@@ -134,11 +178,12 @@ export async function syncMoneyBookFromOtherRevenue(row, { createdBy = null } = 
     entryDate: row.revenueDate || row.createdAt || new Date(),
     notes: 'Other revenue',
     createdBy,
-    expenseOut: false
+    expenseOut: false,
+    ...opts
   });
 }
 
-export async function syncMoneyBookFromCollection(collection, { createdBy = null, branchId = null } = {}) {
+export async function syncMoneyBookFromCollection(collection, { createdBy = null, branchId = null, ...opts } = {}) {
   if (!collection?._id) return;
   await syncMoneyBookFromChannels({
     businessId: collection.businessId,
@@ -150,6 +195,7 @@ export async function syncMoneyBookFromCollection(collection, { createdBy = null
     entryDate: collection.collectionDate || collection.createdAt || new Date(),
     notes: `Collection ${collection.collectionNumber || ''}`.trim(),
     createdBy,
-    expenseOut: false
+    expenseOut: false,
+    ...opts
   });
 }

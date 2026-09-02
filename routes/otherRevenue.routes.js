@@ -441,8 +441,21 @@ router.put('/other-revenues/:id', requireOtherRevenueEnabled, [
     await row.populate('otherRevenueTypeId', 'revenueName');
     try {
       const { syncMoneyBookFromOtherRevenue } = await import('../utils/cashBankSync.js');
-      await syncMoneyBookFromOtherRevenue(row, { createdBy: req.user._id });
-    } catch (_) {}
+      const dateChanged = req.body.revenueDate != null;
+      await syncMoneyBookFromOtherRevenue(row, {
+        createdBy: req.user._id,
+        ...(dateChanged
+          ? { throwOnError: true, skipBalanceCheck: true, rebuildBalances: true }
+          : {})
+      });
+    } catch (syncErr) {
+      if (req.body.revenueDate != null) {
+        return res.status(500).json({
+          success: false,
+          message: syncErr.message || 'Revenue saved but Cash & Bank could not be updated'
+        });
+      }
+    }
     res.json({ success: true, otherRevenue: row });
   } catch (error) {
     console.error('Update other revenue error:', error);

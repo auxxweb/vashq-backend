@@ -73,7 +73,8 @@ async function requireCashAndBankEnabled(req, res, next) {
 }
 
 router.use((req, res, next) => {
-  if (isAdminPanelRole(req.user?.role) || req.user?.role === 'EMPLOYEE') return next();
+  // Owner / branch admin only — employees do not use Cash & Bank book
+  if (isAdminPanelRole(req.user?.role)) return next();
   return res.status(403).json({ success: false, message: 'Access denied' });
 });
 

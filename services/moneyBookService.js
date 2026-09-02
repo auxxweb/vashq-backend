@@ -249,8 +249,30 @@ export async function postLedgerEntry({
       sourceId,
       accountType,
       direction
-    }).lean();
-    if (existing) return existing;
+    });
+    if (existing) {
+      // Keep live when source date/amount was edited but reverse was skipped
+      const wantDate = new Date(entryDate || new Date());
+      const dateDrift =
+        Math.abs(new Date(existing.entryDate).getTime() - wantDate.getTime()) > 1000;
+      const amountDrift = roundMoney(existing.amount) !== amt;
+      if (dateDrift || amountDrift || (notes && notes !== existing.notes)) {
+        const prevSigned = Number(existing.signedAmount) || 0;
+        const nextSigned = direction === 'IN' ? amt : -amt;
+        existing.entryDate = wantDate;
+        existing.amount = amt;
+        existing.signedAmount = nextSigned;
+        if (notes) existing.notes = notes;
+        // Adjust cached balance by the delta, then chronological rebuild can correct later
+        const bal = roundMoney((Number(account.currentBalance) || 0) - prevSigned + nextSigned);
+        existing.balanceAfter = Math.max(0, bal);
+        account.currentBalance = Math.max(0, bal);
+        await existing.save();
+        await account.save();
+        return existing.toObject ? existing.toObject() : existing;
+      }
+      return existing.toObject ? existing.toObject() : existing;
+    }
   }
 
   const signed = direction === 'IN' ? amt : -amt;

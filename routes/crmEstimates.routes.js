@@ -42,6 +42,7 @@ function parseItemsInput(rawItems) {
   if (!Array.isArray(rawItems)) return [];
   return rawItems.map((row) => ({
     serviceId: row.serviceId || null,
+    packageTemplateId: row.packageTemplateId || null,
     name: row.name,
     itemType: row.itemType,
     unitPrice: row.unitPrice ?? row.price ?? row.servicePrice,
@@ -85,12 +86,18 @@ router.get('/estimates', async (req, res) => {
     const leadId = String(req.query.leadId || '').trim();
 
     const base = applySalesEstimateScope(req.user, scopedFilter(req, {}));
+    // Owners / branch managers are not sales-scoped — they see every estimate in
+    // business/branch context, including ones created by employees.
     const and = [];
     if (base.$or) {
       and.push({ $or: base.$or });
       const { $or, ...rest } = base;
       Object.assign(base, rest);
       delete base.$or;
+    }
+    if (Array.isArray(base.$and) && base.$and.length) {
+      and.push(...base.$and);
+      delete base.$and;
     }
     let filter = { ...base };
     if (status && ['DRAFT', 'SHARED', 'CONVERTED', 'CANCELLED'].includes(status)) {
@@ -186,9 +193,10 @@ router.post('/estimates', async (req, res) => {
     });
 
     const status = String(body.status || 'DRAFT').toUpperCase() === 'SHARED' ? 'SHARED' : 'DRAFT';
+    const writeBranchId = lead?.branchId || branchIdForCreate(req);
     const estimate = new Estimate({
       businessId: req.businessId,
-      branchId: branchIdForCreate(req),
+      branchId: writeBranchId,
       estimateNumber: await nextEstimateNumber(req.businessId),
       status,
       leadId: lead?._id || null,

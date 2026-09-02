@@ -3,11 +3,12 @@ import crypto from 'crypto';
 
 const estimateItemSchema = new mongoose.Schema({
   serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', default: null },
+  packageTemplateId: { type: mongoose.Schema.Types.ObjectId, ref: 'PackageTemplate', default: null },
   name: { type: String, required: true, trim: true },
-  /** SERVICE = wash/work; PRODUCT = catalog product / variable skip-work; CUSTOM = free text */
+  /** SERVICE = wash/work; VARIABLE = variable service; PRODUCT = catalog product; PACKAGE = package template; CUSTOM = free text */
   itemType: {
     type: String,
-    enum: ['SERVICE', 'PRODUCT', 'CUSTOM'],
+    enum: ['SERVICE', 'VARIABLE', 'PRODUCT', 'PACKAGE', 'CUSTOM'],
     default: 'SERVICE'
   },
   unitPrice: { type: Number, required: true, min: 0 },
