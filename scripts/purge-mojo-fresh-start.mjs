@@ -171,27 +171,60 @@ async function main() {
 
     if (Number.isNaN(cutoff.valueOf())) throw new Error(`Invalid cutoff: ${opts.cutoffIso}`);
 
-    const filter = {
-      businessId,
-      createdAt: { $lt: cutoff }
-    };
-
     const shouldDelete = opts.confirmDelete && !opts.dryRun;
 
-    console.log('=== Mojo / business fresh-start purge ===');
+    function filterForModel(key) {
+      if (key === 'expenses') {
+        return {
+          businessId,
+          $or: [
+            { expenseDate: { $lt: cutoff } },
+            { expenseDate: null, createdAt: { $lt: cutoff } },
+            { expenseDate: { $exists: false }, createdAt: { $lt: cutoff } }
+          ]
+        };
+      }
+      if (key === 'otherRevenues') {
+        return {
+          businessId,
+          $or: [
+            { revenueDate: { $lt: cutoff } },
+            { revenueDate: null, createdAt: { $lt: cutoff } },
+            { revenueDate: { $exists: false }, createdAt: { $lt: cutoff } }
+          ]
+        };
+      }
+      if (key === 'moneyLedgers') {
+        return {
+          businessId,
+          $or: [
+            { entryDate: { $lt: cutoff } },
+            { entryDate: null, createdAt: { $lt: cutoff } },
+            { entryDate: { $exists: false }, createdAt: { $lt: cutoff } }
+          ]
+        };
+      }
+      return {
+        businessId,
+        createdAt: { $lt: cutoff }
+      };
+    }
+
+    console.log('=== Business fresh-start purge ===');
     console.log('Business:', business.businessName, String(businessId));
     console.log('Owner on record:', business.ownerName || '—', business.email || '—');
     console.log('Cutoff (exclusive, keep from this instant):', cutoff.toISOString());
     console.log('Timezone used for “today”:', opts.timezone);
     console.log('Mode:', shouldDelete ? 'DELETE' : 'DRY_RUN');
+    console.log('Customers/Cars: KEPT');
     console.log('');
 
     const counts = {};
     for (const [key, Model] of PURGE_MODELS) {
-      counts[key] = await Model.countDocuments(filter);
+      counts[key] = await Model.countDocuments(filterForModel(key));
     }
 
-    console.log('Records matching filter (createdAt < cutoff):');
+    console.log('Records matching filter (before cutoff):');
     let total = 0;
     for (const [key, n] of Object.entries(counts)) {
       if (n > 0) console.log(`  ${key}: ${n}`);
@@ -215,14 +248,14 @@ async function main() {
     for (const [k, n] of Object.entries(kept)) console.log(`  ${k}: ${n}`);
 
     if (!shouldDelete) {
-      console.log('\nNo deletions. Re-run with: --confirm --execute');
+      console.log('\nNo deletions. Re-run with: --confirm --execute --email <email> --cutoff <ISO>');
       return;
     }
 
     console.log('\nDeleting…');
     const deleted = {};
     for (const [key, Model] of PURGE_MODELS) {
-      const res = await Model.deleteMany(filter);
+      const res = await Model.deleteMany(filterForModel(key));
       deleted[key] = res.deletedCount ?? 0;
       if (deleted[key] > 0) console.log(`  deleted ${key}: ${deleted[key]}`);
     }
