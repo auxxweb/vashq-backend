@@ -148,6 +148,13 @@ const jobSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
+  /** User who created the job (owner, branch admin, or employee). Used for employee job visibility. */
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true
+  },
 
   // Optional package linkage (prepaid package). Do NOT deduct on job creation; only on completion.
   customerPackageId: {

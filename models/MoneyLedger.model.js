@@ -49,10 +49,10 @@ const moneyLedgerSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  /** Running balance after this row — may be negative (day close must carry to next open). */
   balanceAfter: {
     type: Number,
-    required: true,
-    min: 0
+    required: true
   },
   sourceType: {
     type: String,
@@ -61,6 +61,7 @@ const moneyLedgerSchema = new mongoose.Schema({
       'INVOICE',
       'JOB_ADVANCE',
       'EXPENSE',
+      'PURCHASE',
       'OTHER_REVENUE',
       'COLLECTION',
       'DEPOSIT',

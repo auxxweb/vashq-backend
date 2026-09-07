@@ -1,25 +1,27 @@
-import mongoose from 'mongoose';
 import Job from '../models/Job.model.js';
 import { branchFilter } from '../middleware/branchContext.middleware.js';
 import { applyBranchScope, applyBranchScopeOid } from './branchQuery.js';
 import { isAdminPanelRole } from './adminRoles.js';
-import { employeeAssignedMatch, isEmployeeAssignedToJob } from './jobAssignment.js';
+import {
+  applyEmployeeJobScope,
+  employeeHasFullJobAccess,
+  isEmployeeLinkedToJob
+} from './jobAssignment.js';
 
 /** Merge business + optional branch filter from request context. */
 export function scopedFilter(req, extra = {}) {
   return { ...branchFilter(req), ...extra };
 }
 
-/** Job lookup with branch scope + optional employee assignment filter. */
-export function jobAccessFilter(req, extra = {}) {
+/**
+ * Job lookup with branch scope + employee visibility (created/assigned) unless full access is on.
+ * Async — always await.
+ */
+export async function jobAccessFilter(req, extra = {}) {
   const filter = { ...scopedFilter(req, extra) };
   if (req.user?.role === 'EMPLOYEE') {
-    const empMatch = employeeAssignedMatch(req.user._id);
-    if (filter.$or) {
-      filter.$and = [...(filter.$and || []), { $or: filter.$or }, empMatch];
-      delete filter.$or;
-    } else {
-      Object.assign(filter, empMatch);
+    if (!(await employeeHasFullJobAccess(req.businessId))) {
+      applyEmployeeJobScope(filter, req.user._id);
     }
   }
   return filter;
@@ -81,7 +83,10 @@ export function branchIdForCreate(req) {
   return requireBranchIdForWrite(req);
 }
 
-/** Admins: any open invoice. Employees: only invoices for jobs assigned to them. */
+/**
+ * Admins: any open invoice.
+ * Employees: same-branch jobs when full job access is on; otherwise created/assigned jobs only.
+ */
 export async function assertInvoiceCheckoutAccess(req, invoice) {
   if (isAdminPanelRole(req.user?.role)) return;
   if (req.user?.role !== 'EMPLOYEE') {
@@ -96,10 +101,25 @@ export async function assertInvoiceCheckoutAccess(req, invoice) {
     throw err;
   }
   const job = await Job.findOne({ _id: jobId, businessId: req.businessId })
-    .select('assignedTo assignedToUsers')
+    .select('assignedTo assignedToUsers createdBy branchId')
     .lean();
-  if (!job || !isEmployeeAssignedToJob(job, req.user._id)) {
+  if (!job) {
     const err = new Error('You can only complete checkout on jobs assigned to you');
+    err.status = 403;
+    throw err;
+  }
+
+  if (await employeeHasFullJobAccess(req.businessId)) {
+    if (req.branchId && job.branchId && String(job.branchId) !== String(req.branchId)) {
+      const err = new Error('You can only complete checkout on jobs in your branch');
+      err.status = 403;
+      throw err;
+    }
+    return;
+  }
+
+  if (!isEmployeeLinkedToJob(job, req.user._id)) {
+    const err = new Error('You can only complete checkout on jobs you created or are assigned to');
     err.status = 403;
     throw err;
   }

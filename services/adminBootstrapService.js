@@ -94,7 +94,7 @@ export async function loadAdminBootstrap({ businessId, user }) {
     getMySubscriptionPayload(businessId),
     Notification.countDocuments({ businessId, isRead: false }),
     BusinessSettings.findOne({ businessId })
-      .select('crmEnabled attendanceEnabled otherRevenueEnabled mixedCartEnabled inventoryManagementEnabled cashAndBankEnabled')
+      .select('crmEnabled attendanceEnabled otherRevenueEnabled mixedCartEnabled inventoryManagementEnabled cashAndBankEnabled employeeFullJobAccess')
       .lean()
   ]);
 
@@ -113,6 +113,7 @@ export async function loadAdminBootstrap({ businessId, user }) {
     otherRevenueEnabled: !!settings?.otherRevenueEnabled,
     mixedCartEnabled: !!settings?.mixedCartEnabled,
     inventoryManagementEnabled: !!settings?.inventoryManagementEnabled,
-    cashAndBankEnabled: !!settings?.cashAndBankEnabled
+    cashAndBankEnabled: !!settings?.cashAndBankEnabled,
+    employeeFullJobAccess: !!settings?.employeeFullJobAccess
   };
 }

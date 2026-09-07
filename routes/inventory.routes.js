@@ -21,6 +21,8 @@ import {
   roundQty
 } from '../utils/stockLedger.js';
 import { shouldTrackInventory } from '../utils/serviceCatalog.js';
+import { computePurchaseTotals } from '../utils/purchaseTotals.js';
+import { syncMoneyBookFromPurchase } from '../utils/cashBankSync.js';
 
 const router = express.Router();
 
@@ -109,6 +111,174 @@ function productFilter(businessId, req) {
     },
     req
   );
+}
+
+async function buildPurchaseItems(req, rawItems) {
+  const serviceIds = rawItems.map((i) => i.serviceId);
+  const products = await Service.find({
+    ...productFilter(req.businessId, req),
+    _id: { $in: serviceIds }
+  }).lean();
+  const byId = new Map(products.map((p) => [String(p._id), p]));
+
+  const items = [];
+  let subtotal = 0;
+  for (const line of rawItems) {
+    const svc = byId.get(String(line.serviceId));
+    if (!svc) {
+      const err = new Error(`Product not found: ${line.serviceId}`);
+      err.status = 400;
+      throw err;
+    }
+    if (!shouldTrackInventory(svc)) {
+      const err = new Error(`"${svc.name}" does not track inventory`);
+      err.status = 400;
+      throw err;
+    }
+    const quantity = roundQty(Number(line.quantity));
+    const unitCost = roundMoney(Number(line.unitCost));
+    if (!(quantity > 0)) {
+      const err = new Error(`Invalid quantity for "${svc.name}"`);
+      err.status = 400;
+      throw err;
+    }
+    const lineTotal = roundMoney(quantity * unitCost);
+    subtotal = roundMoney(subtotal + lineTotal);
+    items.push({
+      serviceId: svc._id,
+      productName: svc.name,
+      quantity,
+      unitCost,
+      lineTotal
+    });
+  }
+  return { items, subtotal };
+}
+
+function resolvePurchaseSettlement(body, grandTotal) {
+  const settlementMode = body.settlementMode === 'CREDIT' ? 'CREDIT' : 'FULL';
+  let paymentCashAmount = roundMoney(Number(body.paymentCashAmount) || 0);
+  let paymentOnlineAmount = roundMoney(Number(body.paymentOnlineAmount) || 0);
+  let paymentMethod = String(body.paymentMethod || 'CASH').toUpperCase();
+  if (!['CASH', 'ONLINE', 'SPLIT'].includes(paymentMethod)) paymentMethod = 'CASH';
+
+  let outstandingAmount = 0;
+  let paymentStatus = 'PAID';
+  const payable = roundMoney(grandTotal);
+
+  if (settlementMode === 'FULL') {
+    if (paymentCashAmount + paymentOnlineAmount < 0.009) {
+      paymentCashAmount = payable;
+      paymentOnlineAmount = 0;
+      paymentMethod = 'CASH';
+    }
+    const paid = roundMoney(paymentCashAmount + paymentOnlineAmount);
+    if (Math.abs(paid - payable) > 0.05 && paid > payable + 0.009) {
+      const err = new Error('Paid amount cannot exceed purchase total');
+      err.status = 400;
+      throw err;
+    }
+    // If underpaid on FULL, treat remainder as unpaid credit
+    if (paid + 0.009 < payable) {
+      outstandingAmount = roundMoney(payable - paid);
+      paymentStatus = paid <= 0.009 ? 'UNPAID' : 'PARTIAL';
+    } else {
+      outstandingAmount = 0;
+      paymentStatus = 'PAID';
+    }
+  } else {
+    const paidNow = roundMoney(paymentCashAmount + paymentOnlineAmount);
+    if (paidNow > payable + 0.009) {
+      const err = new Error('Paid amount cannot exceed purchase total');
+      err.status = 400;
+      throw err;
+    }
+    outstandingAmount = roundMoney(Math.max(0, payable - paidNow));
+    paymentStatus =
+      outstandingAmount <= 0.009 ? 'PAID' : paidNow <= 0.009 ? 'UNPAID' : 'PARTIAL';
+  }
+
+  if (paymentCashAmount > 0.009 && paymentOnlineAmount > 0.009) paymentMethod = 'SPLIT';
+  else if (paymentOnlineAmount > 0.009 && paymentCashAmount < 0.009) paymentMethod = 'ONLINE';
+  else if (paymentCashAmount > 0.009) paymentMethod = 'CASH';
+
+  return {
+    settlementMode,
+    paymentCashAmount,
+    paymentOnlineAmount,
+    paymentMethod,
+    outstandingAmount,
+    paymentStatus
+  };
+}
+
+async function postPurchaseStockLines(req, purchase, items, purchaseDate) {
+  const posted = [];
+  try {
+    for (const line of items) {
+      const result = await postStockMovement({
+        businessId: req.businessId,
+        branchId: purchase.branchId || req.branchId || null,
+        serviceId: line.serviceId,
+        type: 'PURCHASE',
+        qtyDelta: line.quantity,
+        unitCost: line.unitCost,
+        refType: 'PURCHASE',
+        refId: purchase._id,
+        notes: `Purchase ${purchase.billNumber || purchase._id}`,
+        movementDate: purchaseDate,
+        createdBy: req.user._id
+      });
+      posted.push({
+        serviceId: line.serviceId,
+        quantity: line.quantity,
+        unitCost: line.unitCost,
+        ledgerId: result.entry._id
+      });
+    }
+  } catch (err) {
+    for (const row of posted) {
+      try {
+        await postStockMovement({
+          businessId: req.businessId,
+          branchId: purchase.branchId || req.branchId || null,
+          serviceId: row.serviceId,
+          type: 'ADJUST',
+          qtyDelta: -row.quantity,
+          unitCost: row.unitCost,
+          refType: 'PURCHASE',
+          refId: purchase._id,
+          notes: 'Purchase rollback',
+          createdBy: req.user._id
+        });
+      } catch {
+        /* best effort */
+      }
+    }
+    throw err;
+  }
+  return posted;
+}
+
+async function reversePurchaseStockLines(req, purchase) {
+  const items = Array.isArray(purchase.items) ? purchase.items : [];
+  for (const line of items) {
+    const qty = roundQty(Number(line.quantity) || 0);
+    if (qty <= 0) continue;
+    await postStockMovement({
+      businessId: req.businessId,
+      branchId: purchase.branchId || req.branchId || null,
+      serviceId: line.serviceId,
+      type: 'ADJUST',
+      qtyDelta: -qty,
+      unitCost: Number(line.unitCost) || 0,
+      refType: 'PURCHASE',
+      refId: purchase._id,
+      notes: `Purchase edit reverse ${purchase.billNumber || purchase._id}`,
+      movementDate: purchase.purchaseDate || new Date(),
+      createdBy: req.user._id
+    });
+  }
 }
 
 // ─── Products (catalog rows that are retail products) ───────────────────────
@@ -522,7 +692,13 @@ router.get('/purchases', async (req, res) => {
       .sort({ purchaseDate: -1 })
       .limit(500)
       .lean();
-    const total = roundMoney(purchases.reduce((s, p) => s + (Number(p.subtotal) || 0), 0));
+    const total = roundMoney(
+      purchases.reduce((s, p) => {
+        const gt = Number(p.grandTotal);
+        if (Number.isFinite(gt)) return s + gt;
+        return s + (Number(p.subtotal) || 0);
+      }, 0)
+    );
     res.json({ success: true, purchases, total });
   } catch (error) {
     console.error('Inventory purchases list error:', error);
@@ -553,47 +729,22 @@ router.post('/purchases', adminPanelOnly, [
   body('items.*.quantity').isFloat({ min: 0.001 }),
   body('items.*.unitCost').isFloat({ min: 0 }),
   body('billNumber').optional().trim().isString(),
-  body('notes').optional().trim().isString()
+  body('notes').optional().trim().isString(),
+  body('billImage').optional({ nullable: true }).trim().isString()
 ], async (req, res) => {
   try {
     if (!validate(req, res)) return;
 
-    const rawItems = req.body.items || [];
-    const serviceIds = rawItems.map((i) => i.serviceId);
-    const products = await Service.find({
-      ...productFilter(req.businessId, req),
-      _id: { $in: serviceIds }
-    }).lean();
-    const byId = new Map(products.map((p) => [String(p._id), p]));
-
-    const items = [];
-    let subtotal = 0;
-    for (const line of rawItems) {
-      const svc = byId.get(String(line.serviceId));
-      if (!svc) {
-        return res.status(400).json({
-          success: false,
-          message: `Product not found: ${line.serviceId}`
-        });
-      }
-      if (!shouldTrackInventory(svc)) {
-        return res.status(400).json({
-          success: false,
-          message: `"${svc.name}" does not track inventory`
-        });
-      }
-      const quantity = roundQty(Number(line.quantity));
-      const unitCost = roundMoney(Number(line.unitCost));
-      const lineTotal = roundMoney(quantity * unitCost);
-      subtotal = roundMoney(subtotal + lineTotal);
-      items.push({
-        serviceId: svc._id,
-        productName: svc.name,
-        quantity,
-        unitCost,
-        lineTotal
-      });
-    }
+    const { items, subtotal } = await buildPurchaseItems(req, req.body.items || []);
+    const totals = computePurchaseTotals({
+      subtotal,
+      discountType: req.body.discountType,
+      discountValue: req.body.discountValue,
+      taxMode: req.body.taxMode,
+      taxPercent: req.body.taxPercent,
+      additionalCharges: req.body.additionalCharges,
+      additionalChargesMode: req.body.additionalChargesMode
+    });
 
     let supplierName = String(req.body.supplierName || '').trim();
     let supplierId = req.body.supplierId || null;
@@ -611,34 +762,14 @@ router.post('/purchases', adminPanelOnly, [
       ? new Date(req.body.purchaseDate)
       : new Date();
 
-    const settlementMode = req.body.settlementMode === 'CREDIT' ? 'CREDIT' : 'FULL';
-    let paymentCashAmount = roundMoney(Number(req.body.paymentCashAmount) || 0);
-    let paymentOnlineAmount = roundMoney(Number(req.body.paymentOnlineAmount) || 0);
-    let paymentMethod = String(req.body.paymentMethod || 'CASH').toUpperCase();
-    if (!['CASH', 'ONLINE', 'SPLIT'].includes(paymentMethod)) paymentMethod = 'CASH';
-
-    let outstandingAmount = 0;
-    let paymentStatus = 'PAID';
-    if (settlementMode === 'FULL') {
-      // Treat as fully paid; allocate to cash if not specified
-      if (paymentCashAmount + paymentOnlineAmount < 0.009) {
-        paymentCashAmount = subtotal;
-        paymentOnlineAmount = 0;
-        paymentMethod = 'CASH';
-      }
-      outstandingAmount = 0;
-      paymentStatus = 'PAID';
-    } else {
-      const paidNow = roundMoney(paymentCashAmount + paymentOnlineAmount);
-      if (paidNow > subtotal + 0.009) {
-        return res.status(400).json({
-          success: false,
-          message: 'Paid amount cannot exceed purchase total'
-        });
-      }
-      outstandingAmount = roundMoney(Math.max(0, subtotal - paidNow));
-      paymentStatus =
-        outstandingAmount <= 0.009 ? 'PAID' : paidNow <= 0.009 ? 'UNPAID' : 'PARTIAL';
+    let settlement;
+    try {
+      settlement = resolvePurchaseSettlement(req.body, totals.grandTotal);
+    } catch (settleErr) {
+      return res.status(settleErr.status || 400).json({
+        success: false,
+        message: settleErr.message || 'Invalid payment'
+      });
     }
 
     const purchase = await Purchase.create({
@@ -649,65 +780,43 @@ router.post('/purchases', adminPanelOnly, [
       billNumber: String(req.body.billNumber || '').trim(),
       purchaseDate,
       items,
-      subtotal,
-      settlementMode,
-      outstandingAmount,
-      paymentStatus,
+      subtotal: totals.subtotal,
+      discountType: totals.discountType,
+      discountValue: totals.discountValue,
+      discountAmount: totals.discountAmount,
+      netGoodsAmount: totals.netGoodsAmount,
+      taxMode: totals.taxMode,
+      taxPercent: totals.taxPercent,
+      taxAmount: totals.taxAmount,
+      additionalCharges: totals.additionalCharges,
+      additionalChargesMode: totals.additionalChargesMode,
+      grandTotal: totals.grandTotal,
+      billImage: String(req.body.billImage || '').trim(),
+      settlementMode: settlement.settlementMode,
+      outstandingAmount: settlement.outstandingAmount,
+      paymentStatus: settlement.paymentStatus,
       creditDueDate: req.body.creditDueDate ? new Date(req.body.creditDueDate) : null,
-      paymentMethod,
-      paymentCashAmount,
-      paymentOnlineAmount,
+      paymentMethod: settlement.paymentMethod,
+      paymentCashAmount: settlement.paymentCashAmount,
+      paymentOnlineAmount: settlement.paymentOnlineAmount,
       notes: String(req.body.notes || '').trim(),
       stockPosted: false,
       createdBy: req.user._id
     });
 
-    const posted = [];
     try {
-      for (const line of items) {
-        const result = await postStockMovement({
-          businessId: req.businessId,
-          branchId: req.branchId || null,
-          serviceId: line.serviceId,
-          type: 'PURCHASE',
-          qtyDelta: line.quantity,
-          unitCost: line.unitCost,
-          refType: 'PURCHASE',
-          refId: purchase._id,
-          notes: `Purchase ${purchase.billNumber || purchase._id}`,
-          movementDate: purchaseDate,
-          createdBy: req.user._id
-        });
-        posted.push({
-          serviceId: line.serviceId,
-          quantity: line.quantity,
-          unitCost: line.unitCost,
-          ledgerId: result.entry._id
-        });
-      }
+      await postPurchaseStockLines(req, purchase, items, purchaseDate);
       purchase.stockPosted = true;
       await purchase.save();
     } catch (err) {
-      // Reverse any posted lines
-      for (const row of posted) {
-        try {
-          await postStockMovement({
-            businessId: req.businessId,
-            serviceId: row.serviceId,
-            type: 'ADJUST',
-            qtyDelta: -row.quantity,
-            unitCost: row.unitCost,
-            refType: 'PURCHASE',
-            refId: purchase._id,
-            notes: 'Purchase rollback',
-            createdBy: req.user._id
-          });
-        } catch {
-          /* best effort */
-        }
-      }
       await Purchase.deleteOne({ _id: purchase._id });
       throw err;
+    }
+
+    try {
+      await syncMoneyBookFromPurchase(purchase, { createdBy: req.user._id });
+    } catch (syncErr) {
+      console.error('Purchase cash/bank sync error:', syncErr?.message || syncErr);
     }
 
     const fresh = await Purchase.findById(purchase._id)
@@ -717,6 +826,144 @@ router.post('/purchases', adminPanelOnly, [
     res.status(201).json({ success: true, purchase: fresh });
   } catch (error) {
     console.error('Inventory create purchase error:', error);
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+/** Update purchase — reverses old stock, re-posts, realigns Cash & Bank. */
+router.put('/purchases/:id', adminPanelOnly, [
+  body('items').isArray({ min: 1 }).withMessage('At least one line is required'),
+  body('items.*.serviceId').notEmpty(),
+  body('items.*.quantity').isFloat({ min: 0.001 }),
+  body('items.*.unitCost').isFloat({ min: 0 }),
+  body('billNumber').optional().trim().isString(),
+  body('notes').optional().trim().isString(),
+  body('billImage').optional({ nullable: true }).trim().isString()
+], async (req, res) => {
+  try {
+    if (!validate(req, res)) return;
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid purchase id' });
+    }
+
+    const filter = applyBranchScope({ businessId: req.businessId, _id: req.params.id }, req);
+    const purchase = await Purchase.findOne(filter);
+    if (!purchase) {
+      return res.status(404).json({ success: false, message: 'Purchase not found' });
+    }
+
+    const { items, subtotal } = await buildPurchaseItems(req, req.body.items || []);
+    const totals = computePurchaseTotals({
+      subtotal,
+      discountType: req.body.discountType,
+      discountValue: req.body.discountValue,
+      taxMode: req.body.taxMode,
+      taxPercent: req.body.taxPercent,
+      additionalCharges: req.body.additionalCharges,
+      additionalChargesMode: req.body.additionalChargesMode
+    });
+
+    let supplierName = String(req.body.supplierName || '').trim();
+    let supplierId = req.body.supplierId || null;
+    if (supplierId) {
+      const supplier = await Supplier.findOne(
+        applyBranchScope({ businessId: req.businessId, _id: supplierId }, req)
+      ).lean();
+      if (!supplier) {
+        return res.status(400).json({ success: false, message: 'Supplier not found' });
+      }
+      supplierName = supplier.name;
+    } else {
+      supplierId = null;
+    }
+
+    const purchaseDate = req.body.purchaseDate
+      ? new Date(req.body.purchaseDate)
+      : purchase.purchaseDate || new Date();
+
+    let settlement;
+    try {
+      settlement = resolvePurchaseSettlement(req.body, totals.grandTotal);
+    } catch (settleErr) {
+      return res.status(settleErr.status || 400).json({
+        success: false,
+        message: settleErr.message || 'Invalid payment'
+      });
+    }
+
+    if (purchase.stockPosted) {
+      try {
+        await reversePurchaseStockLines(req, purchase);
+      } catch (revErr) {
+        return res.status(revErr.status || 409).json({
+          success: false,
+          message: revErr.message || 'Cannot reverse previous stock for this purchase (insufficient stock).'
+        });
+      }
+    }
+
+    purchase.supplierId = supplierId;
+    purchase.supplierName = supplierName;
+    purchase.billNumber = String(req.body.billNumber || '').trim();
+    purchase.purchaseDate = purchaseDate;
+    purchase.items = items;
+    purchase.subtotal = totals.subtotal;
+    purchase.discountType = totals.discountType;
+    purchase.discountValue = totals.discountValue;
+    purchase.discountAmount = totals.discountAmount;
+    purchase.netGoodsAmount = totals.netGoodsAmount;
+    purchase.taxMode = totals.taxMode;
+    purchase.taxPercent = totals.taxPercent;
+    purchase.taxAmount = totals.taxAmount;
+    purchase.additionalCharges = totals.additionalCharges;
+    purchase.additionalChargesMode = totals.additionalChargesMode;
+    purchase.grandTotal = totals.grandTotal;
+    purchase.billImage = String(req.body.billImage || '').trim();
+    purchase.settlementMode = settlement.settlementMode;
+    purchase.outstandingAmount = settlement.outstandingAmount;
+    purchase.paymentStatus = settlement.paymentStatus;
+    purchase.creditDueDate = req.body.creditDueDate ? new Date(req.body.creditDueDate) : null;
+    purchase.paymentMethod = settlement.paymentMethod;
+    purchase.paymentCashAmount = settlement.paymentCashAmount;
+    purchase.paymentOnlineAmount = settlement.paymentOnlineAmount;
+    purchase.notes = String(req.body.notes || '').trim();
+    purchase.stockPosted = false;
+    await purchase.save();
+
+    try {
+      await postPurchaseStockLines(req, purchase, items, purchaseDate);
+      purchase.stockPosted = true;
+      await purchase.save();
+    } catch (err) {
+      console.error('Purchase edit restock failed:', err);
+      throw err;
+    }
+
+    try {
+      await syncMoneyBookFromPurchase(purchase, {
+        createdBy: req.user._id,
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
+    } catch (syncErr) {
+      console.error('Purchase edit cash/bank sync error:', syncErr?.message || syncErr);
+      return res.status(syncErr.status || 500).json({
+        success: false,
+        message: syncErr.message || 'Purchase saved but Cash & Bank sync failed'
+      });
+    }
+
+    const fresh = await Purchase.findById(purchase._id)
+      .populate('supplierId', 'name phone')
+      .lean();
+
+    res.json({ success: true, purchase: fresh });
+  } catch (error) {
+    console.error('Inventory update purchase error:', error);
     res.status(error.status || 500).json({
       success: false,
       message: error.message || 'Server error'
@@ -782,6 +1029,16 @@ router.post('/purchases/:id/pay', adminPanelOnly, [
       purchase.paymentMethod = 'CASH';
     }
     await purchase.save();
+
+    try {
+      await syncMoneyBookFromPurchase(purchase, {
+        createdBy: req.user._id,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
+    } catch (syncErr) {
+      console.error('Purchase pay cash/bank sync error:', syncErr?.message || syncErr);
+    }
 
     res.json({ success: true, purchase });
   } catch (error) {

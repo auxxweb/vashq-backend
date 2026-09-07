@@ -604,6 +604,7 @@ export async function convertBookingToJob(businessId, bookingId, userId, userRol
         beforeImages,
         notes,
         assignedTo,
+        createdBy: userId || null,
         sourceBookingId: booking._id,
         services: lines,
         statusHistory: [{ status: 'RECEIVED', changedAt: new Date() }]

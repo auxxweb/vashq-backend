@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import User from '../models/User.model.js';
+import BusinessSettings from '../models/BusinessSettings.model.js';
 
 /** Normalize any id-like value to a string, or null. */
 export function toIdString(value) {
@@ -17,21 +18,35 @@ export function isEmployeeAssignedToJob(job, userId) {
   return list.some((id) => toIdString(id) === uid);
 }
 
-/** Mongo filter clause so an employee sees all jobs they are assigned to. */
-export function employeeAssignedMatch(userId) {
+/** True if employee created or is assigned to the job. */
+export function isEmployeeLinkedToJob(job, userId) {
+  const uid = toIdString(userId);
+  if (!job || !uid) return false;
+  if (toIdString(job.createdBy) === uid) return true;
+  return isEmployeeAssignedToJob(job, userId);
+}
+
+/** Mongo filter: jobs the employee created or is assigned to. */
+export function employeeJobVisibilityMatch(userId) {
   const uid = userId;
   return {
     $or: [
+      { createdBy: uid },
       { assignedTo: uid },
       { assignedToUsers: uid }
     ]
   };
 }
 
-/** Merge employee assignee scope into an existing Mongo match (mutates and returns match). */
+/** @deprecated Prefer employeeJobVisibilityMatch — kept as alias. */
+export function employeeAssignedMatch(userId) {
+  return employeeJobVisibilityMatch(userId);
+}
+
+/** Merge employee visibility scope into an existing Mongo match (mutates and returns match). */
 export function applyEmployeeJobScope(match, userId) {
   if (!match || !userId) return match;
-  const emp = employeeAssignedMatch(userId);
+  const emp = employeeJobVisibilityMatch(userId);
   if (match.$or) {
     match.$and = [...(match.$and || []), { $or: match.$or }, emp];
     delete match.$or;
@@ -39,6 +54,25 @@ export function applyEmployeeJobScope(match, userId) {
     Object.assign(match, emp);
   }
   return match;
+}
+
+/** Whether business setting allows employees full branch/shop job access. */
+export async function employeeHasFullJobAccess(businessId) {
+  if (!businessId) return false;
+  const settings = await BusinessSettings.findOne({ businessId })
+    .select('employeeFullJobAccess')
+    .lean();
+  return !!settings?.employeeFullJobAccess;
+}
+
+/**
+ * Apply employee job visibility when role is EMPLOYEE and full access is off.
+ * When full access is on, branchFilter alone already scopes to their branch / shop.
+ */
+export async function applyEmployeeJobAccess(req, match) {
+  if (!match || req.user?.role !== 'EMPLOYEE') return match;
+  if (await employeeHasFullJobAccess(req.businessId)) return match;
+  return applyEmployeeJobScope(match, req.user._id);
 }
 
 /**

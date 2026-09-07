@@ -1264,6 +1264,7 @@ router.post('/leads/:id/convert-job', async (req, res) => {
           beforeImages: createWithoutImages ? [] : beforeImages,
           notes: overrides.notes || overrides.note || `CRM lead: ${lead.name}`,
           assignedTo,
+          createdBy: req.user?._id || null,
           services: lines,
           statusHistory: [{ status: 'RECEIVED', changedAt: new Date() }]
         });

@@ -11,8 +11,17 @@ const TEMPLATE_META = {
   },
   completed: {
     label: 'Completed (Ready for Delivery)',
-    placeholders: ['{{name}}', '{{vehicleNumber}}', '{{token}}'],
-    purpose: 'Sent when the vehicle is ready for pickup/delivery'
+    placeholders: [
+      '{{name}}',
+      '{{vehicleNumber}}',
+      '{{token}}',
+      '{{invoiceLink}}',
+      '{{pendingNote}}',
+      '{{amountDue}}',
+      '{{currency}}'
+    ],
+    purpose:
+      'Sent when the vehicle is ready for pickup/delivery; include invoice link and pending amount when payment is due'
   },
   delivered: {
     label: 'Delivered (Job Completed)',
@@ -21,8 +30,17 @@ const TEMPLATE_META = {
   },
   invoiceShare: {
     label: 'Invoice — Job / Service',
-    placeholders: ['{{name}}', '{{total}}', '{{currency}}', '{{invoiceLink}}', '{{invoiceNumber}}', '{{vehicleNumber}}'],
-    purpose: 'WhatsApp message when sharing a service job invoice PDF link'
+    placeholders: [
+      '{{name}}',
+      '{{total}}',
+      '{{currency}}',
+      '{{invoiceLink}}',
+      '{{invoiceNumber}}',
+      '{{vehicleNumber}}',
+      '{{pendingNote}}',
+      '{{amountDue}}'
+    ],
+    purpose: 'WhatsApp message when sharing a service job invoice PDF link, including pending amount when due'
   },
   invoicePackage: {
     label: 'Invoice — Package',

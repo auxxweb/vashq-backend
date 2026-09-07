@@ -125,7 +125,10 @@ export async function getAccount(businessId, branchId, accountType) {
 
 /**
  * Balance as of a moment (inclusive of entries on/before asOf).
- * Uses latest balanceAfter on or before asOf; falls back to opening/current.
+ * Algorithm: sum(signedAmount) through asOf — same math as day closing
+ * (opening + in − out), so tomorrow's opening always equals today's closing.
+ * Ledger is source of truth. account.openingBalance is used only when the
+ * account has no ledger rows yet (before OPENING is posted).
  */
 export async function getBalanceAsOf(businessId, branchId, accountType, asOf = new Date()) {
   const bid = bizOid(businessId);
@@ -133,17 +136,23 @@ export async function getBalanceAsOf(businessId, branchId, accountType, asOf = n
   const account = await MoneyAccount.findOne({ businessId: bid, branchId: brid, accountType }).lean();
   if (!account) return 0;
 
-  const last = await MoneyLedger.findOne({
-    businessId: bid,
-    branchId: brid,
-    accountType,
-    entryDate: { $lte: asOf }
-  })
-    .sort({ entryDate: -1, createdAt: -1 })
-    .select('balanceAfter')
-    .lean();
+  const [agg] = await MoneyLedger.aggregate([
+    {
+      $match: {
+        businessId: bid,
+        branchId: brid,
+        accountType,
+        entryDate: { $lte: asOf }
+      }
+    },
+    { $group: { _id: null, sum: { $sum: '$signedAmount' }, n: { $sum: 1 } } }
+  ]);
 
-  if (last) return roundMoney(last.balanceAfter);
+  if (agg?.n > 0) return roundMoney(agg.sum);
+
+  const anyLedger = await MoneyLedger.exists({ businessId: bid, branchId: brid, accountType });
+  if (anyLedger) return 0;
+
   return roundMoney(account.openingBalance || 0);
 }
 
@@ -226,7 +235,7 @@ export async function postLedgerEntry({
   entryDate = new Date(),
   createdBy = null,
   skipEnabledCheck = false,
-  skipBalanceCheck = false
+  skipBalanceCheck = true
 }) {
   if (!skipEnabledCheck && !(await isCashAndBankEnabled(businessId))) {
     return null;
@@ -257,36 +266,27 @@ export async function postLedgerEntry({
         Math.abs(new Date(existing.entryDate).getTime() - wantDate.getTime()) > 1000;
       const amountDrift = roundMoney(existing.amount) !== amt;
       if (dateDrift || amountDrift || (notes && notes !== existing.notes)) {
-        const prevSigned = Number(existing.signedAmount) || 0;
         const nextSigned = direction === 'IN' ? amt : -amt;
         existing.entryDate = wantDate;
         existing.amount = amt;
         existing.signedAmount = nextSigned;
         if (notes) existing.notes = notes;
-        // Adjust cached balance by the delta, then chronological rebuild can correct later
-        const bal = roundMoney((Number(account.currentBalance) || 0) - prevSigned + nextSigned);
-        existing.balanceAfter = Math.max(0, bal);
-        account.currentBalance = Math.max(0, bal);
         await existing.save();
-        await account.save();
-        return existing.toObject ? existing.toObject() : existing;
+        // Recompute full chain so day open/close stay continuous (balances may go negative)
+        await rebuildOneAccountBalancesChronological(account);
+        const refreshed = await MoneyLedger.findById(existing._id).lean();
+        return refreshed || existing.toObject();
       }
       return existing.toObject ? existing.toObject() : existing;
     }
   }
 
   const signed = direction === 'IN' ? amt : -amt;
+  // Provisional balance from cache; chronological rebuild below is source of truth.
+  // skipBalanceCheck kept for API compat — ledger is allowed to go negative.
+  void skipBalanceCheck;
   const prev = roundMoney(account.currentBalance || 0);
-  let next = roundMoney(prev + signed);
-  if (!skipBalanceCheck && next < -EPS) {
-    const err = new Error(
-      `Insufficient ${accountType === 'CASH' ? 'cash' : 'bank'} balance. Available: ${prev}`
-    );
-    err.status = 400;
-    throw err;
-  }
-  // Schema requires balanceAfter >= 0 (also used during historical backfill).
-  next = Math.max(0, next);
+  const next = roundMoney(prev + signed);
 
   const entry = await MoneyLedger.create({
     businessId: bid,
@@ -306,9 +306,9 @@ export async function postLedgerEntry({
     createdBy: createdBy || null
   });
 
-  account.currentBalance = next;
-  await account.save();
-  return entry.toObject ? entry.toObject() : entry;
+  await rebuildOneAccountBalancesChronological(account);
+  const refreshed = await MoneyLedger.findById(entry._id).lean();
+  return refreshed || (entry.toObject ? entry.toObject() : entry);
 }
 
 /** Remove auto-posted legs for a source and rebuild account cache from ledger. */
@@ -326,7 +326,16 @@ export async function reverseLedgerBySource(businessId, sourceType, sourceId, { 
     touched.set(`${r.branchId}:${r.accountType}`, { branchId: r.branchId, accountType: r.accountType });
   }
   for (const { branchId, accountType } of touched.values()) {
-    await rebuildAccountBalance(businessId, branchId, accountType);
+    const account = await MoneyAccount.findOne({
+      businessId: bid,
+      branchId: branchOid(branchId),
+      accountType
+    });
+    if (account) {
+      await rebuildOneAccountBalancesChronological(account);
+    } else {
+      await rebuildAccountBalance(businessId, branchId, accountType);
+    }
   }
   return rows.length;
 }
@@ -353,30 +362,45 @@ async function rebuildAccountBalance(businessId, branchId, accountType) {
 }
 
 /**
+ * Recompute running balances for one account in entryDate order.
+ * Does NOT floor at zero — closing of day D must equal opening of day D+1.
+ */
+export async function rebuildOneAccountBalancesChronological(account) {
+  if (!account) return 0;
+  const rows = await MoneyLedger.find({
+    businessId: account.businessId,
+    branchId: account.branchId,
+    accountType: account.accountType
+  })
+    .sort({ entryDate: 1, createdAt: 1 })
+    .select('_id signedAmount balanceAfter');
+
+  let bal = 0;
+  let changed = 0;
+  for (const row of rows) {
+    bal = roundMoney(bal + (Number(row.signedAmount) || 0));
+    if (roundMoney(row.balanceAfter) !== bal) {
+      await MoneyLedger.updateOne({ _id: row._id }, { $set: { balanceAfter: bal } });
+      changed += 1;
+    }
+  }
+  account.currentBalance = bal;
+  await account.save();
+  return changed;
+}
+
+/**
  * Recompute signed running balances in chronological order for every account.
- * Used after historical backfill so balanceAfter matches entry dates.
+ * Used after historical backfill / gap repair so balanceAfter matches entry dates.
+ * Balances may go negative so day books stay continuous.
  */
 export async function rebuildAccountBalancesChronological(businessId) {
   const accounts = await MoneyAccount.find({ businessId: bizOid(businessId) });
+  let changed = 0;
   for (const account of accounts) {
-    const rows = await MoneyLedger.find({
-      businessId: account.businessId,
-      branchId: account.branchId,
-      accountType: account.accountType
-    })
-      .sort({ entryDate: 1, createdAt: 1 })
-      .select('_id signedAmount balanceAfter');
-
-    let bal = 0;
-    for (const row of rows) {
-      bal = Math.max(0, roundMoney(bal + (Number(row.signedAmount) || 0)));
-      if (roundMoney(row.balanceAfter) !== bal) {
-        await MoneyLedger.updateOne({ _id: row._id }, { $set: { balanceAfter: bal } });
-      }
-    }
-    account.currentBalance = bal;
-    await account.save();
+    changed += await rebuildOneAccountBalancesChronological(account);
   }
+  return changed;
 }
 
 /**
@@ -617,7 +641,7 @@ export async function setOpeningBalance({
 
   for (const r of rest) {
     const signed = r.direction === 'IN' ? roundMoney(r.amount) : -roundMoney(r.amount);
-    bal = roundMoney(Math.max(0, bal + signed));
+    bal = roundMoney(bal + signed);
     await MoneyLedger.create({
       ...r,
       _id: undefined,
@@ -634,7 +658,35 @@ export async function setOpeningBalance({
 }
 
 /**
+ * Period opening for cash/bank books.
+ * = signed sum before start, plus any OPENING rows dated inside the period
+ * (so setting opening balance on day 1 does not create a day-gap).
+ */
+async function getPeriodOpening(businessId, branchId, accountType, startUtc, endUtc) {
+  const before = await getBalanceAsOf(
+    businessId,
+    branchId,
+    accountType,
+    new Date(new Date(startUtc).getTime() - 1)
+  );
+  const [agg] = await MoneyLedger.aggregate([
+    {
+      $match: {
+        businessId: bizOid(businessId),
+        branchId: branchOid(branchId),
+        accountType,
+        sourceType: 'OPENING',
+        entryDate: { $gte: startUtc, $lt: endUtc }
+      }
+    },
+    { $group: { _id: null, sum: { $sum: '$signedAmount' } } }
+  ]);
+  return roundMoney(before + (agg?.sum || 0));
+}
+
+/**
  * Cash / Bank book for a date range (one account).
+ * closing = opening + in − out; next day opening uses signed-sum continuity.
  */
 export async function getAccountBook({
   businessId,
@@ -644,12 +696,7 @@ export async function getAccountBook({
   endUtc
 }) {
   await ensureMoneyAccountsForBranch(businessId, branchId);
-  const opening = await getBalanceAsOf(
-    businessId,
-    branchId,
-    accountType,
-    new Date(new Date(startUtc).getTime() - 1)
-  );
+  const opening = await getPeriodOpening(businessId, branchId, accountType, startUtc, endUtc);
 
   const movements = await MoneyLedger.find({
     businessId: bizOid(businessId),
@@ -712,12 +759,7 @@ export async function getAccountBook({
  * Period in/out totals without loading every ledger row (fast for all-branches summary).
  */
 export async function getAccountPeriodTotals({ businessId, branchId, accountType, startUtc, endUtc }) {
-  const opening = await getBalanceAsOf(
-    businessId,
-    branchId,
-    accountType,
-    new Date(new Date(startUtc).getTime() - 1)
-  );
+  const opening = await getPeriodOpening(businessId, branchId, accountType, startUtc, endUtc);
   const [agg] = await MoneyLedger.aggregate([
     {
       $match: {

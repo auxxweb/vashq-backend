@@ -2,11 +2,12 @@ export const DEFAULT_WHATSAPP_TEMPLATES = {
   received:
     'Hello {{name}}, your vehicle {{vehicleNumber}} has been received. Token: {{token}}\n\nBefore photos: {{beforeImagesLink}}',
   workStarted: 'Your car {{vehicleNumber}} – work is in progress.',
-  completed: '✅ Your vehicle {{vehicleNumber}} is ready for delivery. Token: {{token}}',
+  completed:
+    '✅ Your vehicle {{vehicleNumber}} is ready for delivery. Token: {{token}}.{{pendingNote}}\n\nView & pay invoice: {{invoiceLink}}',
   delivered:
     '🚗 Thank you! Your vehicle {{vehicleNumber}} has been delivered. Job completed.\n\nBefore photos: {{beforeImagesLink}}\nAfter photos: {{afterImagesLink}}',
   invoiceShare:
-    'Hello {{name}}, your vehicle service is completed. Total: {{total}} {{currency}}. View & download invoice (PDF): {{invoiceLink}} Thank you!',
+    'Hello {{name}}, your vehicle service is completed. Total: {{total}} {{currency}}.{{pendingNote}} View & download invoice (PDF): {{invoiceLink}} Thank you!',
   invoicePackage:
     'Hello {{name}}, your package purchase is ready. Total: {{total}} {{currency}}. Package: {{packageName}}. View & download invoice (PDF): {{invoiceLink}} Thank you!',
   googleReview: 'Thank you for choosing us 🙏\nPlease leave us a Google review: {{reviewLink}}',
@@ -24,6 +25,16 @@ export function normalizeWhatsappTemplates(stored) {
   const merged = { ...DEFAULT_WHATSAPP_TEMPLATES, ...raw }
   if (!String(merged.workStarted || '').trim() && String(merged.inProgress || '').trim()) {
     merged.workStarted = merged.inProgress
+  }
+  // Upgrade uncustomized completed / invoiceShare defaults to include invoice link + pending amount.
+  const legacyCompleted = '✅ Your vehicle {{vehicleNumber}} is ready for delivery. Token: {{token}}'
+  if (String(merged.completed || '').trim() === legacyCompleted) {
+    merged.completed = DEFAULT_WHATSAPP_TEMPLATES.completed
+  }
+  const legacyInvoiceShare =
+    'Hello {{name}}, your vehicle service is completed. Total: {{total}} {{currency}}. View & download invoice (PDF): {{invoiceLink}} Thank you!'
+  if (String(merged.invoiceShare || '').trim() === legacyInvoiceShare) {
+    merged.invoiceShare = DEFAULT_WHATSAPP_TEMPLATES.invoiceShare
   }
   return merged
 }

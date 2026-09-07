@@ -254,7 +254,7 @@ export async function stockSnapshotAsOf(businessId, asOf, { serviceIds = null } 
   });
 }
 
-/** Purchases total (subtotal) in period. */
+/** Purchases total (net goods after discount) in period. */
 export async function purchasesTotalInPeriod(businessId, start, endExclusive) {
   const Purchase = (await import('../models/Purchase.model.js')).default;
   const agg = await Purchase.aggregate([
@@ -265,7 +265,24 @@ export async function purchasesTotalInPeriod(businessId, start, endExclusive) {
         purchaseDate: { $gte: start, $lt: endExclusive }
       }
     },
-    { $group: { _id: null, total: { $sum: '$subtotal' } } }
+    {
+      $group: {
+        _id: null,
+        total: {
+          $sum: {
+            $ifNull: [
+              '$netGoodsAmount',
+              {
+                $subtract: [
+                  { $ifNull: ['$subtotal', 0] },
+                  { $ifNull: ['$discountAmount', 0] }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
   ]);
   return roundMoney(agg[0]?.total ?? 0);
 }

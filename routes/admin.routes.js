@@ -118,7 +118,7 @@ import {
 } from '../utils/customer.utils.js';
 import creditRoutes from './credit.routes.js';
 import { isCreditSettlementMode, closeJobOnCredit } from '../services/credit/creditInvoiceService.js';
-import { aggregateOutstandingByCustomer, sumCustomerOutstanding } from '../services/credit/outstandingService.js';
+import { aggregateOutstandingByCustomer, sumCustomerOutstanding, computeOutstanding } from '../services/credit/outstandingService.js';
 import { buildCollectionReport, buildOutstandingReport, getCreditDashboardStats, getTodayCashReceived } from '../services/credit/creditReportsService.js';
 import {
   getInvoiceCompanySnapshot,
@@ -140,7 +140,7 @@ import { ensureDefaultBranchForBusiness, getBranchOverviewStats, getBranchUsageS
 import { getBranchPlatformConfig } from '../utils/branchConfig.js';
 import { applyBranchScopeOid, applyBranchScope } from '../utils/branchQuery.js';
 import { scopedFilter, assertBranchAccess, assertInvoiceCheckoutAccess, findScoped, branchIdForCreate, jobAccessFilter } from '../utils/branchAccess.js';
-import { resolveJobAssignees, attachServiceLineAssignees, applyEmployeeJobScope, toIdString, isEmployeeAssignedToJob, employeeAssignedMatch } from '../utils/jobAssignment.js';
+import { resolveJobAssignees, attachServiceLineAssignees, applyEmployeeJobAccess, toIdString, isEmployeeAssignedToJob, employeeAssignedMatch } from '../utils/jobAssignment.js';
 import { isAdminPanelRole, isBranchAdmin, isBusinessOwner, isSalesEmployee } from '../utils/adminRoles.js';
 import { adminPanelOnly } from '../middleware/adminPanel.middleware.js';
 import { generateEmployeeCode } from '../utils/employeeAccount.js';
@@ -348,7 +348,7 @@ router.post('/upload/images', (req, res, next) => {
     }
     const isEmployee = req.user.role === 'EMPLOYEE';
     const rawFolder = String(req.body.folder || '').trim().toLowerCase();
-    const folderKey = ['after', 'expenses', 'other-revenues', 'payment', 'logos', 'employees'].includes(rawFolder)
+    const folderKey = ['after', 'expenses', 'other-revenues', 'payment', 'logos', 'employees', 'purchases'].includes(rawFolder)
       ? rawFolder
       : 'before';
     if (isEmployee && (folderKey === 'payment' || folderKey === 'employees')) {
@@ -372,7 +372,8 @@ router.post('/upload/images', (req, res, next) => {
           : folderKey === 'payment' ? 'washq/payment'
             : folderKey === 'logos' ? 'washq/logos'
               : folderKey === 'employees' ? 'washq/employees'
-                : 'washq/jobs/before';
+                : folderKey === 'purchases' ? 'washq/purchases'
+                  : 'washq/jobs/before';
     const urls = [];
     for (const file of req.files) {
       const { url } = await uploadBuffer(file.buffer, file.mimetype, folder);
@@ -1828,14 +1829,8 @@ router.get('/invoices/:id/share-url', async (req, res) => {
       !!invoice.saleConfirmedAt &&
       (!invoice.jobId || job?.status === 'DELIVERED');
 
-    // Optional early invoice: share while job is COMPLETED (payment may still be pending).
-    let earlyCompletedShare = false;
-    if (!paidAndClosed && !creditSaleClosed && job?.status === 'COMPLETED') {
-      const settings = await BusinessSettings.findOne({ businessId: req.businessId })
-        .select('invoiceOnCompletedEnabled')
-        .lean();
-      earlyCompletedShare = !!settings?.invoiceOnCompletedEnabled;
-    }
+    // Early invoice share while job is COMPLETED (payment may still be pending).
+    const earlyCompletedShare = !paidAndClosed && !creditSaleClosed && job?.status === 'COMPLETED';
 
     if (!paidAndClosed && !creditSaleClosed && !earlyCompletedShare) {
       return res.status(400).json({
@@ -1844,7 +1839,7 @@ router.get('/invoices/:id/share-url', async (req, res) => {
       });
     }
 
-    const outstanding = Math.max(0, Number(invoice.outstandingAmount) || 0);
+    const outstanding = computeOutstanding(invoice);
     const paymentPending =
       invoice.paymentStatus !== 'RECEIVED' ||
       (invoice.settlementMode === 'CREDIT' && outstanding > 0.02);
@@ -2772,7 +2767,7 @@ router.get('/dashboard', async (req, res) => {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
     const baseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
-    if (isEmployee) applyEmployeeJobScope(baseMatch, req.user._id);
+    await applyEmployeeJobAccess(req, baseMatch);
 
     const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
     const expenseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
@@ -2874,7 +2869,7 @@ router.get('/dashboard/charts', async (req, res) => {
     const businessId = req.businessId;
     const isEmployee = req.user.role === 'EMPLOYEE';
     const baseMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
-    if (isEmployee) applyEmployeeJobScope(baseMatch, req.user._id);
+    await applyEmployeeJobAccess(req, baseMatch);
 
     const scopedBranchId = req.branchScope === 'branch' && req.branchId ? req.branchId : null;
     const invoiceMatch = applyBranchScopeOid({ businessId: new mongoose.Types.ObjectId(businessId) }, req);
@@ -5120,7 +5115,7 @@ router.delete('/services/:id', adminPanelOnly, async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.get('/jobs/:id', async (req, res) => {
   try {
-    const filter = jobAccessFilter(req, { _id: req.params.id });
+    const filter = await jobAccessFilter(req, { _id: req.params.id });
     const job = await Job.findOne(filter)
       .populate('customerId', 'name phone whatsappNumber')
       .populate('carId', 'carNumber brand model color')
@@ -5175,10 +5170,8 @@ router.get('/jobs', async (req, res) => {
   try {
     const { status, page = 1, limit = 20, search, from, to, range } = req.query;
     const query = { ...branchFilter(req) };
-    // Employee sees only jobs assigned to them (single or multi)
-    if (req.user.role === 'EMPLOYEE') {
-      applyEmployeeJobScope(query, req.user._id);
-    }
+    // Employee: created/assigned only, unless Settings → employee full job access is on (then branch/shop-wide)
+    await applyEmployeeJobAccess(req, query);
     if (status && status !== 'ALL') {
       query.status = status;
     }
@@ -5578,6 +5571,7 @@ router.post('/jobs', [
           notes,
           assignedTo,
           assignedToUsers,
+          createdBy: req.user?._id || null,
           customerPackageId: customerPackageId || null,
           services: serviceLinesWithAssignees,
           ...(directBill
@@ -5752,7 +5746,7 @@ router.post('/jobs', [
 // @access  Private
 router.get('/jobs/:id/quality-checklist', async (req, res) => {
   try {
-    const jobFilter = jobAccessFilter(req, { _id: req.params.id });
+    const jobFilter = await jobAccessFilter(req, { _id: req.params.id });
     const job = await Job.findOne(jobFilter).select('services status directBill businessId branchId').lean();
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found' });
@@ -5805,7 +5799,7 @@ router.patch('/jobs/:id/status', [
 
     const { status, notes, afterImages } = req.body;
 
-    const jobFilter = jobAccessFilter(req, { _id: req.params.id });
+    const jobFilter = await jobAccessFilter(req, { _id: req.params.id });
     const job = await Job.findOne(jobFilter).populate('customerId', 'name whatsappNumber phone').populate('carId', 'carNumber');
 
     if (!job) {
@@ -6021,7 +6015,7 @@ router.put('/jobs/:id', [
       return res.status(400).json({ success: false, message: firstMsg, errors: errList });
     }
 
-    const job = await Job.findOne(jobAccessFilter(req, { _id: req.params.id }));
+    const job = await Job.findOne(await jobAccessFilter(req, { _id: req.params.id }));
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found' });
     }
@@ -6229,7 +6223,7 @@ router.delete('/jobs/:id', auditSensitive('JOB_DELETE', {
       });
     }
 
-    const job = await Job.findOne(jobAccessFilter(req, { _id: req.params.id }));
+    const job = await Job.findOne(await jobAccessFilter(req, { _id: req.params.id }));
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found' });
     }
@@ -6675,6 +6669,7 @@ router.put('/settings', [
   body('attendancePerimeterMeters').optional({ nullable: true }).isFloat({ min: 1, max: 100000 }),
   body('internationalPhoneEnabled').optional().isBoolean(),
   body('multiEmployeeAssignEnabled').optional().isBoolean(),
+  body('employeeFullJobAccess').optional().isBoolean(),
   body('perServiceEmployeeAssignEnabled').optional().isBoolean(),
   body('customJobTokenEnabled').optional().isBoolean(),
   body('jobTokenSettings').optional().isObject(),
@@ -6798,6 +6793,9 @@ router.put('/settings', [
     }
     if (req.body.multiEmployeeAssignEnabled !== undefined) {
       updateFields.multiEmployeeAssignEnabled = !!req.body.multiEmployeeAssignEnabled;
+    }
+    if (req.body.employeeFullJobAccess !== undefined) {
+      updateFields.employeeFullJobAccess = !!req.body.employeeFullJobAccess;
     }
     if (req.body.perServiceEmployeeAssignEnabled !== undefined) {
       updateFields.perServiceEmployeeAssignEnabled = !!req.body.perServiceEmployeeAssignEnabled;
@@ -7266,11 +7264,9 @@ router.post('/upgrade-request', [
 
 async function loadJobInvoiceForSettlementRequest(req, jobId) {
   const jobFilter = { _id: jobId, businessId: req.businessId, status: 'DELIVERED' };
-  if (req.user.role === 'EMPLOYEE') {
-    applyEmployeeJobScope(jobFilter, req.user._id);
-  }
+  await applyEmployeeJobAccess(req, jobFilter);
   const job = await Job.findOne(jobFilter);
-  if (!job) return { error: { status: 404, message: 'Delivered job not found or not assigned to you' } };
+  if (!job) return { error: { status: 404, message: 'Delivered job not found or not accessible' } };
 
   const invoice = await Invoice.findOne({
     businessId: req.businessId,

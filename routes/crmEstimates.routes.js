@@ -743,6 +743,7 @@ router.post('/estimates/:id/convert-job', async (req, res) => {
           beforeImages: createWithoutImages ? [] : beforeImages,
           notes: overrides.notes || `CRM estimate: ${estimate.estimateNumber}`,
           assignedTo: overrides.assignedTo || null,
+          createdBy: req.user?._id || null,
           services: lines,
           statusHistory: [{ status: 'RECEIVED', changedAt: new Date() }]
         });

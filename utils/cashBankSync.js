@@ -27,7 +27,7 @@ export async function syncMoneyBookFromChannels({
   createdBy = null,
   expenseOut = false,
   throwOnError = false,
-  skipBalanceCheck = false,
+  skipBalanceCheck = true,
   rebuildBalances = false
 }) {
   try {
@@ -160,6 +160,23 @@ export async function syncMoneyBookFromExpense(expense, { createdBy = null, ...o
     sourceId: expense._id,
     entryDate: expense.expenseDate || expense.createdAt || new Date(),
     notes: 'Expense',
+    createdBy,
+    expenseOut: true,
+    ...opts
+  });
+}
+
+export async function syncMoneyBookFromPurchase(purchase, { createdBy = null, ...opts } = {}) {
+  if (!purchase?._id) return;
+  await syncMoneyBookFromChannels({
+    businessId: purchase.businessId,
+    branchId: safeBranchId(purchase),
+    cashAmount: Number(purchase.paymentCashAmount) || 0,
+    onlineAmount: Number(purchase.paymentOnlineAmount) || 0,
+    sourceType: 'PURCHASE',
+    sourceId: purchase._id,
+    entryDate: purchase.purchaseDate || purchase.createdAt || new Date(),
+    notes: `Purchase ${purchase.billNumber || ''}`.trim() || 'Purchase',
     createdBy,
     expenseOut: true,
     ...opts

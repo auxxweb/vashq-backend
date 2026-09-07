@@ -182,6 +182,12 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   multiEmployeeAssignEnabled: { type: Boolean, default: false },
   /**
+   * When true, employees can see and work on all jobs in their branch
+   * (or all shop jobs when multi-branch is off / single branch).
+   * When false (default), employees only see jobs they created or are assigned to.
+   */
+  employeeFullJobAccess: { type: Boolean, default: false },
+  /**
    * When true, Create Job can assign one or more job-level employees to each selected service
    * (subset of the job's assignees) so work can be attributed per service.
    * Off by default.

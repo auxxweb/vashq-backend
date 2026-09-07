@@ -84,6 +84,7 @@ export async function createInvoiceForJobRecord({
     companyGst: company?.gstNumber,
     subtotal: subtotalRounded
   });
+  const due = roundMoney(Math.max(0, (Number(gstFields.finalAmount) || 0) - advanceFromJob));
 
   return Invoice.create({
     jobId: job._id,
@@ -109,6 +110,7 @@ export async function createInvoiceForJobRecord({
     gstAmount: gstFields.gstAmount,
     finalAmount: gstFields.finalAmount,
     advancePayment: advanceFromJob,
+    outstandingAmount: due,
     paymentMethod: 'ONLINE',
     paymentCashAmount: 0,
     paymentOnlineAmount: 0,

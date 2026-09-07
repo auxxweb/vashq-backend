@@ -36,11 +36,10 @@ const moneyAccountSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
-  /** Cached running balance (updated on each ledger post). */
+  /** Cached running balance (updated on each ledger post). May be negative. */
   currentBalance: {
     type: Number,
-    default: 0,
-    min: 0
+    default: 0
   },
   isActive: {
     type: Boolean,

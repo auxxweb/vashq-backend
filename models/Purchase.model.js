@@ -76,6 +76,41 @@ const purchaseSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  /** Discount received from supplier. */
+  discountType: {
+    type: String,
+    enum: ['amount', 'percent'],
+    default: 'amount'
+  },
+  discountValue: { type: Number, default: 0, min: 0 },
+  discountAmount: { type: Number, default: 0, min: 0 },
+  /** Goods cost after discount (before tax). Used for inventory / P&L purchases. */
+  netGoodsAmount: { type: Number, default: 0, min: 0 },
+  taxMode: {
+    type: String,
+    enum: ['none', 'included', 'excluded'],
+    default: 'none'
+  },
+  taxPercent: { type: Number, default: 0, min: 0 },
+  taxAmount: { type: Number, default: 0, min: 0 },
+  /**
+   * Extra bill costs (courier, packing, etc.).
+   * before_tax = in GST base; after_tax = outside GST (common for courier).
+   */
+  additionalCharges: { type: Number, default: 0, min: 0 },
+  additionalChargesMode: {
+    type: String,
+    enum: ['before_tax', 'after_tax'],
+    default: 'after_tax'
+  },
+  /** Payable total (after discount + tax + additional charges). Used for settlement / Cash & Bank. */
+  grandTotal: { type: Number, default: 0, min: 0 },
+  /** Optional scanned bill / receipt image URL. */
+  billImage: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   /**
    * FULL = paid in full when purchase is recorded.
    * CREDIT = pay later / partial — outstanding is payable to supplier.
