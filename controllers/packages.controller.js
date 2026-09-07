@@ -695,7 +695,10 @@ export async function closePackageSale(req, res) {
     invalidateDashboardForBusiness(req.businessId);
     try {
       const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
-      await syncMoneyBookFromInvoice(invoice, { createdBy: req.user._id });
+      await syncMoneyBookFromInvoice(invoice, {
+        createdBy: req.user._id,
+        rebuildBalances: true
+      });
     } catch (_) {}
 
     res.json({ success: true, invoice, message: 'Package marked paid' });

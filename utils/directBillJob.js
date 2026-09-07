@@ -243,7 +243,7 @@ export async function settleDirectBillInvoice(invoice, job, businessId, paymentB
 
   try {
     const { syncMoneyBookFromInvoice } = await import('./cashBankSync.js');
-    await syncMoneyBookFromInvoice(invoice, { createdBy: null });
+    await syncMoneyBookFromInvoice(invoice, { createdBy: null, rebuildBalances: true });
   } catch (_) {}
 
   await applyLoyaltySettlementForJob(businessId, job.customerId, job.services, invoice, { earnPoints: true });

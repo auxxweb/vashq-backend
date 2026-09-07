@@ -1,8 +1,13 @@
 /**
  * Cash & Bank ledger posts.
- * Default: fire-and-forget (never throws) for checkout/create paths.
- * Pass throwOnError: true for date realignment so callers cannot silently desync.
+ *
+ * On every create/edit of invoices, purchases, expenses, other revenue, collections,
+ * or job advances: reverse old legs → post current amounts/dates → rebuild balances.
+ * Day open/close stays continuous (balances may go negative).
  */
+import mongoose from 'mongoose';
+import Branch from '../models/Branch.model.js';
+import MoneyLedger from '../models/MoneyLedger.model.js';
 import {
   isCashAndBankEnabled,
   postPaymentChannels,
@@ -11,10 +16,66 @@ import {
 } from '../services/moneyBookService.js';
 import { roundMoney } from './invoicePayment.js';
 
+const EPS = 0.02;
+
 function safeBranchId(doc) {
   return doc?.branchId?._id || doc?.branchId || null;
 }
 
+function bizOid(id) {
+  return new mongoose.Types.ObjectId(String(id));
+}
+
+async function resolveBranchId(businessId, branchId) {
+  if (branchId) return branchId;
+  const def = await Branch.findOne({ businessId: bizOid(businessId), status: 'ACTIVE', isDefault: true })
+    .select('_id')
+    .lean();
+  if (def?._id) return def._id;
+  const any = await Branch.findOne({ businessId: bizOid(businessId), status: 'ACTIVE' })
+    .select('_id')
+    .sort({ createdAt: 1 })
+    .lean();
+  return any?._id || null;
+}
+
+/** True when ledger cash/bank rows match expected amounts and calendar entryDate. */
+async function ledgerMatchesSource({
+  businessId,
+  sourceType,
+  sourceId,
+  cashAmount,
+  onlineAmount,
+  entryDate
+}) {
+  const rows = await MoneyLedger.find({
+    businessId: bizOid(businessId),
+    sourceType,
+    sourceId
+  }).lean();
+
+  const cashWant = roundMoney(cashAmount);
+  const onlineWant = roundMoney(onlineAmount);
+  const wantMs = entryDate ? new Date(entryDate).getTime() : null;
+
+  const checkLeg = (want, row) => {
+    if (want <= EPS) return !row;
+    if (!row) return false;
+    if (Math.abs(roundMoney(row.amount) - want) > 0.05) return false;
+    if (wantMs != null && Math.abs(new Date(row.entryDate).getTime() - wantMs) > 1000) return false;
+    return true;
+  };
+
+  return (
+    checkLeg(cashWant, rows.find((r) => r.accountType === 'CASH')) &&
+    checkLeg(onlineWant, rows.find((r) => r.accountType === 'BANK'))
+  );
+}
+
+/**
+ * Canonical sync: reverse prior legs for this source, post current cash/online,
+ * rebuild chronological balances, then verify (retry once if needed).
+ */
 export async function syncMoneyBookFromChannels({
   businessId,
   branchId,
@@ -28,40 +89,73 @@ export async function syncMoneyBookFromChannels({
   expenseOut = false,
   throwOnError = false,
   skipBalanceCheck = true,
-  rebuildBalances = false
+  rebuildBalances = true
 }) {
   try {
     if (!businessId || !sourceId) return;
     if (!(await isCashAndBankEnabled(businessId))) return;
-    const brid = branchId || null;
-    if (!brid) return;
-
-    const cash = roundMoney(cashAmount);
-    const online = roundMoney(onlineAmount);
-    if (cash <= 0.02 && online <= 0.02) {
-      await reverseLedgerBySource(businessId, sourceType, sourceId);
-      if (rebuildBalances) {
-        await rebuildAccountBalancesChronological(businessId);
-      }
+    const brid = await resolveBranchId(businessId, branchId || null);
+    if (!brid) {
+      console.warn('Cash & Bank sync skipped — no branch for business', String(businessId));
       return;
     }
 
-    await postPaymentChannels({
-      businessId,
-      branchId: brid,
-      cashAmount: cash,
-      onlineAmount: online,
-      sourceType,
-      sourceId,
-      entryDate,
-      notes,
-      createdBy,
-      expenseOut,
-      skipBalanceCheck
-    });
+    const cash = roundMoney(cashAmount);
+    const online = roundMoney(onlineAmount);
+    const when = entryDate ? new Date(entryDate) : new Date();
+    const deferBalanceRebuild = !rebuildBalances;
 
+    const runOnce = async () => {
+      await reverseLedgerBySource(businessId, sourceType, sourceId, {
+        skipEnabledCheck: true,
+        deferBalanceRebuild
+      });
+
+      if (cash > EPS || online > EPS) {
+        await postPaymentChannels({
+          businessId,
+          branchId: brid,
+          cashAmount: cash,
+          onlineAmount: online,
+          sourceType,
+          sourceId,
+          entryDate: when,
+          notes,
+          createdBy,
+          expenseOut,
+          skipEnabledCheck: true,
+          skipBalanceCheck,
+          skipReverse: true,
+          deferBalanceRebuild
+        });
+      }
+
+      if (rebuildBalances) {
+        await rebuildAccountBalancesChronological(businessId);
+      }
+    };
+
+    await runOnce();
+
+    // Verify only on interactive syncs (immediate rebuild). Bulk realign verifies after final rebuild.
     if (rebuildBalances) {
-      await rebuildAccountBalancesChronological(businessId);
+      const aligned = await ledgerMatchesSource({
+        businessId,
+        sourceType,
+        sourceId,
+        cashAmount: cash,
+        onlineAmount: online,
+        entryDate: when
+      });
+      if (!aligned) {
+        console.warn('Cash & Bank ledger misaligned after sync — retrying', {
+          sourceType,
+          sourceId: String(sourceId),
+          cash,
+          online
+        });
+        await runOnce();
+      }
     }
   } catch (err) {
     console.error('Cash & Bank sync error:', err?.message || err);
@@ -71,7 +165,6 @@ export async function syncMoneyBookFromChannels({
 
 export async function syncMoneyBookFromInvoice(invoice, { createdBy = null, ...opts } = {}) {
   if (!invoice?._id) return;
-  // Always derive from post-discount finalAmount − advance (never subtotal / stale overpay).
   const { invoiceSettlementCashOnline } = await import('./paymentChannelAmounts.js');
   let cash = 0;
   let online = 0;
@@ -80,11 +173,9 @@ export async function syncMoneyBookFromInvoice(invoice, { createdBy = null, ...o
     cash = ch.cash;
     online = ch.online;
   } else {
-    // Credit / open: only post what was collected at checkout (already capped by callers).
     cash = Number(invoice.paymentCashAmount) || 0;
     online = Number(invoice.paymentOnlineAmount) || 0;
   }
-  // Advances are posted separately as JOB_ADVANCE; settlement is checkout only.
   await syncMoneyBookFromChannels({
     businessId: invoice.businessId,
     branchId: safeBranchId(invoice),
@@ -92,7 +183,7 @@ export async function syncMoneyBookFromInvoice(invoice, { createdBy = null, ...o
     onlineAmount: online,
     sourceType: 'INVOICE',
     sourceId: invoice._id,
-    entryDate: invoice.paymentReceivedAt || invoice.saleConfirmedAt || new Date(),
+    entryDate: invoice.paymentReceivedAt || invoice.saleConfirmedAt || invoice.updatedAt || new Date(),
     notes: `Invoice ${invoice.invoiceNumber || ''}`.trim(),
     createdBy,
     expenseOut: false,
@@ -100,10 +191,6 @@ export async function syncMoneyBookFromInvoice(invoice, { createdBy = null, ...o
   });
 }
 
-/**
- * Force ledger entryDate to match invoice payment date (settlement date edits).
- * Throws when Cash & Bank is enabled and re-post fails — prevents silent desync.
- */
 export async function realignInvoiceLedgerToPaymentDate(invoice, { createdBy = null } = {}) {
   if (!invoice?._id) return;
   if (!(await isCashAndBankEnabled(invoice.businessId))) return;
@@ -120,7 +207,12 @@ export async function syncMoneyBookFromJobAdvance(job, { createdBy = null, ...op
   if (!job?._id) return;
   const adv = Number(job.advancePayment) || 0;
   if (adv <= 0.02) {
-    await reverseLedgerBySource(job.businessId, 'JOB_ADVANCE', job._id).catch(() => {});
+    await reverseLedgerBySource(job.businessId, 'JOB_ADVANCE', job._id, {
+      deferBalanceRebuild: opts.rebuildBalances === false
+    }).catch(() => {});
+    if (opts.rebuildBalances !== false) {
+      await rebuildAccountBalancesChronological(job.businessId).catch(() => {});
+    }
     return;
   }
   let cash = Number(job.advanceCashAmount);
@@ -128,7 +220,7 @@ export async function syncMoneyBookFromJobAdvance(job, { createdBy = null, ...op
   const method = String(job.advancePaymentMethod || 'CASH').toUpperCase();
   if (!Number.isFinite(cash) || !Number.isFinite(online) || cash + online < 0.01) {
     cash = method === 'ONLINE' ? 0 : adv;
-    online = method === 'ONLINE' ? adv : (method === 'SPLIT' ? 0 : 0);
+    online = method === 'ONLINE' ? adv : 0;
     if (method === 'SPLIT') {
       cash = adv;
       online = 0;
@@ -215,4 +307,79 @@ export async function syncMoneyBookFromCollection(collection, { createdBy = null
     expenseOut: false,
     ...opts
   });
+}
+
+/**
+ * Full business realign: re-post every money source then rebuild balances.
+ * Safe to run after bulk edits or when day books look wrong.
+ */
+export async function realignBusinessMoneyBook(businessId, { createdBy = null } = {}) {
+  if (!(await isCashAndBankEnabled(businessId))) {
+    return { skipped: true };
+  }
+  const bid = bizOid(businessId);
+  const Invoice = (await import('../models/Invoice.model.js')).default;
+  const Expense = (await import('../models/Expense.model.js')).default;
+  const Purchase = (await import('../models/Purchase.model.js')).default;
+  const OtherRevenue = (await import('../models/OtherRevenue.model.js')).default;
+  const PaymentCollection = (await import('../models/PaymentCollection.model.js')).default;
+  const Job = (await import('../models/Job.model.js')).default;
+
+  const counts = {
+    invoices: 0,
+    expenses: 0,
+    purchases: 0,
+    otherRevenue: 0,
+    collections: 0,
+    advances: 0
+  };
+
+  const invoices = await Invoice.find({
+    businessId: bid,
+    $or: [
+      { paymentStatus: 'RECEIVED' },
+      { paymentCashAmount: { $gt: EPS } },
+      { paymentOnlineAmount: { $gt: EPS } }
+    ]
+  });
+  for (const inv of invoices) {
+    await syncMoneyBookFromInvoice(inv, { createdBy, rebuildBalances: false, throwOnError: false });
+    counts.invoices += 1;
+  }
+
+  const expenses = await Expense.find({ businessId: bid });
+  for (const exp of expenses) {
+    await syncMoneyBookFromExpense(exp, { createdBy, rebuildBalances: false, throwOnError: false });
+    counts.expenses += 1;
+  }
+
+  const purchases = await Purchase.find({ businessId: bid });
+  for (const p of purchases) {
+    await syncMoneyBookFromPurchase(p, { createdBy, rebuildBalances: false, throwOnError: false });
+    counts.purchases += 1;
+  }
+
+  const ors = await OtherRevenue.find({ businessId: bid });
+  for (const row of ors) {
+    await syncMoneyBookFromOtherRevenue(row, { createdBy, rebuildBalances: false, throwOnError: false });
+    counts.otherRevenue += 1;
+  }
+
+  const cols = await PaymentCollection.find({ businessId: bid });
+  for (const c of cols) {
+    await syncMoneyBookFromCollection(c, { createdBy, branchId: c.branchId, rebuildBalances: false });
+    counts.collections += 1;
+  }
+
+  const jobs = await Job.find({
+    businessId: bid,
+    advancePayment: { $gt: EPS }
+  }).select('_id businessId branchId advancePayment advanceCashAmount advanceOnlineAmount advancePaymentMethod createdAt tokenNumber');
+  for (const job of jobs) {
+    await syncMoneyBookFromJobAdvance(job, { createdBy, rebuildBalances: false });
+    counts.advances += 1;
+  }
+
+  await rebuildAccountBalancesChronological(businessId);
+  return { skipped: false, ...counts };
 }

@@ -1073,8 +1073,15 @@ router.post('/expenses', [
       created.push(exp);
       try {
         const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
-        await syncMoneyBookFromExpense(exp, { createdBy: req.user._id });
-      } catch (_) {}
+        await syncMoneyBookFromExpense(exp, {
+          createdBy: req.user._id,
+          throwOnError: true,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Expense create Cash & Bank sync error:', syncErr?.message || syncErr);
+      }
     }
     res.status(201).json({ success: true, expenses: created });
   } catch (error) {
@@ -1168,20 +1175,17 @@ router.put('/expenses/:id', [
     await expense.populate('expenseTypeId', 'expenseName');
     try {
       const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
-      const dateChanged = req.body.expenseDate != null;
       await syncMoneyBookFromExpense(expense, {
         createdBy: req.user._id,
-        ...(dateChanged
-          ? { throwOnError: true, skipBalanceCheck: true, rebuildBalances: true }
-          : {})
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
       });
     } catch (syncErr) {
-      if (req.body.expenseDate != null) {
-        return res.status(500).json({
-          success: false,
-          message: syncErr.message || 'Expense saved but Cash & Bank could not be updated'
-        });
-      }
+      return res.status(500).json({
+        success: false,
+        message: syncErr.message || 'Expense saved but Cash & Bank could not be updated'
+      });
     }
     res.json({ success: true, expense });
   } catch (error) {
@@ -1220,8 +1224,18 @@ router.post('/expenses/:id/pay', [
     await expense.populate('expenseTypeId', 'expenseName');
     try {
       const { syncMoneyBookFromExpense } = await import('../utils/cashBankSync.js');
-      await syncMoneyBookFromExpense(expense, { createdBy: req.user._id });
-    } catch (_) {}
+      await syncMoneyBookFromExpense(expense, {
+        createdBy: req.user._id,
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
+    } catch (syncErr) {
+      return res.status(500).json({
+        success: false,
+        message: syncErr.message || 'Payment saved but Cash & Bank could not be updated'
+      });
+    }
     res.json({ success: true, expense });
   } catch (error) {
     console.error('Pay expense payable error:', error);
@@ -1242,6 +1256,8 @@ router.delete('/expenses/:id', async (req, res) => {
     try {
       const { reverseLedgerBySource } = await import('../services/moneyBookService.js');
       await reverseLedgerBySource(req.businessId, 'EXPENSE', expense._id);
+      const { rebuildAccountBalancesChronological } = await import('../services/moneyBookService.js');
+      await rebuildAccountBalancesChronological(req.businessId);
     } catch (_) {}
     res.json({ success: true, message: 'Expense deleted' });
   } catch (error) {
@@ -1612,35 +1628,21 @@ router.put('/invoices/:id', [
 
     await invoice.save();
 
-    // Keep Cash & Bank in sync with post-discount settlement (final − advance)
-    const shouldResyncMoneyBook =
-      invoice.paymentStatus === 'RECEIVED' &&
-      (isLocked ||
-        req.body.paymentMethod !== undefined ||
-        req.body.onlinePaymentMode !== undefined ||
-        req.body.discount !== undefined ||
-        req.body.discountType !== undefined ||
-        req.body.discountAmount !== undefined ||
-        req.body.finalAmount !== undefined ||
-        req.body.items !== undefined ||
-        req.body.paymentCashAmount !== undefined ||
-        req.body.paymentOnlineAmount !== undefined);
-    if (shouldResyncMoneyBook) {
-      try {
-        const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
-        await syncMoneyBookFromInvoice(invoice, {
-          createdBy: req.user._id,
-          throwOnError: true,
-          skipBalanceCheck: true,
-          rebuildBalances: true
-        });
-      } catch (syncErr) {
-        console.error('Invoice update Cash & Bank sync error:', syncErr?.message || syncErr);
-        return res.status(500).json({
-          success: false,
-          message: syncErr?.message || 'Invoice saved but Cash & Bank could not be updated'
-        });
-      }
+    // Keep Cash & Bank in sync on every invoice edit (amount, method, or payment date).
+    try {
+      const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromInvoice(invoice, {
+        createdBy: req.user._id,
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
+    } catch (syncErr) {
+      console.error('Invoice update Cash & Bank sync error:', syncErr?.message || syncErr);
+      return res.status(500).json({
+        success: false,
+        message: syncErr?.message || 'Invoice saved but Cash & Bank could not be updated'
+      });
     }
 
     const updated = await Invoice.findById(invoice._id)
@@ -2004,7 +2006,12 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
     invalidateDashboardForBusiness(req.businessId);
     try {
       const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
-      await syncMoneyBookFromInvoice(invoice, { createdBy: req.user._id });
+      await syncMoneyBookFromInvoice(invoice, {
+        createdBy: req.user._id,
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
     } catch (_) {}
     await Job.findOneAndUpdate(
       { _id: invoice.jobId, businessId: req.businessId },
@@ -5607,7 +5614,10 @@ router.post('/jobs', [
 
     try {
       const { syncMoneyBookFromJobAdvance } = await import('../utils/cashBankSync.js');
-      await syncMoneyBookFromJobAdvance(job, { createdBy: req.user._id });
+      await syncMoneyBookFromJobAdvance(job, {
+        createdBy: req.user._id,
+        rebuildBalances: true
+      });
     } catch (_) {}
 
     if (directBill) {

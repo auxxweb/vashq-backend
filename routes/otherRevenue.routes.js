@@ -352,8 +352,15 @@ router.post('/other-revenues', requireOtherRevenueEnabled, [
       created.push(row);
       try {
         const { syncMoneyBookFromOtherRevenue } = await import('../utils/cashBankSync.js');
-        await syncMoneyBookFromOtherRevenue(row, { createdBy: req.user._id });
-      } catch (_) {}
+        await syncMoneyBookFromOtherRevenue(row, {
+          createdBy: req.user._id,
+          throwOnError: true,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Other revenue create Cash & Bank sync error:', syncErr?.message || syncErr);
+      }
     }
     res.status(201).json({ success: true, otherRevenues: created });
   } catch (error) {
@@ -441,20 +448,17 @@ router.put('/other-revenues/:id', requireOtherRevenueEnabled, [
     await row.populate('otherRevenueTypeId', 'revenueName');
     try {
       const { syncMoneyBookFromOtherRevenue } = await import('../utils/cashBankSync.js');
-      const dateChanged = req.body.revenueDate != null;
       await syncMoneyBookFromOtherRevenue(row, {
         createdBy: req.user._id,
-        ...(dateChanged
-          ? { throwOnError: true, skipBalanceCheck: true, rebuildBalances: true }
-          : {})
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
       });
     } catch (syncErr) {
-      if (req.body.revenueDate != null) {
-        return res.status(500).json({
-          success: false,
-          message: syncErr.message || 'Revenue saved but Cash & Bank could not be updated'
-        });
-      }
+      return res.status(500).json({
+        success: false,
+        message: syncErr.message || 'Revenue saved but Cash & Bank could not be updated'
+      });
     }
     res.json({ success: true, otherRevenue: row });
   } catch (error) {
@@ -483,6 +487,20 @@ router.post('/other-revenues/:id/pay', requireOtherRevenueEnabled, [
     }
     await row.save();
     await row.populate('otherRevenueTypeId', 'revenueName');
+    try {
+      const { syncMoneyBookFromOtherRevenue } = await import('../utils/cashBankSync.js');
+      await syncMoneyBookFromOtherRevenue(row, {
+        createdBy: req.user._id,
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
+    } catch (syncErr) {
+      return res.status(500).json({
+        success: false,
+        message: syncErr.message || 'Payment saved but Cash & Bank could not be updated'
+      });
+    }
     res.json({ success: true, otherRevenue: row });
   } catch (error) {
     console.error('Collect other revenue receivable error:', error);
@@ -505,6 +523,8 @@ router.delete('/other-revenues/:id', requireOtherRevenueEnabled, async (req, res
     try {
       const { reverseLedgerBySource } = await import('../services/moneyBookService.js');
       await reverseLedgerBySource(req.businessId, 'OTHER_REVENUE', row._id);
+      const { rebuildAccountBalancesChronological } = await import('../services/moneyBookService.js');
+      await rebuildAccountBalancesChronological(req.businessId);
     } catch (_) {}
     res.json({ success: true, message: 'Other revenue deleted' });
   } catch (error) {

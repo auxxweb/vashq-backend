@@ -339,7 +339,12 @@ export async function recordCollection({
         const inv = await Invoice.findById(allocations[0].invoiceId).select('branchId').lean();
         branchId = inv?.branchId || null;
       }
-      await syncMoneyBookFromCollection(collection, { createdBy: collectedBy, branchId });
+      await syncMoneyBookFromCollection(collection, {
+        createdBy: collectedBy,
+        branchId,
+        throwOnError: false,
+        rebuildBalances: true
+      });
     } catch (cashErr) {
       console.error('Cash & Bank collection sync failed:', cashErr?.message || cashErr);
     }

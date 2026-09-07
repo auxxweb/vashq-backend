@@ -62,7 +62,8 @@ async function main() {
     syncMoneyBookFromInvoice,
     syncMoneyBookFromExpense,
     syncMoneyBookFromOtherRevenue,
-    syncMoneyBookFromCollection
+    syncMoneyBookFromCollection,
+    syncMoneyBookFromPurchase
   } = await import('../utils/cashBankSync.js');
   const { rebuildAccountBalancesChronological } = await import('../services/moneyBookService.js');
 
@@ -72,6 +73,7 @@ async function main() {
     expensesFixed: 0,
     otherRevenueFixed: 0,
     collectionsFixed: 0,
+    purchasesFixed: 0,
     samples: []
   };
 
@@ -198,6 +200,60 @@ async function main() {
       summary.otherRevenueFixed += 1;
     }
 
+    // Purchases
+    const purchases = await db.collection('purchases').find({
+      businessId: bid,
+      $or: [
+        { paymentCashAmount: { $gt: 0.02 } },
+        { paymentOnlineAmount: { $gt: 0.02 } }
+      ]
+    }).project({
+      purchaseDate: 1,
+      createdAt: 1,
+      paymentCashAmount: 1,
+      paymentOnlineAmount: 1,
+      branchId: 1,
+      businessId: 1,
+      billNumber: 1
+    }).toArray();
+
+    for (const p of purchases) {
+      const want = p.purchaseDate || p.createdAt;
+      if (!want) continue;
+      const ledgers = await db.collection('moneyledgers').find({
+        businessId: bid,
+        sourceType: 'PURCHASE',
+        sourceId: p._id
+      }).toArray();
+      if (!ledgers.length) {
+        // Missing ledger for paid purchase — force sync
+        summary.samples.push({
+          type: 'PURCHASE_MISSING',
+          id: String(p._id),
+          bill: p.billNumber,
+          want: want?.toISOString?.() || want
+        });
+        if (!dryRun) await syncMoneyBookFromPurchase(p);
+        summary.purchasesFixed += 1;
+        continue;
+      }
+      const amountDrift = ledgers.some((l) => {
+        const expected = l.accountType === 'CASH' ? Number(p.paymentCashAmount) || 0 : Number(p.paymentOnlineAmount) || 0;
+        return Math.abs((Number(l.amount) || 0) - expected) > 0.05;
+      });
+      const dateDrift = ledgers.some((l) => dayKey(l.entryDate) !== dayKey(want));
+      if (!dateDrift && !amountDrift) continue;
+      summary.samples.push({
+        type: 'PURCHASE',
+        id: String(p._id),
+        bill: p.billNumber,
+        want: want?.toISOString?.() || want,
+        had: ledgers.map((l) => ({ account: l.accountType, entryDate: l.entryDate, amount: l.amount }))
+      });
+      if (!dryRun) await syncMoneyBookFromPurchase(p);
+      summary.purchasesFixed += 1;
+    }
+
     // Collections
     const cols = await db.collection('paymentcollections').find({
       businessId: bid,
@@ -236,7 +292,7 @@ async function main() {
       summary.collectionsFixed += 1;
     }
 
-    if (!dryRun && (mismatchedInvoices.length || summary.expensesFixed || summary.otherRevenueFixed || summary.collectionsFixed)) {
+    if (!dryRun) {
       await rebuildAccountBalancesChronological(bid);
     }
   }

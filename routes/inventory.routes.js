@@ -23,6 +23,7 @@ import {
 import { shouldTrackInventory } from '../utils/serviceCatalog.js';
 import { computePurchaseTotals } from '../utils/purchaseTotals.js';
 import { syncMoneyBookFromPurchase } from '../utils/cashBankSync.js';
+import { parseBusinessCalendarDate } from '../utils/calendarDate.js';
 
 const router = express.Router();
 
@@ -155,7 +156,12 @@ async function buildPurchaseItems(req, rawItems) {
   return { items, subtotal };
 }
 
-function resolvePurchaseSettlement(body, grandTotal) {
+/**
+ * Resolve purchase payment fields.
+ * FULL = paid in full for current grand total (Cash & Bank posts the full payable).
+ * CREDIT = pay later / partial — only entered cash/online amounts are posted.
+ */
+function resolvePurchaseSettlement(body, grandTotal, { previousGrandTotal = null } = {}) {
   const settlementMode = body.settlementMode === 'CREDIT' ? 'CREDIT' : 'FULL';
   let paymentCashAmount = roundMoney(Number(body.paymentCashAmount) || 0);
   let paymentOnlineAmount = roundMoney(Number(body.paymentOnlineAmount) || 0);
@@ -165,27 +171,36 @@ function resolvePurchaseSettlement(body, grandTotal) {
   let outstandingAmount = 0;
   let paymentStatus = 'PAID';
   const payable = roundMoney(grandTotal);
+  const paidEntered = roundMoney(paymentCashAmount + paymentOnlineAmount);
+  void previousGrandTotal;
 
   if (settlementMode === 'FULL') {
-    if (paymentCashAmount + paymentOnlineAmount < 0.009) {
-      paymentCashAmount = payable;
-      paymentOnlineAmount = 0;
-      paymentMethod = 'CASH';
+    // Always settle the full bill on FULL — bump stale payment when total rose
+    // (e.g. additional charges / tax added on edit).
+    if (
+      paidEntered < 0.009 ||
+      Math.abs(paidEntered - payable) > 0.05 ||
+      (previousGrandTotal != null &&
+        Math.abs(paidEntered - roundMoney(previousGrandTotal)) <= 0.05 &&
+        Math.abs(payable - roundMoney(previousGrandTotal)) > 0.05)
+    ) {
+      if (paymentOnlineAmount > 0.009 && paymentCashAmount < 0.009) {
+        paymentOnlineAmount = payable;
+        paymentCashAmount = 0;
+        paymentMethod = 'ONLINE';
+      } else if (paymentCashAmount > 0.009 && paymentOnlineAmount > 0.009 && paidEntered > 0.009) {
+        const ratio = paymentCashAmount / paidEntered;
+        paymentCashAmount = roundMoney(payable * ratio);
+        paymentOnlineAmount = roundMoney(payable - paymentCashAmount);
+        paymentMethod = 'SPLIT';
+      } else {
+        paymentCashAmount = payable;
+        paymentOnlineAmount = 0;
+        paymentMethod = 'CASH';
+      }
     }
-    const paid = roundMoney(paymentCashAmount + paymentOnlineAmount);
-    if (Math.abs(paid - payable) > 0.05 && paid > payable + 0.009) {
-      const err = new Error('Paid amount cannot exceed purchase total');
-      err.status = 400;
-      throw err;
-    }
-    // If underpaid on FULL, treat remainder as unpaid credit
-    if (paid + 0.009 < payable) {
-      outstandingAmount = roundMoney(payable - paid);
-      paymentStatus = paid <= 0.009 ? 'UNPAID' : 'PARTIAL';
-    } else {
-      outstandingAmount = 0;
-      paymentStatus = 'PAID';
-    }
+    outstandingAmount = 0;
+    paymentStatus = 'PAID';
   } else {
     const paidNow = roundMoney(paymentCashAmount + paymentOnlineAmount);
     if (paidNow > payable + 0.009) {
@@ -758,9 +773,12 @@ router.post('/purchases', adminPanelOnly, [
       supplierName = supplier.name;
     }
 
+    const settingsForDate = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('timezone')
+      .lean();
     const purchaseDate = req.body.purchaseDate
-      ? new Date(req.body.purchaseDate)
-      : new Date();
+      ? parseBusinessCalendarDate(req.body.purchaseDate, settingsForDate?.timezone)
+      : parseBusinessCalendarDate(undefined, settingsForDate?.timezone);
 
     let settlement;
     try {
@@ -814,9 +832,20 @@ router.post('/purchases', adminPanelOnly, [
     }
 
     try {
-      await syncMoneyBookFromPurchase(purchase, { createdBy: req.user._id });
+      await syncMoneyBookFromPurchase(purchase, {
+        createdBy: req.user._id,
+        throwOnError: true,
+        skipBalanceCheck: true,
+        rebuildBalances: true
+      });
     } catch (syncErr) {
       console.error('Purchase cash/bank sync error:', syncErr?.message || syncErr);
+      // Stock already posted — keep purchase but surface money-book failure
+      return res.status(201).json({
+        success: true,
+        purchase: await Purchase.findById(purchase._id).populate('supplierId', 'name phone').lean(),
+        warning: syncErr?.message || 'Purchase saved but Cash & Bank sync failed'
+      });
     }
 
     const fresh = await Purchase.findById(purchase._id)
@@ -880,13 +909,18 @@ router.put('/purchases/:id', adminPanelOnly, [
       supplierId = null;
     }
 
+    const settingsForDate = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('timezone')
+      .lean();
     const purchaseDate = req.body.purchaseDate
-      ? new Date(req.body.purchaseDate)
-      : purchase.purchaseDate || new Date();
+      ? parseBusinessCalendarDate(req.body.purchaseDate, settingsForDate?.timezone)
+      : (purchase.purchaseDate || parseBusinessCalendarDate(undefined, settingsForDate?.timezone));
 
     let settlement;
     try {
-      settlement = resolvePurchaseSettlement(req.body, totals.grandTotal);
+      settlement = resolvePurchaseSettlement(req.body, totals.grandTotal, {
+        previousGrandTotal: purchase.grandTotal
+      });
     } catch (settleErr) {
       return res.status(settleErr.status || 400).json({
         success: false,
@@ -1033,11 +1067,16 @@ router.post('/purchases/:id/pay', adminPanelOnly, [
     try {
       await syncMoneyBookFromPurchase(purchase, {
         createdBy: req.user._id,
+        throwOnError: true,
         skipBalanceCheck: true,
         rebuildBalances: true
       });
     } catch (syncErr) {
       console.error('Purchase pay cash/bank sync error:', syncErr?.message || syncErr);
+      return res.status(500).json({
+        success: false,
+        message: syncErr.message || 'Payment saved but Cash & Bank could not be updated'
+      });
     }
 
     res.json({ success: true, purchase });

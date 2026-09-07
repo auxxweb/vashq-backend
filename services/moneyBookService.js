@@ -235,7 +235,9 @@ export async function postLedgerEntry({
   entryDate = new Date(),
   createdBy = null,
   skipEnabledCheck = false,
-  skipBalanceCheck = true
+  skipBalanceCheck = true,
+  /** When true, skip chronological rebuild (caller will rebuild once at end). */
+  deferBalanceRebuild = false
 }) {
   if (!skipEnabledCheck && !(await isCashAndBankEnabled(businessId))) {
     return null;
@@ -260,7 +262,6 @@ export async function postLedgerEntry({
       direction
     });
     if (existing) {
-      // Keep live when source date/amount was edited but reverse was skipped
       const wantDate = new Date(entryDate || new Date());
       const dateDrift =
         Math.abs(new Date(existing.entryDate).getTime() - wantDate.getTime()) > 1000;
@@ -272,8 +273,9 @@ export async function postLedgerEntry({
         existing.signedAmount = nextSigned;
         if (notes) existing.notes = notes;
         await existing.save();
-        // Recompute full chain so day open/close stay continuous (balances may go negative)
-        await rebuildOneAccountBalancesChronological(account);
+        if (!deferBalanceRebuild) {
+          await rebuildOneAccountBalancesChronological(account);
+        }
         const refreshed = await MoneyLedger.findById(existing._id).lean();
         return refreshed || existing.toObject();
       }
@@ -282,8 +284,6 @@ export async function postLedgerEntry({
   }
 
   const signed = direction === 'IN' ? amt : -amt;
-  // Provisional balance from cache; chronological rebuild below is source of truth.
-  // skipBalanceCheck kept for API compat — ledger is allowed to go negative.
   void skipBalanceCheck;
   const prev = roundMoney(account.currentBalance || 0);
   const next = roundMoney(prev + signed);
@@ -306,13 +306,21 @@ export async function postLedgerEntry({
     createdBy: createdBy || null
   });
 
-  await rebuildOneAccountBalancesChronological(account);
+  if (!deferBalanceRebuild) {
+    await rebuildOneAccountBalancesChronological(account);
+  } else {
+    account.currentBalance = next;
+    await account.save();
+  }
   const refreshed = await MoneyLedger.findById(entry._id).lean();
   return refreshed || (entry.toObject ? entry.toObject() : entry);
 }
 
 /** Remove auto-posted legs for a source and rebuild account cache from ledger. */
-export async function reverseLedgerBySource(businessId, sourceType, sourceId, { skipEnabledCheck = false } = {}) {
+export async function reverseLedgerBySource(businessId, sourceType, sourceId, {
+  skipEnabledCheck = false,
+  deferBalanceRebuild = false
+} = {}) {
   if (!skipEnabledCheck && !(await isCashAndBankEnabled(businessId))) return 0;
   if (!sourceId) return 0;
   const bid = bizOid(businessId);
@@ -320,6 +328,8 @@ export async function reverseLedgerBySource(businessId, sourceType, sourceId, { 
   if (!rows.length) return 0;
 
   await MoneyLedger.deleteMany({ businessId: bid, sourceType, sourceId });
+
+  if (deferBalanceRebuild) return rows.length;
 
   const touched = new Map();
   for (const r of rows) {
@@ -420,13 +430,17 @@ export async function postPaymentChannels({
   expenseOut = false,
   skipEnabledCheck = false,
   skipBalanceCheck = false,
-  skipReverse = false
+  skipReverse = false,
+  deferBalanceRebuild = false
 }) {
   if (!skipEnabledCheck && !(await isCashAndBankEnabled(businessId))) return [];
   if (!branchId) return [];
 
   if (!skipReverse) {
-    await reverseLedgerBySource(businessId, sourceType, sourceId, { skipEnabledCheck });
+    await reverseLedgerBySource(businessId, sourceType, sourceId, {
+      skipEnabledCheck,
+      deferBalanceRebuild
+    });
   }
 
   const direction = expenseOut ? 'OUT' : 'IN';
@@ -447,7 +461,8 @@ export async function postPaymentChannels({
       notes,
       createdBy,
       skipEnabledCheck,
-      skipBalanceCheck
+      skipBalanceCheck,
+      deferBalanceRebuild
     });
     if (row) posted.push(row);
   }
@@ -464,7 +479,8 @@ export async function postPaymentChannels({
       notes,
       createdBy,
       skipEnabledCheck,
-      skipBalanceCheck
+      skipBalanceCheck,
+      deferBalanceRebuild
     });
     if (row) posted.push(row);
   }
