@@ -16,8 +16,7 @@ import {
   createCorrectionRequest,
   listCorrectionRequests,
   approveCorrectionRequest,
-  rejectCorrectionRequest,
-  markEmployeeAttendance
+  rejectCorrectionRequest
 } from '../services/attendanceService.js';
 
 const router = express.Router();
@@ -207,27 +206,6 @@ router.patch('/correction-requests/:id/reject', adminPanelOnly, async (req, res)
       reviewNote: req.body?.reviewNote
     });
     res.json({ success: true, request });
-  } catch (e) {
-    res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
-  }
-});
-
-/** Owner / admin marks attendance for an employee (present with punch times, or leave). */
-router.post('/mark', adminPanelOnly, [
-  body('userId').notEmpty().withMessage('Employee is required'),
-  body('date').notEmpty().withMessage('Date is required'),
-  body('status').optional().isIn(['PRESENT', 'LEAVE']).withMessage('Status must be PRESENT or LEAVE')
-], async (req, res) => {
-  try {
-    if (!validate(req, res)) return;
-    const result = await markEmployeeAttendance(req, {
-      userId: req.body.userId,
-      date: req.body.date,
-      punchInAt: req.body.punchInAt,
-      punchOutAt: req.body.punchOutAt,
-      status: req.body.status || 'PRESENT'
-    });
-    res.json({ success: true, ...result });
   } catch (e) {
     res.status(e.status || 500).json({ success: false, message: e.message || 'Server error' });
   }
