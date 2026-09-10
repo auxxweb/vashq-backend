@@ -1339,25 +1339,44 @@ router.post('/invoices', [
 // GET /api/admin/invoices - list (optional jobId filter, pagination, search)
 router.get('/invoices', async (req, res) => {
   try {
-    const { search, page = 1, limit = 20, from, to, jobId, status } = req.query;
+    const { search, page = 1, limit = 20, from, to, range, jobId, status } = req.query;
     const query = applyBranchScope({ businessId: req.businessId }, req);
     const andClauses = [];
 
     if (jobId) query.jobId = jobId;
 
     if (search && typeof search === 'string' && search.trim()) {
-      const term = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const matchingJobIds = await Job.find(applyBranchScope({
-        businessId: req.businessId,
-        tokenNumber: { $regex: term, $options: 'i' }
-      }, req)).distinct('_id');
+      const term = escapeRegex(search);
+      const [matchingJobIds, customerIds] = await Promise.all([
+        Job.find(applyBranchScope({
+          businessId: req.businessId,
+          tokenNumber: { $regex: term, $options: 'i' }
+        }, req)).distinct('_id'),
+        distinctCustomerIdsBySearch(Customer, req.businessId, search)
+      ]);
+      const phoneDigits = String(search).replace(/\D/g, '');
+      const phoneClauses = [];
+      if (phoneDigits.length >= 3) {
+        const sep = '[\\s\\-.+()]*';
+        const flexible = phoneDigits
+          .split('')
+          .map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join(sep);
+        phoneClauses.push(
+          { customerPhone: { $regex: flexible, $options: 'i' } },
+          { customerPhone: { $regex: escapeRegex(phoneDigits), $options: 'i' } }
+        );
+      }
       andClauses.push({
         $or: [
           { invoiceNumber: { $regex: term, $options: 'i' } },
           { customerName: { $regex: term, $options: 'i' } },
           { customerPhone: { $regex: term, $options: 'i' } },
           { vehicleNumber: { $regex: term, $options: 'i' } },
-          ...(matchingJobIds.length ? [{ jobId: { $in: matchingJobIds } }] : [])
+          { packageName: { $regex: term, $options: 'i' } },
+          ...phoneClauses,
+          ...(matchingJobIds.length ? [{ jobId: { $in: matchingJobIds } }] : []),
+          ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : [])
         ]
       });
     }
@@ -1367,17 +1386,38 @@ router.get('/invoices', async (req, res) => {
 
     if (andClauses.length) query.$and = andClauses;
 
-    if ((from && String(from).trim()) || (to && String(to).trim())) {
-      const range = {};
-      if (from && String(from).trim()) {
-        const d = new Date(String(from).trim());
-        if (!Number.isNaN(d.getTime())) range.$gte = d;
+    // Date range — prefer `range` in business timezone (same as jobs/dashboard)
+    const rangeKey = range && String(range).trim() && String(range).toUpperCase() !== 'ALL'
+      ? String(range).trim()
+      : '';
+    if (rangeKey) {
+      const { startUtc, endUtc } = await loadBusinessDateRange(req.businessId, rangeKey, from, to);
+      applyCreatedAtRange(query, startUtc, endUtc);
+    } else if ((from && String(from).trim()) || (to && String(to).trim())) {
+      const settings = await BusinessSettings.findOne({ businessId: req.businessId }).select('timezone').lean();
+      const fromStr = from && String(from).trim();
+      const toStr = to && String(to).trim();
+      const isDateOnly = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+      if (isDateOnly(fromStr) || isDateOnly(toStr)) {
+        const bounds = parseBusinessDateRange(
+          settings?.timezone,
+          'custom',
+          fromStr || toStr,
+          toStr || fromStr
+        );
+        applyCreatedAtRange(query, fromStr ? bounds.startUtc : null, toStr ? bounds.endUtc : null);
+      } else {
+        const rangeObj = {};
+        if (fromStr) {
+          const d = new Date(fromStr);
+          if (!Number.isNaN(d.getTime())) rangeObj.$gte = d;
+        }
+        if (toStr) {
+          const d = new Date(toStr);
+          if (!Number.isNaN(d.getTime())) rangeObj.$lte = d;
+        }
+        if (Object.keys(rangeObj).length) query.createdAt = rangeObj;
       }
-      if (to && String(to).trim()) {
-        const d = new Date(String(to).trim());
-        if (!Number.isNaN(d.getTime())) range.$lte = d;
-      }
-      if (Object.keys(range).length) query.createdAt = range;
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -1410,7 +1450,7 @@ router.get('/invoices', async (req, res) => {
     });
   } catch (error) {
     console.error('List invoices error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Server error' });
   }
 });
 
@@ -2002,6 +2042,13 @@ router.patch('/invoices/:id/close-job', async (req, res) => {
 
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
+    invoice.outstandingAmount = 0;
+    try {
+      const { getCheckoutTotal } = await import('../services/credit/outstandingService.js');
+      invoice.amountCollectedAtCheckout = getCheckoutTotal(invoice);
+    } catch (_) {
+      /* optional cache field */
+    }
     await invoice.save();
     invalidateDashboardForBusiness(req.businessId);
     try {
@@ -5876,6 +5923,30 @@ router.patch('/jobs/:id/status', [
       }
     }
 
+    // A delivered job must always carry an invoice (payment may stay PENDING).
+    // The admin UI creates it in a follow-up POST /invoices, which can be lost to a
+    // dropped network or a closed tab; doing it here — before the status is written —
+    // means delivery either produces an invoice or fails outright. Idempotent.
+    let deliveryInvoice = null;
+    if (status === 'DELIVERED') {
+      try {
+        deliveryInvoice = await createInvoiceForJobRecord({
+          job,
+          businessId: req.businessId,
+          userId: req.user._id,
+          customer: job.customerId,
+          car: job.carId,
+          catalogServices: []
+        });
+      } catch (invErr) {
+        console.error('Ensure invoice on delivery failed:', invErr);
+        return res.status(invErr.status || 500).json({
+          success: false,
+          message: invErr.message || 'Could not create the invoice for this job — delivery cancelled'
+        });
+      }
+    }
+
     // Update job
     job.status = status;
     if (req.body.afterImages !== undefined) {
@@ -5993,7 +6064,8 @@ router.patch('/jobs/:id/status', [
 
     res.json({
       success: true,
-      job
+      job,
+      invoice: deliveryInvoice
     });
   } catch (error) {
     console.error('Update job status error:', error);

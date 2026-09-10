@@ -1,0 +1,2204 @@
+{
+  "importRef": "MOJO-LEGACY-COATING-2026-09",
+  "ranAt": "2026-09-08T07:45:50.976Z",
+  "mode": "apply",
+  "businessId": "6a702dca112577918bd3de80",
+  "branchId": "6a702dcb112577918bd3de8a",
+  "skipped": [
+    {
+      "row": 43,
+      "reason": "duplicate of row 40 (RAYEES, KL18AE9425, same dates) — kept the ₹28,000 row"
+    },
+    {
+      "row": 55,
+      "reason": "duplicate of row 77 (JIJO, KL56W7425, one day apart) — kept the 3 YEAR row"
+    }
+  ],
+  "rows": [
+    {
+      "row": 1,
+      "owner": "AKSHAY",
+      "vehicle": "KL77F4536",
+      "phone": "+919995485298",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - HATCHBACK - 3 YEAR",
+      "sheetPrice": 31000,
+      "startDate": "2026-07-28",
+      "expiryDate": "2029-07-28",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-001",
+      "dueDates": [
+        "service 2027-07-28",
+        "service 2028-07-28",
+        "service 2029-07-28"
+      ],
+      "customerId": "6a9fbd30f7844a1445134df2",
+      "customerPackageId": "6a9fbd31f7844a1445134e14",
+      "invoiceId": "6a9fbd31f7844a1445134e18",
+      "carId": "6a9fbd31f7844a1445134e0c"
+    },
+    {
+      "row": 2,
+      "owner": "NASEEMA",
+      "vehicle": "KL77F4091",
+      "phone": "+919998572445",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 29500,
+      "startDate": "2026-07-15",
+      "expiryDate": "2029-07-15",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-002",
+      "dueDates": [
+        "service 2027-07-15",
+        "service 2028-07-15",
+        "service 2029-07-15"
+      ],
+      "customerId": "6a9fbd32f7844a1445134e24",
+      "customerPackageId": "6a9fbd32f7844a1445134e2e",
+      "invoiceId": "6a9fbd32f7844a1445134e31",
+      "carId": "6a9fbd32f7844a1445134e28"
+    },
+    {
+      "row": 3,
+      "owner": "ISMAIL",
+      "vehicle": "KL77C9474",
+      "phone": "+917477062929",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 32000,
+      "startDate": "2026-07-05",
+      "expiryDate": "2029-07-05",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-003",
+      "dueDates": [
+        "service 2027-07-05",
+        "service 2028-07-05",
+        "service 2029-07-05"
+      ],
+      "customerId": "6a9fbd33f7844a1445134e3c",
+      "customerPackageId": "6a9fbd33f7844a1445134e42",
+      "invoiceId": "6a9fbd33f7844a1445134e45",
+      "carId": "6a9fbd33f7844a1445134e40"
+    },
+    {
+      "row": 4,
+      "owner": "ABDUL SALAM",
+      "vehicle": "KL76F1488",
+      "phone": "+917592018089",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 13000,
+      "startDate": "2026-07-12",
+      "expiryDate": "2027-07-12",
+      "status": "active",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-004",
+      "dueDates": [
+        "service 2027-07-12"
+      ],
+      "customerId": "6a9fbd34f7844a1445134e53",
+      "customerPackageId": "6a9fbd34f7844a1445134e5c",
+      "invoiceId": "6a9fbd34f7844a1445134e5f",
+      "carId": "6a9fbd34f7844a1445134e57"
+    },
+    {
+      "row": 5,
+      "owner": "KISHOR",
+      "vehicle": "KL76G4880",
+      "phone": "+919567497575",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 35000,
+      "startDate": "2026-06-30",
+      "expiryDate": "2029-06-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-005",
+      "dueDates": [
+        "service 2027-06-30",
+        "service 2028-06-30",
+        "service 2029-06-30"
+      ],
+      "customerId": "6a9fbd35f7844a1445134e66",
+      "customerPackageId": "6a9fbd35f7844a1445134e6f",
+      "invoiceId": "6a9fbd35f7844a1445134e72",
+      "carId": "6a9fbd35f7844a1445134e6a"
+    },
+    {
+      "row": 6,
+      "owner": "FABEEL",
+      "vehicle": "KL56AB1100",
+      "phone": "+919292159927",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SEDAN - 3 YEAR",
+      "sheetPrice": 34000,
+      "startDate": "2026-06-20",
+      "expiryDate": "2029-06-20",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-006",
+      "dueDates": [
+        "service 2027-06-20",
+        "service 2028-06-20",
+        "service 2029-06-20"
+      ],
+      "customerId": "6a9fbd35f7844a1445134e7d",
+      "customerPackageId": "6a9fbd36f7844a1445134e86",
+      "invoiceId": "6a9fbd36f7844a1445134e89",
+      "carId": "6a9fbd36f7844a1445134e81"
+    },
+    {
+      "row": 7,
+      "owner": "DILSHAMIL",
+      "vehicle": "T0526KL182J",
+      "phone": "+919846320508",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 1 YEAR",
+      "sheetPrice": 14000,
+      "startDate": "2026-06-19",
+      "expiryDate": "2027-06-19",
+      "status": "active",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-007",
+      "dueDates": [
+        "service 2027-06-19"
+      ],
+      "customerId": "6a9fbd36f7844a1445134e97",
+      "customerPackageId": "6a9fbd37f7844a1445134ea0",
+      "invoiceId": "6a9fbd37f7844a1445134ea3",
+      "carId": "6a9fbd37f7844a1445134e9b"
+    },
+    {
+      "row": 8,
+      "owner": "RAVINDRAN",
+      "vehicle": null,
+      "phone": "+918289948300",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 5 YEAR",
+      "sheetPrice": 35000,
+      "startDate": "2026-06-08",
+      "expiryDate": "2031-06-08",
+      "status": "active",
+      "totalVisits": 5,
+      "visitBreakdown": {
+        "service": 5,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-008",
+      "dueDates": [
+        "service 2027-06-08",
+        "service 2028-06-08",
+        "service 2029-06-08",
+        "service 2030-06-08",
+        "service 2031-06-08"
+      ],
+      "customerId": "6a9fbd37f7844a1445134eaa",
+      "customerPackageId": "6a9fbd37f7844a1445134eb0",
+      "invoiceId": "6a9fbd38f7844a1445134eb3"
+    },
+    {
+      "row": 9,
+      "owner": "YASEEN",
+      "vehicle": "KL56Y9995",
+      "phone": "+918921242159",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - HATCHBACK - 3 YEAR",
+      "sheetPrice": 28000,
+      "startDate": "2026-06-12",
+      "expiryDate": "2029-06-12",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-009",
+      "dueDates": [
+        "service 2027-06-12",
+        "service 2028-06-12",
+        "service 2029-06-12"
+      ],
+      "customerId": "6a9fbd38f7844a1445134ec2",
+      "customerPackageId": "6a9fbd38f7844a1445134ec8",
+      "invoiceId": "6a9fbd38f7844a1445134ecb",
+      "carId": "6a9fbd38f7844a1445134ec6"
+    },
+    {
+      "row": 10,
+      "owner": "ABHINAV",
+      "vehicle": "KL56AA9009",
+      "phone": "+919995635835",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 16000,
+      "startDate": "2026-05-18",
+      "expiryDate": "2027-05-18",
+      "status": "active",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-010",
+      "dueDates": [
+        "service 2027-05-18"
+      ],
+      "customerId": "6a9fbd39f7844a1445134ed6",
+      "customerPackageId": "6a9fbd39f7844a1445134edf",
+      "invoiceId": "6a9fbd39f7844a1445134ee2",
+      "carId": "6a9fbd39f7844a1445134eda"
+    },
+    {
+      "row": 11,
+      "owner": "JOSHITH",
+      "vehicle": null,
+      "phone": "+917012421332",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 26000,
+      "startDate": "2026-05-16",
+      "expiryDate": "2029-05-16",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-011",
+      "dueDates": [
+        "service 2027-05-16",
+        "service 2028-05-16",
+        "service 2029-05-16"
+      ],
+      "customerId": "6a9fbd3af7844a1445134ee9",
+      "customerPackageId": "6a9fbd3af7844a1445134eef",
+      "invoiceId": "6a9fbd3af7844a1445134ef2"
+    },
+    {
+      "row": 12,
+      "owner": "AMEER",
+      "vehicle": "KL65U8300",
+      "phone": "+918848106050",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 36000,
+      "startDate": "2026-04-30",
+      "expiryDate": "2029-04-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-012",
+      "dueDates": [
+        "service 2027-04-30",
+        "service 2028-04-30",
+        "service 2029-04-30"
+      ],
+      "customerId": "6a9fbd3af7844a1445134efd",
+      "customerPackageId": "6a9fbd3bf7844a1445134f03",
+      "invoiceId": "6a9fbd3bf7844a1445134f06",
+      "carId": "6a9fbd3bf7844a1445134f01"
+    },
+    {
+      "row": 13,
+      "owner": "SHIJIL",
+      "vehicle": "KL77F2525",
+      "phone": "+917335601839",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 2 YEAR",
+      "sheetPrice": 23000,
+      "startDate": "2026-04-23",
+      "expiryDate": "2028-04-23",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-013",
+      "dueDates": [
+        "service 2027-04-23",
+        "service 2028-04-23"
+      ],
+      "customerId": "6a9fbd3bf7844a1445134f11",
+      "customerPackageId": "6a9fbd3cf7844a1445134f1a",
+      "invoiceId": "6a9fbd3cf7844a1445134f1d",
+      "carId": "6a9fbd3cf7844a1445134f15"
+    },
+    {
+      "row": 14,
+      "owner": "RIJAS",
+      "vehicle": "KA51CA1560",
+      "phone": "+919961565709",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - SUV / MUV - 2 YEAR",
+      "sheetPrice": 24000,
+      "startDate": "2026-04-24",
+      "expiryDate": "2028-04-24",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-014",
+      "dueDates": [
+        "service 2027-04-24",
+        "service 2028-04-24"
+      ],
+      "customerId": "6a9fbd3cf7844a1445134f26",
+      "customerPackageId": "6a9fbd3df7844a1445134f2f",
+      "invoiceId": "6a9fbd3df7844a1445134f32",
+      "carId": "6a9fbd3cf7844a1445134f2a"
+    },
+    {
+      "row": 15,
+      "owner": null,
+      "vehicle": "KL77F1526",
+      "phone": "+919562240224",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 32000,
+      "startDate": "2026-03-07",
+      "expiryDate": "2029-03-07",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-015",
+      "dueDates": [
+        "service 2027-03-07",
+        "service 2028-03-07",
+        "service 2029-03-07"
+      ],
+      "customerId": "6a9fbd3df7844a1445134f3b",
+      "customerPackageId": "6a9fbd3df7844a1445134f41",
+      "invoiceId": "6a9fbd3ef7844a1445134f44",
+      "carId": "6a9fbd3df7844a1445134f3f"
+    },
+    {
+      "row": 16,
+      "owner": "FASIL",
+      "vehicle": "KL74E3737",
+      "phone": "+918129426630",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 15500,
+      "startDate": "2026-03-13",
+      "expiryDate": "2027-03-13",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-016",
+      "dueDates": [
+        "service 2026-09-13",
+        "service 2027-03-13"
+      ],
+      "customerId": "6a9fbd3ef7844a1445134f4f",
+      "customerPackageId": "6a9fbd3ef7844a1445134f55",
+      "invoiceId": "6a9fbd3ef7844a1445134f58",
+      "carId": "6a9fbd3ef7844a1445134f53"
+    },
+    {
+      "row": 17,
+      "owner": "SAJNAS",
+      "vehicle": "KA01ND6655",
+      "phone": "+919847333789",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 32000,
+      "startDate": "2026-03-07",
+      "expiryDate": "2029-03-07",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-017",
+      "dueDates": [
+        "service 2027-09-07",
+        "service 2029-03-07"
+      ],
+      "customerId": "6a9fbd3ff7844a1445134f61",
+      "customerPackageId": "6a9fbd3ff7844a1445134f67",
+      "invoiceId": "6a9fbd3ff7844a1445134f6a",
+      "carId": "6a9fbd3ff7844a1445134f65"
+    },
+    {
+      "row": 18,
+      "owner": "DHANOOP",
+      "vehicle": null,
+      "phone": "+919447870039",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2026-01-12",
+      "expiryDate": "2029-01-12",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-018",
+      "dueDates": [
+        "service 2027-01-12",
+        "service 2028-01-12",
+        "service 2029-01-12"
+      ],
+      "customerId": "6a9fbd40f7844a1445134f73",
+      "customerPackageId": "6a9fbd40f7844a1445134f76",
+      "invoiceId": "6a9fbd40f7844a1445134f79"
+    },
+    {
+      "row": 19,
+      "owner": "SHAMSUDHEEN",
+      "vehicle": "KL56AA5675",
+      "phone": "+917559861249",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2026-02-07",
+      "expiryDate": "2029-02-07",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-019",
+      "dueDates": [
+        "service 2027-02-07",
+        "service 2028-02-07",
+        "service 2029-02-07"
+      ],
+      "customerId": "6a9fbd40f7844a1445134f84",
+      "customerPackageId": "6a9fbd40f7844a1445134f8a",
+      "invoiceId": "6a9fbd41f7844a1445134f8d",
+      "carId": "6a9fbd40f7844a1445134f88"
+    },
+    {
+      "row": 20,
+      "owner": "SANSEEN",
+      "vehicle": "KL76F9998",
+      "phone": "+917306093503",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 3 YEAR",
+      "sheetPrice": 24000,
+      "startDate": "2026-02-23",
+      "expiryDate": "2029-02-23",
+      "status": "active",
+      "totalVisits": 5,
+      "visitBreakdown": {
+        "service": 5,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-020",
+      "dueDates": [
+        "service 2026-08-23",
+        "service 2027-02-23",
+        "service 2027-08-23",
+        "service 2028-02-23",
+        "service 2028-08-23"
+      ],
+      "customerId": "6a9fbd41f7844a1445134f98",
+      "customerPackageId": "6a9fbd41f7844a1445134fa1",
+      "invoiceId": "6a9fbd42f7844a1445134fa4",
+      "carId": "6a9fbd41f7844a1445134f9c"
+    },
+    {
+      "row": 21,
+      "owner": "JABBIR",
+      "vehicle": "KL18Z6967",
+      "phone": "+919846633113",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 1 YEAR",
+      "sheetPrice": 13500,
+      "startDate": "2025-12-14",
+      "expiryDate": "2026-12-14",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-021",
+      "dueDates": [
+        "service 2026-06-14",
+        "service 2026-12-14"
+      ],
+      "customerId": "6a9fbd42f7844a1445134fb3",
+      "customerPackageId": "6a9fbd42f7844a1445134fb9",
+      "invoiceId": "6a9fbd42f7844a1445134fbc",
+      "carId": "6a9fbd42f7844a1445134fb7"
+    },
+    {
+      "row": 22,
+      "owner": "JASSL",
+      "vehicle": "KL58AE9201",
+      "phone": "+917433448368",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 34000,
+      "startDate": "2024-02-12",
+      "expiryDate": "2027-02-12",
+      "status": "active",
+      "totalVisits": 4,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 2,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-022",
+      "dueDates": [
+        "service 2024-11-12",
+        "service 2025-08-12",
+        "recoat 2026-05-12",
+        "recoat 2027-02-12"
+      ],
+      "customerId": "6a9fbd43f7844a1445134fc8",
+      "customerPackageId": "6a9fbd43f7844a1445134fce",
+      "invoiceId": "6a9fbd43f7844a1445134fd1",
+      "carId": "6a9fbd43f7844a1445134fcc"
+    },
+    {
+      "row": 23,
+      "owner": "RAZIL",
+      "vehicle": "KL56Y4450",
+      "phone": "+918590670839",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 32000,
+      "startDate": "2024-11-30",
+      "expiryDate": "2027-11-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-023",
+      "dueDates": [
+        "service 2025-11-30",
+        "service 2026-11-30",
+        "service 2027-11-30"
+      ],
+      "customerId": "6a9fbd44f7844a1445134fde",
+      "customerPackageId": "6a9fbd44f7844a1445134fe7",
+      "invoiceId": "6a9fbd44f7844a1445134fea",
+      "carId": "6a9fbd44f7844a1445134fe2"
+    },
+    {
+      "row": 24,
+      "owner": "SIRAJ",
+      "vehicle": null,
+      "phone": "+919846740006",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - SUV / MUV - 2 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2024-02-09",
+      "expiryDate": "2026-02-09",
+      "status": "expired",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 1,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-024",
+      "dueDates": [
+        "service 2024-08-09",
+        "service 2025-02-09",
+        "recoat 2025-08-09"
+      ],
+      "customerId": "6a9fbd45f7844a1445134ff5",
+      "customerPackageId": "6a9fbd45f7844a1445134ff8",
+      "invoiceId": "6a9fbd45f7844a1445134ffb"
+    },
+    {
+      "row": 25,
+      "owner": "ARJUN KARAYAD",
+      "vehicle": null,
+      "phone": "+919947106451",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 14000,
+      "startDate": "2025-07-16",
+      "expiryDate": "2026-07-16",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-025",
+      "dueDates": [
+        "service 2026-01-16",
+        "service 2026-07-16"
+      ],
+      "customerId": "6a9fbd45f7844a1445135006",
+      "customerPackageId": "6a9fbd45f7844a1445135009",
+      "invoiceId": "6a9fbd46f7844a144513500c"
+    },
+    {
+      "row": 26,
+      "owner": null,
+      "vehicle": "T1025KL7783P",
+      "phone": "+918921100554",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2025-12-30",
+      "expiryDate": "2028-12-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-026",
+      "dueDates": [
+        "service 2026-12-30",
+        "service 2027-12-30",
+        "service 2028-12-30"
+      ],
+      "customerId": "6a9fbd46f7844a1445135015",
+      "customerPackageId": "6a9fbd46f7844a144513501b",
+      "invoiceId": "6a9fbd46f7844a144513501e",
+      "carId": "6a9fbd46f7844a1445135019"
+    },
+    {
+      "row": 27,
+      "owner": "PRAJI THANYAN",
+      "vehicle": null,
+      "phone": "+919747728158",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - LUXURY - 2 YEAR",
+      "sheetPrice": 22000,
+      "startDate": "2025-12-19",
+      "expiryDate": "2027-12-19",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-027",
+      "dueDates": [
+        "service 2026-12-19",
+        "service 2027-12-19"
+      ],
+      "customerId": "6a9fbd47f7844a1445135029",
+      "customerPackageId": "6a9fbd47f7844a144513502f",
+      "invoiceId": "6a9fbd47f7844a1445135032"
+    },
+    {
+      "row": 28,
+      "owner": "HARIS",
+      "vehicle": "KL18AC2323",
+      "phone": "+916282969119",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 14000,
+      "startDate": "2025-12-13",
+      "expiryDate": "2026-12-13",
+      "status": "active",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-028",
+      "dueDates": [
+        "service 2026-12-13"
+      ],
+      "customerId": "6a9fbd47f7844a144513503b",
+      "customerPackageId": "6a9fbd48f7844a1445135044",
+      "invoiceId": "6a9fbd48f7844a1445135047",
+      "carId": "6a9fbd48f7844a144513503f"
+    },
+    {
+      "row": 29,
+      "owner": null,
+      "vehicle": "KL5Y0044",
+      "phone": "+910000000029",
+      "placeholderPhone": true,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 2 YEAR",
+      "sheetPrice": 26000,
+      "startDate": "2023-12-01",
+      "expiryDate": "2025-12-01",
+      "status": "expired",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 1,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-029",
+      "dueDates": [
+        "service 2024-06-01",
+        "service 2024-12-01",
+        "recoat 2025-06-01"
+      ],
+      "customerId": "6a9fbd48f7844a144513504e",
+      "customerPackageId": "6a9fbd49f7844a1445135054",
+      "invoiceId": "6a9fbd49f7844a1445135057",
+      "carId": "6a9fbd48f7844a1445135052"
+    },
+    {
+      "row": 30,
+      "owner": "SHALU",
+      "vehicle": "KL11BU6777",
+      "phone": "+910000000030",
+      "placeholderPhone": true,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 12000,
+      "startDate": "2024-01-15",
+      "expiryDate": "2025-01-15",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-030",
+      "dueDates": [
+        "service 2024-07-15",
+        "service 2025-01-15"
+      ],
+      "customerId": "6a9fbd49f7844a1445135062",
+      "customerPackageId": "6a9fbd53f7844a1445135068",
+      "invoiceId": "6a9fbd53f7844a144513506b",
+      "carId": "6a9fbd49f7844a1445135066"
+    },
+    {
+      "row": 31,
+      "owner": null,
+      "vehicle": "PY05B8600",
+      "phone": "+918848088954",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - LUXURY - 1 YEAR",
+      "sheetPrice": 15000,
+      "startDate": "2025-01-31",
+      "expiryDate": "2026-01-31",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-031",
+      "dueDates": [
+        "service 2025-07-31",
+        "service 2026-01-31"
+      ],
+      "customerId": "6a9fbd53f7844a1445135074",
+      "customerPackageId": "6a9fbd54f7844a144513507d",
+      "invoiceId": "6a9fbd54f7844a1445135080",
+      "carId": "6a9fbd54f7844a1445135078"
+    },
+    {
+      "row": 32,
+      "owner": "FIYAS",
+      "vehicle": "KL07DB573",
+      "phone": "+918147000200",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - LUXURY - 3 YEAR",
+      "sheetPrice": 25000,
+      "startDate": "2024-11-19",
+      "expiryDate": "2027-11-19",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-032",
+      "dueDates": [
+        "service 2025-11-19",
+        "service 2026-11-19",
+        "service 2027-11-19"
+      ],
+      "customerId": "6a9fbd55f7844a1445135089",
+      "customerPackageId": "6a9fbd55f7844a1445135092",
+      "invoiceId": "6a9fbd55f7844a1445135095",
+      "carId": "6a9fbd55f7844a144513508d"
+    },
+    {
+      "row": 33,
+      "owner": "GAFOOR",
+      "vehicle": null,
+      "phone": "+919847809771",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 2 YEAR",
+      "sheetPrice": 20000,
+      "startDate": "2024-08-31",
+      "expiryDate": "2026-08-31",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-033",
+      "dueDates": [
+        "service 2025-08-31",
+        "service 2026-08-31"
+      ],
+      "customerId": "6a9fbd56f7844a14451350a0",
+      "customerPackageId": "6a9fbd56f7844a14451350a6",
+      "invoiceId": "6a9fbd56f7844a14451350a9"
+    },
+    {
+      "row": 34,
+      "owner": "RIJIL",
+      "vehicle": "KL18AE4115",
+      "phone": "+919446486503",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 15000,
+      "startDate": "2024-01-17",
+      "expiryDate": "2025-01-17",
+      "status": "expired",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-034",
+      "dueDates": [
+        "service 2025-01-17"
+      ],
+      "customerId": "6a9fbd57f7844a14451350b2",
+      "customerPackageId": "6a9fbd57f7844a14451350b8",
+      "invoiceId": "6a9fbd57f7844a14451350bb",
+      "carId": "6a9fbd57f7844a14451350b6"
+    },
+    {
+      "row": 35,
+      "owner": "NOUSHAD",
+      "vehicle": "KL58AD6666",
+      "phone": "+910000000035",
+      "placeholderPhone": true,
+      "packageName": "BOROPHENE COATING - LUXURY - 3 YEAR",
+      "sheetPrice": 26000,
+      "startDate": "2024-12-13",
+      "expiryDate": "2027-12-13",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-035",
+      "dueDates": [
+        "service 2025-12-13",
+        "service 2026-12-13",
+        "service 2027-12-13"
+      ],
+      "customerId": "6a9fbd58f7844a14451350c2",
+      "customerPackageId": "6a9fbd58f7844a14451350c8",
+      "invoiceId": "6a9fbd58f7844a14451350cb",
+      "carId": "6a9fbd58f7844a14451350c6"
+    },
+    {
+      "row": 36,
+      "owner": "SUNIL KUMAR",
+      "vehicle": "DL1CAG2770",
+      "phone": "+919207280506",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 14500,
+      "startDate": "2024-03-30",
+      "expiryDate": "2025-04-30",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-036",
+      "dueDates": [
+        "service 2024-09-30",
+        "service 2025-03-30"
+      ],
+      "customerId": "6a9fbd59f7844a14451350d6",
+      "customerPackageId": "6a9fbd59f7844a14451350df",
+      "invoiceId": "6a9fbd59f7844a14451350e2",
+      "carId": "6a9fbd59f7844a14451350da"
+    },
+    {
+      "row": 37,
+      "owner": "SUNIL KUMAR",
+      "vehicle": null,
+      "phone": "+919207280506",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 23000,
+      "startDate": "2024-03-25",
+      "expiryDate": "2025-04-25",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-037",
+      "dueDates": [
+        "service 2024-09-25",
+        "service 2025-03-25"
+      ],
+      "customerId": "6a9fbd59f7844a14451350d6",
+      "customerPackageId": "6a9fbd5af7844a14451350eb",
+      "invoiceId": "6a9fbd5af7844a14451350ee"
+    },
+    {
+      "row": 38,
+      "owner": "NAVAS",
+      "vehicle": "KL58AJ7921",
+      "phone": "+919961133003",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 1 YEAR",
+      "sheetPrice": 14000,
+      "startDate": "2024-04-01",
+      "expiryDate": "2025-04-01",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-038",
+      "dueDates": [
+        "service 2024-10-01",
+        "service 2025-04-01"
+      ],
+      "customerId": "6a9fbd5bf7844a14451350f7",
+      "customerPackageId": "6a9fbd5bf7844a14451350fd",
+      "invoiceId": "6a9fbd5bf7844a1445135100",
+      "carId": "6a9fbd5bf7844a14451350fb"
+    },
+    {
+      "row": 39,
+      "owner": "ARSHID",
+      "vehicle": null,
+      "phone": "+918089395030",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 2 YEAR",
+      "sheetPrice": 28500,
+      "startDate": "2024-11-09",
+      "expiryDate": "2026-11-09",
+      "status": "active",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 0,
+        "recoat": 1,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-039",
+      "dueDates": [
+        "recoat 2026-11-09"
+      ],
+      "customerId": "6a9fbd5cf7844a144513510c",
+      "customerPackageId": "6a9fbd5cf7844a1445135112",
+      "invoiceId": "6a9fbd5cf7844a1445135115"
+    },
+    {
+      "row": 40,
+      "owner": "RAYEES",
+      "vehicle": "KL18AE9425",
+      "phone": "+919048599512",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 1 YEAR",
+      "sheetPrice": 28000,
+      "startDate": "2025-11-30",
+      "expiryDate": "2026-11-30",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-040",
+      "dueDates": [
+        "service 2026-05-30",
+        "service 2026-11-30"
+      ],
+      "customerId": "6a9fbd5df7844a144513511c",
+      "customerPackageId": "6a9fbd5df7844a1445135122",
+      "invoiceId": "6a9fbd5df7844a1445135125",
+      "carId": "6a9fbd5df7844a1445135120"
+    },
+    {
+      "row": 41,
+      "owner": "SAJAD",
+      "vehicle": "KL78AE9201",
+      "phone": "+919539704220",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 34000,
+      "startDate": "2024-02-12",
+      "expiryDate": "2027-02-12",
+      "status": "active",
+      "totalVisits": 4,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 2,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-041",
+      "dueDates": [
+        "service 2024-08-12",
+        "service 2025-02-12",
+        "recoat 2025-08-12",
+        "recoat 2026-02-12"
+      ],
+      "customerId": "6a9fbd5ef7844a144513512e",
+      "customerPackageId": "6a9fbd5ef7844a1445135134",
+      "invoiceId": "6a9fbd5ef7844a1445135137",
+      "carId": "6a9fbd5ef7844a1445135132"
+    },
+    {
+      "row": 42,
+      "owner": "JYOTHISH",
+      "vehicle": "KL76F5442",
+      "phone": "+919188265181",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 28000,
+      "startDate": "2025-11-28",
+      "expiryDate": "2028-11-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-042",
+      "dueDates": [
+        "service 2026-11-28",
+        "service 2027-11-28",
+        "service 2028-11-28"
+      ],
+      "customerId": "6a9fbd5ff7844a1445135144",
+      "customerPackageId": "6a9fbd5ff7844a144513514a",
+      "invoiceId": "6a9fbd5ff7844a144513514d",
+      "carId": "6a9fbd5ff7844a1445135148"
+    },
+    {
+      "row": 44,
+      "owner": "SALAM",
+      "vehicle": "KL77E8585",
+      "phone": "+919645595972",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 29000,
+      "startDate": "2025-11-27",
+      "expiryDate": "2028-11-27",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-043",
+      "dueDates": [
+        "service 2026-11-27",
+        "service 2027-11-27",
+        "service 2028-11-27"
+      ],
+      "customerId": "6a9fbd60f7844a1445135158",
+      "customerPackageId": "6a9fbd60f7844a144513515e",
+      "invoiceId": "6a9fbd61f7844a1445135161",
+      "carId": "6a9fbd60f7844a144513515c"
+    },
+    {
+      "row": 45,
+      "owner": null,
+      "vehicle": "KL77E6662",
+      "phone": "+919037077368",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 17750,
+      "startDate": "2025-10-16",
+      "expiryDate": "2026-10-16",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-044",
+      "dueDates": [
+        "service 2026-04-16",
+        "service 2026-10-16"
+      ],
+      "customerId": "6a9fbd61f7844a144513516c",
+      "customerPackageId": "6a9fbd62f7844a1445135175",
+      "invoiceId": "6a9fbd62f7844a1445135178",
+      "carId": "6a9fbd61f7844a1445135170"
+    },
+    {
+      "row": 46,
+      "owner": null,
+      "vehicle": null,
+      "phone": "+919400010002",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - LUXURY - 3 YEAR",
+      "sheetPrice": 28000,
+      "startDate": "2025-09-27",
+      "expiryDate": "2028-09-27",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-045",
+      "dueDates": [
+        "service 2026-09-27",
+        "service 2027-09-27",
+        "service 2028-09-27"
+      ],
+      "customerId": "6a9fbd62f7844a1445135181",
+      "customerPackageId": "6a9fbd62f7844a1445135184",
+      "invoiceId": "6a9fbd63f7844a1445135187"
+    },
+    {
+      "row": 47,
+      "owner": null,
+      "vehicle": null,
+      "phone": "+918592851313",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 32400,
+      "startDate": "2025-09-27",
+      "expiryDate": "2028-09-27",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-046",
+      "dueDates": [
+        "service 2026-09-27",
+        "service 2027-09-27",
+        "service 2028-09-27"
+      ],
+      "customerId": "6a9fbd63f7844a1445135192",
+      "customerPackageId": "6a9fbd63f7844a1445135195",
+      "invoiceId": "6a9fbd64f7844a1445135198"
+    },
+    {
+      "row": 48,
+      "owner": "SHOUKATH",
+      "vehicle": "KL57AC3355",
+      "phone": "+919544408834",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 28800,
+      "startDate": "2025-09-21",
+      "expiryDate": "2028-09-21",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-047",
+      "dueDates": [
+        "service 2026-09-21",
+        "service 2027-09-21",
+        "service 2028-09-21"
+      ],
+      "customerId": "6a9fbd64f7844a14451351a3",
+      "customerPackageId": "6a9fbd64f7844a14451351a9",
+      "invoiceId": "6a9fbd65f7844a14451351ac",
+      "carId": "6a9fbd64f7844a14451351a7"
+    },
+    {
+      "row": 49,
+      "owner": "RAMEES",
+      "vehicle": "KL77E4369",
+      "phone": "+919995365274",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 28800,
+      "startDate": "2025-08-29",
+      "expiryDate": "2028-08-29",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-048",
+      "dueDates": [
+        "service 2026-08-29",
+        "service 2027-08-29",
+        "service 2028-08-29"
+      ],
+      "customerId": "6a9fbd65f7844a14451351b7",
+      "customerPackageId": "6a9fbd66f7844a14451351bd",
+      "invoiceId": "6a9fbd66f7844a14451351c0",
+      "carId": "6a9fbd65f7844a14451351bb"
+    },
+    {
+      "row": 50,
+      "owner": "SHAJI",
+      "vehicle": "KL76C1274",
+      "phone": "+910000000050",
+      "placeholderPhone": true,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 11000,
+      "startDate": "2025-08-26",
+      "expiryDate": "2026-08-26",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-049",
+      "dueDates": [
+        "service 2026-02-26",
+        "service 2026-08-26"
+      ],
+      "customerId": "6a9fbd66f7844a14451351cb",
+      "customerPackageId": "6a9fbd67f7844a14451351d1",
+      "invoiceId": "6a9fbd67f7844a14451351d4",
+      "carId": "6a9fbd67f7844a14451351cf"
+    },
+    {
+      "row": 51,
+      "owner": "SHABEER",
+      "vehicle": "KL84E0940",
+      "phone": "+919037017703",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 31000,
+      "startDate": "2025-08-12",
+      "expiryDate": "2028-08-12",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-050",
+      "dueDates": [
+        "service 2026-08-12",
+        "service 2027-08-12",
+        "service 2028-08-12"
+      ],
+      "customerId": "6a9fbd67f7844a14451351dd",
+      "customerPackageId": "6a9fbd68f7844a14451351e3",
+      "invoiceId": "6a9fbd69f7844a14451351e6",
+      "carId": "6a9fbd68f7844a14451351e1"
+    },
+    {
+      "row": 52,
+      "owner": "AACHI",
+      "vehicle": "KL77E3133",
+      "phone": "+919072902750",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 11500,
+      "startDate": "2025-08-05",
+      "expiryDate": "2026-08-05",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-051",
+      "dueDates": [
+        "service 2026-02-05",
+        "service 2026-08-05"
+      ],
+      "customerId": "6a9fbd6af7844a14451351f1",
+      "customerPackageId": "6a9fbd6af7844a14451351f7",
+      "invoiceId": "6a9fbd6bf7844a14451351fa",
+      "carId": "6a9fbd6af7844a14451351f5"
+    },
+    {
+      "row": 53,
+      "owner": "JISHAN",
+      "vehicle": "KL56U555",
+      "phone": "+919562525252",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 15500,
+      "startDate": "2025-08-06",
+      "expiryDate": "2026-08-06",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-052",
+      "dueDates": [
+        "service 2026-02-06",
+        "service 2026-08-06"
+      ],
+      "customerId": "6a9fbd6bf7844a1445135203",
+      "customerPackageId": "6a9fbd6bf7844a1445135209",
+      "invoiceId": "6a9fbd6cf7844a144513520c",
+      "carId": "6a9fbd6bf7844a1445135207"
+    },
+    {
+      "row": 54,
+      "owner": "RIYAS",
+      "vehicle": null,
+      "phone": "+910000000054",
+      "placeholderPhone": true,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2024-12-16",
+      "expiryDate": "2027-12-16",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-053",
+      "dueDates": [
+        "service 2025-12-16",
+        "service 2026-12-16",
+        "service 2027-12-16"
+      ],
+      "customerId": "6a9fbd6cf7844a1445135215",
+      "customerPackageId": "6a9fbd6cf7844a1445135218",
+      "invoiceId": "6a9fbd6cf7844a144513521b"
+    },
+    {
+      "row": 56,
+      "owner": "SHAYLESH",
+      "vehicle": "T07725KL0429J",
+      "phone": "+919544333234",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 28000,
+      "startDate": "2025-07-24",
+      "expiryDate": "2028-07-24",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-054",
+      "dueDates": [
+        "service 2026-07-24",
+        "service 2027-07-24",
+        "service 2028-07-24"
+      ],
+      "customerId": "6a9fbd6df7844a1445135226",
+      "customerPackageId": "6a9fbd6df7844a144513522c",
+      "invoiceId": "6a9fbd6df7844a144513522f",
+      "carId": "6a9fbd6df7844a144513522a"
+    },
+    {
+      "row": 57,
+      "owner": "ROJIN",
+      "vehicle": "KL56X9854",
+      "phone": "+919061475890",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 1 YEAR",
+      "sheetPrice": 15000,
+      "startDate": "2025-07-22",
+      "expiryDate": "2026-07-22",
+      "status": "expired",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-055",
+      "dueDates": [
+        "service 2026-07-22"
+      ],
+      "customerId": "6a9fbd6ef7844a144513523a",
+      "customerPackageId": "6a9fbd6ef7844a1445135240",
+      "invoiceId": "6a9fbd6ff7844a1445135243",
+      "carId": "6a9fbd6ef7844a144513523e"
+    },
+    {
+      "row": 58,
+      "owner": null,
+      "vehicle": "T0625KL9611H",
+      "phone": "+919495835602",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 19000,
+      "startDate": "2025-07-18",
+      "expiryDate": "2026-07-18",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-056",
+      "dueDates": [
+        "service 2026-01-18",
+        "service 2026-07-18"
+      ],
+      "customerId": "6a9fbd6ff7844a144513524a",
+      "customerPackageId": "6a9fbd70f7844a1445135253",
+      "invoiceId": "6a9fbd70f7844a1445135256",
+      "carId": "6a9fbd6ff7844a144513524e"
+    },
+    {
+      "row": 59,
+      "owner": null,
+      "vehicle": "KL56Z0789",
+      "phone": "+910000000059",
+      "placeholderPhone": true,
+      "packageName": "CERAMIC COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 12000,
+      "startDate": "2025-07-08",
+      "expiryDate": "2026-07-08",
+      "status": "expired",
+      "totalVisits": 1,
+      "visitBreakdown": {
+        "service": 1,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-057",
+      "dueDates": [
+        "service 2026-07-08"
+      ],
+      "customerId": "6a9fbd70f7844a144513525f",
+      "customerPackageId": "6a9fbd71f7844a1445135265",
+      "invoiceId": "6a9fbd71f7844a1445135268",
+      "carId": "6a9fbd71f7844a1445135263"
+    },
+    {
+      "row": 60,
+      "owner": "SHAREEF",
+      "vehicle": "T0625KL1603H",
+      "phone": "+918090448056",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 32000,
+      "startDate": "2025-06-21",
+      "expiryDate": "2028-06-21",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-058",
+      "dueDates": [
+        "service 2026-06-21",
+        "service 2027-06-21",
+        "service 2028-06-21"
+      ],
+      "customerId": "6a9fbd71f7844a144513526f",
+      "customerPackageId": "6a9fbd72f7844a1445135275",
+      "invoiceId": "6a9fbd72f7844a1445135278",
+      "carId": "6a9fbd72f7844a1445135273"
+    },
+    {
+      "row": 61,
+      "owner": null,
+      "vehicle": "KL56Y0269",
+      "phone": "+919061893892",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - HATCHBACK - 1 YEAR",
+      "sheetPrice": 14000,
+      "startDate": "2025-06-18",
+      "expiryDate": "2026-06-18",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-059",
+      "dueDates": [
+        "service 2025-12-18",
+        "service 2026-06-18"
+      ],
+      "customerId": "6a9fbd73f7844a1445135283",
+      "customerPackageId": "6a9fbd73f7844a1445135289",
+      "invoiceId": "6a9fbd73f7844a144513528c",
+      "carId": "6a9fbd73f7844a1445135287"
+    },
+    {
+      "row": 62,
+      "owner": "NIMEESH",
+      "vehicle": "KL77E448",
+      "phone": "+919995075400",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - SEDAN - 5 YEAR",
+      "sheetPrice": 32000,
+      "startDate": "2025-06-13",
+      "expiryDate": "2030-06-13",
+      "status": "active",
+      "totalVisits": 5,
+      "visitBreakdown": {
+        "service": 5,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-060",
+      "dueDates": [
+        "service 2026-06-13",
+        "service 2027-06-13",
+        "service 2028-06-13",
+        "service 2029-06-13",
+        "service 2030-06-13"
+      ],
+      "customerId": "6a9fbd74f7844a1445135295",
+      "customerPackageId": "6a9fbd74f7844a144513529e",
+      "invoiceId": "6a9fbd74f7844a14451352a1",
+      "carId": "6a9fbd74f7844a1445135299"
+    },
+    {
+      "row": 63,
+      "owner": "PRAJITH KUMAR",
+      "vehicle": "T0525KL5636G",
+      "phone": "+919447458493",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 29500,
+      "startDate": "2025-06-09",
+      "expiryDate": "2028-06-09",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-061",
+      "dueDates": [
+        "service 2026-06-09",
+        "service 2027-06-09",
+        "service 2028-06-09"
+      ],
+      "customerId": "6a9fbd75f7844a14451352b0",
+      "customerPackageId": "6a9fbd75f7844a14451352b6",
+      "invoiceId": "6a9fbd76f7844a14451352b9",
+      "carId": "6a9fbd75f7844a14451352b4"
+    },
+    {
+      "row": 64,
+      "owner": "SHIBINAS",
+      "vehicle": null,
+      "phone": "+919744557270",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - HATCHBACK - 3 YEAR",
+      "sheetPrice": 25500,
+      "startDate": "2026-05-30",
+      "expiryDate": "2028-05-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-062",
+      "dueDates": [
+        "service 2027-01-30",
+        "service 2027-09-30",
+        "service 2028-05-30"
+      ],
+      "customerId": "6a9fbd76f7844a14451352c4",
+      "customerPackageId": "6a9fbd76f7844a14451352c7",
+      "invoiceId": "6a9fbd77f7844a14451352ca"
+    },
+    {
+      "row": 65,
+      "owner": "KAPIL",
+      "vehicle": "KL73E209628",
+      "phone": "+918943209628",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - HATCHBACK - 3 YEAR",
+      "sheetPrice": 28000,
+      "startDate": "2026-05-28",
+      "expiryDate": "2028-05-28",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-063",
+      "dueDates": [
+        "service 2027-01-28",
+        "service 2027-09-28",
+        "service 2028-05-28"
+      ],
+      "customerId": "6a9fbd77f7844a14451352d5",
+      "customerPackageId": "6a9fbd77f7844a14451352db",
+      "invoiceId": "6a9fbd78f7844a14451352de",
+      "carId": "6a9fbd77f7844a14451352d9"
+    },
+    {
+      "row": 66,
+      "owner": "SURESH",
+      "vehicle": "KL56Z6626",
+      "phone": "+919048484101",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2025-05-03",
+      "expiryDate": "2028-05-03",
+      "status": "active",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-064",
+      "dueDates": [
+        "service 2026-11-03",
+        "service 2028-05-03"
+      ],
+      "customerId": "6a9fbd78f7844a14451352e9",
+      "customerPackageId": "6a9fbd79f7844a14451352ef",
+      "invoiceId": "6a9fbd79f7844a14451352f2",
+      "carId": "6a9fbd79f7844a14451352ed"
+    },
+    {
+      "row": 67,
+      "owner": "AJNAS",
+      "vehicle": "KL7E3332",
+      "phone": "+919847363999",
+      "placeholderPhone": false,
+      "packageName": "CERAMIC COATING - SEDAN - 1 YEAR",
+      "sheetPrice": 12000,
+      "startDate": "2025-05-05",
+      "expiryDate": "2026-05-05",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-065",
+      "dueDates": [
+        "service 2025-11-05",
+        "service 2026-05-05"
+      ],
+      "customerId": "6a9fbd79f7844a14451352fb",
+      "customerPackageId": "6a9fbd7af7844a1445135304",
+      "invoiceId": "6a9fbd7af7844a1445135307",
+      "carId": "6a9fbd7af7844a14451352ff"
+    },
+    {
+      "row": 68,
+      "owner": "MIROSH",
+      "vehicle": "KL77B0369",
+      "phone": "+918137908299",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - HATCHBACK - 3 YEAR",
+      "sheetPrice": 34000,
+      "startDate": "2025-04-30",
+      "expiryDate": "2028-04-30",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-066",
+      "dueDates": [
+        "service 2026-04-30",
+        "service 2027-04-30",
+        "service 2028-04-30"
+      ],
+      "customerId": "6a9fbd7bf7844a1445135310",
+      "customerPackageId": "6a9fbd7bf7844a1445135316",
+      "invoiceId": "6a9fbd7bf7844a1445135319",
+      "carId": "6a9fbd7bf7844a1445135314"
+    },
+    {
+      "row": 69,
+      "owner": "MIROSH",
+      "vehicle": "T0425KL2630E",
+      "phone": "+919645355308",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2025-04-25",
+      "expiryDate": "2028-04-25",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-067",
+      "dueDates": [
+        "service 2026-04-25",
+        "service 2027-04-25",
+        "service 2028-04-25"
+      ],
+      "customerId": "6a9fbd7cf7844a1445135324",
+      "customerPackageId": "6a9fbd7cf7844a144513532a",
+      "invoiceId": "6a9fbd7df7844a144513532d",
+      "carId": "6a9fbd7cf7844a1445135328"
+    },
+    {
+      "row": 70,
+      "owner": "NIYAS",
+      "vehicle": "KL57AB6706",
+      "phone": "+919539495229",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 1 YEAR",
+      "sheetPrice": 15300,
+      "startDate": "2025-04-08",
+      "expiryDate": "2026-04-08",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-068",
+      "dueDates": [
+        "service 2025-10-08",
+        "service 2026-04-08"
+      ],
+      "customerId": "6a9fbd7df7844a1445135338",
+      "customerPackageId": "6a9fbd7df7844a144513533e",
+      "invoiceId": "6a9fbd7ef7844a1445135341",
+      "carId": "6a9fbd7df7844a144513533c"
+    },
+    {
+      "row": 71,
+      "owner": "FAIZAL",
+      "vehicle": "KL777778",
+      "phone": "+919605983147",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 1 YEAR",
+      "sheetPrice": 18000,
+      "startDate": "2025-03-29",
+      "expiryDate": "2026-03-29",
+      "status": "expired",
+      "totalVisits": 2,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-069",
+      "dueDates": [
+        "service 2025-09-29",
+        "service 2026-03-29"
+      ],
+      "customerId": "6a9fbd7ef7844a144513534a",
+      "customerPackageId": "6a9fbd7ef7844a1445135350",
+      "invoiceId": "6a9fbd7ff7844a1445135353",
+      "carId": "6a9fbd7ef7844a144513534e"
+    },
+    {
+      "row": 72,
+      "owner": "MANOJ",
+      "vehicle": "KL18AE0679",
+      "phone": "+919388986038",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 25000,
+      "startDate": "2025-03-16",
+      "expiryDate": "2028-03-16",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-070",
+      "dueDates": [
+        "service 2026-03-16",
+        "service 2027-03-16",
+        "service 2028-03-16"
+      ],
+      "customerId": "6a9fbd7ff7844a144513535c",
+      "customerPackageId": "6a9fbd7ff7844a1445135362",
+      "invoiceId": "6a9fbd80f7844a1445135365",
+      "carId": "6a9fbd7ff7844a1445135360"
+    },
+    {
+      "row": 73,
+      "owner": "GAFOOR",
+      "vehicle": null,
+      "phone": "+918003800336",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 29000,
+      "startDate": "2026-03-21",
+      "expiryDate": "2028-03-21",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-071",
+      "dueDates": [
+        "service 2026-11-21",
+        "service 2027-07-21",
+        "service 2028-03-21"
+      ],
+      "customerId": "6a9fbd80f7844a1445135370",
+      "customerPackageId": "6a9fbd80f7844a1445135373",
+      "invoiceId": "6a9fbd81f7844a1445135376"
+    },
+    {
+      "row": 74,
+      "owner": "DHEERAJ",
+      "vehicle": "KL56Z5002",
+      "phone": "+919061986032",
+      "placeholderPhone": false,
+      "packageName": "BOROPHENE COATING - COMPACT SUV - 2 YEAR",
+      "sheetPrice": 26000,
+      "startDate": "2025-03-06",
+      "expiryDate": "2027-03-06",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-072",
+      "dueDates": [
+        "service 2025-11-06",
+        "service 2026-07-06",
+        "service 2027-03-06"
+      ],
+      "customerId": "6a9fbd81f7844a1445135381",
+      "customerPackageId": "6a9fbd81f7844a1445135387",
+      "invoiceId": "6a9fbd82f7844a144513538a",
+      "carId": "6a9fbd81f7844a1445135385"
+    },
+    {
+      "row": 75,
+      "owner": "ABHIRAM",
+      "vehicle": "KL77D8004",
+      "phone": "+919645537642",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 2 YEAR",
+      "sheetPrice": 30000,
+      "startDate": "2025-02-21",
+      "expiryDate": "2027-02-21",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 2,
+        "recoat": 1,
+        "maintenance": 0
+      },
+      "sixMonthly": true,
+      "invoiceNumber": "LEGACY-COAT-073",
+      "dueDates": [
+        "service 2025-08-21",
+        "service 2026-02-21",
+        "recoat 2026-08-21"
+      ],
+      "customerId": "6a9fbd82f7844a1445135395",
+      "customerPackageId": "6a9fbd83f7844a144513539b",
+      "invoiceId": "6a9fbd83f7844a144513539e",
+      "carId": "6a9fbd82f7844a1445135399"
+    },
+    {
+      "row": 76,
+      "owner": "FAHAD",
+      "vehicle": "T1224KL2993R",
+      "phone": "+910000000076",
+      "placeholderPhone": true,
+      "packageName": "BOROPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 25000,
+      "startDate": "2025-01-10",
+      "expiryDate": "2028-01-10",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-074",
+      "dueDates": [
+        "service 2026-01-10",
+        "service 2027-01-10",
+        "service 2028-01-10"
+      ],
+      "customerId": "6a9fbd83f7844a14451353a9",
+      "customerPackageId": "6a9fbd84f7844a14451353af",
+      "invoiceId": "6a9fbd84f7844a14451353b2",
+      "carId": "6a9fbd84f7844a14451353ad"
+    },
+    {
+      "row": 77,
+      "owner": "JIJO",
+      "vehicle": "KL56W7425",
+      "phone": "+910000000077",
+      "placeholderPhone": true,
+      "packageName": "GRAPHENE COATING - SUV / MUV - 3 YEAR",
+      "sheetPrice": 25000,
+      "startDate": "2024-10-18",
+      "expiryDate": "2027-10-18",
+      "status": "active",
+      "totalVisits": 3,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 0
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-075",
+      "dueDates": [
+        "service 2025-10-18",
+        "service 2026-10-18",
+        "service 2027-10-18"
+      ],
+      "customerId": "6a9fbd84f7844a14451353bd",
+      "customerPackageId": "6a9fbd85f7844a14451353c6",
+      "invoiceId": "6a9fbd85f7844a14451353c9",
+      "carId": "6a9fbd85f7844a14451353c1"
+    },
+    {
+      "row": 78,
+      "owner": "LIBEESH",
+      "vehicle": "T0924KL0761L",
+      "phone": "+919961268995",
+      "placeholderPhone": false,
+      "packageName": "GRAPHENE COATING - COMPACT SUV - 3 YEAR",
+      "sheetPrice": 30600,
+      "startDate": "2024-09-13",
+      "expiryDate": "2027-09-13",
+      "status": "active",
+      "totalVisits": 5,
+      "visitBreakdown": {
+        "service": 3,
+        "recoat": 0,
+        "maintenance": 2
+      },
+      "sixMonthly": false,
+      "invoiceNumber": "LEGACY-COAT-076",
+      "dueDates": [
+        "service 2025-04-13",
+        "service 2025-11-13",
+        "service 2026-06-13",
+        "maintenance 2027-01-13",
+        "maintenance 2027-08-13"
+      ],
+      "customerId": "6a9fbd86f7844a14451353d7",
+      "customerPackageId": "6a9fbd86f7844a14451353dd",
+      "invoiceId": "6a9fbd86f7844a14451353e0",
+      "carId": "6a9fbd86f7844a14451353db"
+    }
+  ],
+  "created": {
+    "customers": 75,
+    "cars": 62,
+    "services": 6,
+    "templates": 25,
+    "packages": 76,
+    "visits": 198,
+    "invoices": 76
+  },
+  "followUps": [
+    "row 3 (ISMAIL): sheet phone \"97477062929\" 11 digits — trimmed to last 10 → +917477062929",
+    "row 13 (SHIJIL): sheet phone \"97335601839\" 11 digits — trimmed to last 10 → +917335601839",
+    "row 29 (KL5Y0044): placeholder phone +910000000029 — sheet had no number, please correct",
+    "row 30 (SHALU): placeholder phone +910000000030 — sheet had no number, please correct",
+    "row 35 (NOUSHAD): placeholder phone +910000000035 — sheet had no number, please correct",
+    "row 50 (SHAJI): placeholder phone +910000000050 — sheet had no number, please correct",
+    "row 54 (RIYAS): placeholder phone +910000000054 — sheet had no number, please correct",
+    "row 59 (KL56Z0789): placeholder phone +910000000059 — sheet had no number, please correct",
+    "row 62: expiry corrected to 6/13/2030 (sheet said 6/13/1930; 5 YEAR from 6/13/2025)",
+    "row 64 (SHIBINAS): sheet says 3 YEAR but 5/30/2026 → 5/30/2028 spans 2.00 years — kept the written dates",
+    "row 65 (KAPIL): sheet says 3 YEAR but 5/28/2026 → 5/28/2028 spans 2.00 years — kept the written dates",
+    "row 73 (GAFOOR): sheet says 3 YEAR but 3/21/2026 → 3/21/2028 spans 2.00 years — kept the written dates",
+    "row 76 (FAHAD): placeholder phone +910000000076 — sheet had no number, please correct",
+    "row 77 (JIJO): placeholder phone +910000000077 — sheet had no number, please correct"
+  ]
+}

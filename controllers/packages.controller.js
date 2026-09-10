@@ -691,6 +691,13 @@ export async function closePackageSale(req, res) {
 
     invoice.paymentStatus = 'RECEIVED';
     invoice.paymentReceivedAt = new Date();
+    invoice.outstandingAmount = 0;
+    try {
+      const { getCheckoutTotal } = await import('../services/credit/outstandingService.js');
+      invoice.amountCollectedAtCheckout = getCheckoutTotal(invoice);
+    } catch (_) {
+      /* optional cache field */
+    }
     await invoice.save();
     invalidateDashboardForBusiness(req.businessId);
     try {

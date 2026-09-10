@@ -1,0 +1,1175 @@
+{
+  "ranAt": "2026-09-10T06:20:30.619Z",
+  "apply": false,
+  "businessId": "6a698664d6861f0f2bccc01b",
+  "businessName": "magicrabbitautohub",
+  "ownerEmail": "magicrabbitautohub@gmail.com",
+  "placeholderPattern": "/^TEMP(?:[-_\\s]*\\d+)?$/i",
+  "sourceCars": [
+    {
+      "carId": "6a702b62112577918bd3db41",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "",
+      "color": "Black",
+      "customerId": "6a9eae892eb40a38e05aa55e",
+      "customerIds": [
+        "6a702b4b112577918bd3db39",
+        "6a9676eb2cb2778ebab8bd6d",
+        "6a76ad2689f8a750bd2f96c5",
+        "6a97c9f92cb2778ebabb9a9e",
+        "6a9808352a96f2d5ce32f42a",
+        "6a9e94152eb40a38e05a3915",
+        "6a9e946c2eb40a38e05a3a6c",
+        "6a9eace72eb40a38e05a9fee",
+        "6a9eae892eb40a38e05aa55e"
+      ],
+      "createdAt": "2026-08-03T05:47:14.597Z"
+    },
+    {
+      "carId": "6a702fd4112577918bd3e486",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Bmw",
+      "color": "Grey",
+      "customerId": "6a702fb9112577918bd3e458",
+      "customerIds": [],
+      "createdAt": "2026-08-03T06:06:12.516Z"
+    },
+    {
+      "carId": "6a704647112577918bd4147c",
+      "carNumber": "TEMP",
+      "brand": "Bmw",
+      "model": "X1",
+      "color": "Grey",
+      "customerId": "6a704634112577918bd4142a",
+      "customerIds": [],
+      "createdAt": "2026-08-03T07:41:59.005Z"
+    },
+    {
+      "carId": "6a704d4b112577918bd42105",
+      "carNumber": "TEMP",
+      "brand": "BMW",
+      "model": "X1g",
+      "color": "grey",
+      "customerId": "6a704d18112577918bd420a6",
+      "customerIds": [],
+      "createdAt": "2026-08-03T08:11:55.464Z"
+    },
+    {
+      "carId": "6a704f85112577918bd425b1",
+      "carNumber": "TEMP",
+      "brand": "bmw",
+      "model": "x1",
+      "color": "grey",
+      "customerId": "6a704f0a112577918bd42453",
+      "customerIds": [],
+      "createdAt": "2026-08-03T08:21:25.905Z"
+    },
+    {
+      "carId": "6a7065c6112577918bd46cd9",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "punch ev",
+      "color": "white",
+      "customerId": "6a70654e112577918bd46bf5",
+      "customerIds": [],
+      "createdAt": "2026-08-03T09:56:22.037Z"
+    },
+    {
+      "carId": "6a706828112577918bd47b84",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "punch ev",
+      "color": "white",
+      "customerId": "6a7067b7112577918bd479be",
+      "customerIds": [],
+      "createdAt": "2026-08-03T10:06:32.066Z"
+    },
+    {
+      "carId": "6a73203a89f8a750bd2d2d57",
+      "carNumber": "TEMP",
+      "brand": "Kia",
+      "model": "Seltos",
+      "color": "White",
+      "customerId": "6a73202389f8a750bd2d2c9c",
+      "customerIds": [],
+      "createdAt": "2026-08-05T11:36:26.636Z"
+    },
+    {
+      "carId": "6a741a1889f8a750bd2da2c9",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Auto",
+      "color": "",
+      "customerId": "6a740c1189f8a750bd2d83c8",
+      "customerIds": [],
+      "createdAt": "2026-08-06T05:22:32.351Z"
+    },
+    {
+      "carId": "6a743bf189f8a750bd2de126",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Seltos",
+      "color": "Black",
+      "customerId": "6a743ba789f8a750bd2de07a",
+      "customerIds": [],
+      "createdAt": "2026-08-06T07:46:57.322Z"
+    },
+    {
+      "carId": "6a743d6789f8a750bd2de266",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Thar",
+      "color": "Black",
+      "customerId": "6a743d3689f8a750bd2de246",
+      "customerIds": [],
+      "createdAt": "2026-08-06T07:53:11.836Z"
+    },
+    {
+      "carId": "6a7583ec89f8a750bd2ec15d",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Venue",
+      "color": "Black",
+      "customerId": "6a7583aa89f8a750bd2ec11b",
+      "customerIds": [],
+      "createdAt": "2026-08-07T07:06:20.846Z"
+    },
+    {
+      "carId": "6a76df9089f8a750bd2fd276",
+      "carNumber": "TEMP",
+      "brand": "Landrover",
+      "model": "Defender",
+      "color": "White",
+      "customerId": "6a76df1f89f8a750bd2fd21e",
+      "customerIds": [],
+      "createdAt": "2026-08-08T07:49:36.637Z"
+    },
+    {
+      "carId": "6a79a2a4739b5a0ef4b7e862",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Virtus",
+      "color": "",
+      "customerId": "6a79a277739b5a0ef4b7e83b",
+      "customerIds": [],
+      "createdAt": "2026-08-10T10:06:28.863Z"
+    },
+    {
+      "carId": "6a7ada09739b5a0ef4b98d2e",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "venue",
+      "color": "black",
+      "customerId": "6a7ad9f3739b5a0ef4b98d20",
+      "customerIds": [],
+      "createdAt": "2026-08-11T08:15:05.291Z"
+    },
+    {
+      "carId": "6a7b16e5dde185468b3c9d77",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Kylaq",
+      "color": "Blach",
+      "customerId": "6a7b16cadde185468b3c9d51",
+      "customerIds": [],
+      "createdAt": "2026-08-11T12:34:45.843Z"
+    },
+    {
+      "carId": "6a7ed66d0576d4fbdbe196c1",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Baleno",
+      "color": "Blue",
+      "customerId": "6a7ed6540576d4fbdbe196ab",
+      "customerIds": [],
+      "createdAt": "2026-08-14T08:48:45.435Z"
+    },
+    {
+      "carId": "6a8299490576d4fbdbe68185",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Tharrox",
+      "color": "Green",
+      "customerId": "6a8299170576d4fbdbe68109",
+      "customerIds": [],
+      "createdAt": "2026-08-17T05:16:57.826Z"
+    },
+    {
+      "carId": "6a8695080576d4fbdbec37e0",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "I 20",
+      "color": "Blue",
+      "customerId": "6a8694f10576d4fbdbec37bf",
+      "customerIds": [],
+      "createdAt": "2026-08-20T05:47:52.390Z"
+    },
+    {
+      "carId": "6a86a8a90576d4fbdbec5a27",
+      "carNumber": "TEMP",
+      "brand": "",
+      "model": "Thar rox",
+      "color": "White",
+      "customerId": "6a73202389f8a750bd2d2c9c",
+      "customerIds": [],
+      "createdAt": "2026-08-20T07:11:37.684Z"
+    }
+  ],
+  "splits": [
+    {
+      "sourceCarId": "6a702b62112577918bd3db41",
+      "sourcePlate": "TEMP",
+      "keeperCustomerId": "6a9eae892eb40a38e05aa55e",
+      "keptJobTokens": [
+        "20260907-837QY4"
+      ],
+      "spawned": [
+        {
+          "newCarId": "6aa24c2e5fc48ee1cf9a800d",
+          "customerId": "6a9676eb2cb2778ebab8bd6d",
+          "customerName": "Mansoor",
+          "customerPhone": "+919633344477",
+          "jobTokens": [
+            "20260901-GVU9QS"
+          ]
+        },
+        {
+          "newCarId": "6aa24c2e5fc48ee1cf9a800e",
+          "customerId": "6a76ad2689f8a750bd2f96c5",
+          "customerName": "Kia showroom",
+          "customerPhone": "+918547014147",
+          "jobTokens": [
+            "20260902-QAUBDM"
+          ]
+        },
+        {
+          "newCarId": "6aa24c2e5fc48ee1cf9a800f",
+          "customerId": "6a9808352a96f2d5ce32f42a",
+          "customerName": "Saabir",
+          "customerPhone": "+917907252266",
+          "jobTokens": [
+            "20260902-938XRM"
+          ]
+        },
+        {
+          "newCarId": "6aa24c2e5fc48ee1cf9a8010",
+          "customerId": "6a9e94152eb40a38e05a3915",
+          "customerName": "Nasif",
+          "customerPhone": "+919400192671",
+          "jobTokens": [
+            "20260907-CR4YSP"
+          ]
+        },
+        {
+          "newCarId": "6aa24c2e5fc48ee1cf9a8011",
+          "customerId": "6a9e946c2eb40a38e05a3a6c",
+          "customerName": "Nijith",
+          "customerPhone": "+919567092309",
+          "jobTokens": [
+            "20260907-KB677F"
+          ]
+        }
+      ]
+    }
+  ],
+  "unlinkedOwners": [
+    {
+      "fromCarId": "6a702b62112577918bd3db41",
+      "fromPlate": "TEMP",
+      "owners": [
+        {
+          "customerId": "6a702b4b112577918bd3db39",
+          "name": null,
+          "phone": null,
+          "last10": "",
+          "reason": "listed as co-owner but no jobs on this TEMP car"
+        },
+        {
+          "customerId": "6a97c9f92cb2778ebabb9a9e",
+          "name": "Akash",
+          "phone": "+919497474222",
+          "last10": "9497474222",
+          "reason": "listed as co-owner but no jobs on this TEMP car"
+        },
+        {
+          "customerId": "6a9eace72eb40a38e05a9fee",
+          "name": "Pv narayanan",
+          "phone": "+919446404145",
+          "last10": "9446404145",
+          "reason": "listed as co-owner but no jobs on this TEMP car"
+        }
+      ]
+    }
+  ],
+  "createdCars": [
+    {
+      "newCarId": "6aa24c2e5fc48ee1cf9a800d",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "customerId": "6a9676eb2cb2778ebab8bd6d",
+      "customerName": "Mansoor",
+      "customerPhone": "+919633344477",
+      "last10": "9633344477",
+      "jobTokens": [
+        "20260901-GVU9QS"
+      ],
+      "jobIds": [
+        "6a96770a2cb2778ebab8bd8c"
+      ]
+    },
+    {
+      "newCarId": "6aa24c2e5fc48ee1cf9a800e",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "customerId": "6a76ad2689f8a750bd2f96c5",
+      "customerName": "Kia showroom",
+      "customerPhone": "+918547014147",
+      "last10": "8547014147",
+      "jobTokens": [
+        "20260902-QAUBDM"
+      ],
+      "jobIds": [
+        "6a97bda92cb2778ebabb4e3b"
+      ]
+    },
+    {
+      "newCarId": "6aa24c2e5fc48ee1cf9a800f",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "customerId": "6a9808352a96f2d5ce32f42a",
+      "customerName": "Saabir",
+      "customerPhone": "+917907252266",
+      "last10": "7907252266",
+      "jobTokens": [
+        "20260902-938XRM"
+      ],
+      "jobIds": [
+        "6a9808672a96f2d5ce32f479"
+      ]
+    },
+    {
+      "newCarId": "6aa24c2e5fc48ee1cf9a8010",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "customerId": "6a9e94152eb40a38e05a3915",
+      "customerName": "Nasif",
+      "customerPhone": "+919400192671",
+      "last10": "9400192671",
+      "jobTokens": [
+        "20260907-CR4YSP"
+      ],
+      "jobIds": [
+        "6a9e942a2eb40a38e05a3930"
+      ]
+    },
+    {
+      "newCarId": "6aa24c2e5fc48ee1cf9a8011",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "customerId": "6a9e946c2eb40a38e05a3a6c",
+      "customerName": "Nijith",
+      "customerPhone": "+919567092309",
+      "last10": "9567092309",
+      "jobTokens": [
+        "20260907-KB677F"
+      ],
+      "jobIds": [
+        "6a9e94802eb40a38e05a3a9f"
+      ]
+    }
+  ],
+  "jobRepoints": [
+    {
+      "jobId": "6a96770a2cb2778ebab8bd8c",
+      "tokenNumber": "20260901-GVU9QS",
+      "customerId": "6a9676eb2cb2778ebab8bd6d",
+      "customerName": "Mansoor",
+      "customerPhone": "+919633344477",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "toCarId": "6aa24c2e5fc48ee1cf9a800d"
+    },
+    {
+      "jobId": "6a97bda92cb2778ebabb4e3b",
+      "tokenNumber": "20260902-QAUBDM",
+      "customerId": "6a76ad2689f8a750bd2f96c5",
+      "customerName": "Kia showroom",
+      "customerPhone": "+918547014147",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "toCarId": "6aa24c2e5fc48ee1cf9a800e"
+    },
+    {
+      "jobId": "6a9808672a96f2d5ce32f479",
+      "tokenNumber": "20260902-938XRM",
+      "customerId": "6a9808352a96f2d5ce32f42a",
+      "customerName": "Saabir",
+      "customerPhone": "+917907252266",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "toCarId": "6aa24c2e5fc48ee1cf9a800f"
+    },
+    {
+      "jobId": "6a9e942a2eb40a38e05a3930",
+      "tokenNumber": "20260907-CR4YSP",
+      "customerId": "6a9e94152eb40a38e05a3915",
+      "customerName": "Nasif",
+      "customerPhone": "+919400192671",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "toCarId": "6aa24c2e5fc48ee1cf9a8010"
+    },
+    {
+      "jobId": "6a9e94802eb40a38e05a3a9f",
+      "tokenNumber": "20260907-KB677F",
+      "customerId": "6a9e946c2eb40a38e05a3a6c",
+      "customerName": "Nijith",
+      "customerPhone": "+919567092309",
+      "fromCarId": "6a702b62112577918bd3db41",
+      "toCarId": "6aa24c2e5fc48ee1cf9a8011"
+    }
+  ],
+  "invoiceUpdates": [
+    {
+      "invoiceId": "6a72b0ae112577918bd5c60c",
+      "invoiceNumber": "INV-HWZ69SM72N",
+      "jobId": "6a705eab112577918bd452d8",
+      "from": "TEMP",
+      "to": "TEMP-4"
+    },
+    {
+      "invoiceId": "6a71b624112577918bd544ae",
+      "invoiceNumber": "INV-XX8D9L2DEY",
+      "jobId": "6a706834112577918bd47b9b",
+      "from": "TEMP",
+      "to": "TEMP-6"
+    },
+    {
+      "invoiceId": "6a74045789f8a750bd2d7d35",
+      "invoiceNumber": "INV-K2RKYL58W6",
+      "jobId": "6a73204689f8a750bd2d2d89",
+      "from": "TEMP",
+      "to": "TEMP-7"
+    },
+    {
+      "invoiceId": "6a795c84739b5a0ef4b6e971",
+      "invoiceNumber": "INV-FXU2YAQR5A",
+      "jobId": "6a741a1d89f8a750bd2da2d7",
+      "from": "TEMP",
+      "to": "TEMP-8"
+    },
+    {
+      "invoiceId": "6a86de060576d4fbdbecc123",
+      "invoiceNumber": "INV-2X9FFUF3HC",
+      "jobId": "6a743c2489f8a750bd2de142",
+      "from": "TO626KL0352K",
+      "to": "TEMP-9"
+    },
+    {
+      "invoiceId": "6a7ecacf0576d4fbdbe1797c",
+      "invoiceNumber": "INV-6T454HUWNZ",
+      "jobId": "6a743d8989f8a750bd2de278",
+      "from": "TEMP",
+      "to": "TEMP-10"
+    },
+    {
+      "invoiceId": "6a75a5ab89f8a750bd2f0b5e",
+      "invoiceNumber": "INV-CPLJKNWQK7",
+      "jobId": "6a75841289f8a750bd2ec1ab",
+      "from": "TEMP",
+      "to": "TEMP-11"
+    },
+    {
+      "invoiceId": "6a79571a739b5a0ef4b6ccca",
+      "invoiceNumber": "INV-YXJ2YXWATD",
+      "jobId": "6a76df9689f8a750bd2fd284",
+      "from": "TEMP",
+      "to": "TEMP-12"
+    },
+    {
+      "invoiceId": "6a7d8ca50576d4fbdbdfc203",
+      "invoiceNumber": "INV-A7FGM63KBS",
+      "jobId": "6a79a2a7739b5a0ef4b7e870",
+      "from": "TEMP",
+      "to": "TEMP-13"
+    },
+    {
+      "invoiceId": "6a8049eb0576d4fbdbe3fe6c",
+      "invoiceNumber": "INV-SDY2RYJ4K2",
+      "jobId": "6a7ada1b739b5a0ef4b98d3c",
+      "from": "TEMP",
+      "to": "TEMP-14"
+    },
+    {
+      "invoiceId": "6a7c34800576d4fbdbdd845e",
+      "invoiceNumber": "INV-XMRBNUGHWD",
+      "jobId": "6a7b16f2dde185468b3c9d93",
+      "from": "TEMP",
+      "to": "TEMP-15"
+    },
+    {
+      "invoiceId": "6a82a84c0576d4fbdbe6b0ef",
+      "invoiceNumber": "INV-NYVVB8Z4UZ",
+      "jobId": "6a8299b40576d4fbdbe681f8",
+      "from": "TEMP",
+      "to": "TEMP-17"
+    },
+    {
+      "invoiceId": "6a8434130576d4fbdbe94784",
+      "invoiceNumber": "INV-9HVKG7LBC4",
+      "jobId": "6a83dbd60576d4fbdbe87918",
+      "from": "TEMP",
+      "to": "TEMP-8"
+    },
+    {
+      "invoiceId": "6a83f20e0576d4fbdbe8afc4",
+      "invoiceNumber": "INV-FVEZY5ZJZR",
+      "jobId": "6a83ebb00576d4fbdbe89847",
+      "from": "TEMP",
+      "to": "TEMP-7"
+    },
+    {
+      "invoiceId": "6a88014160513f5540bcdcf0",
+      "invoiceNumber": "INV-TPLU5MZJTA",
+      "jobId": "6a8695180576d4fbdbec37ee",
+      "from": "TEMP",
+      "to": "TEMP-18"
+    },
+    {
+      "invoiceId": "6a86ade80576d4fbdbec6142",
+      "invoiceNumber": "INV-CD3RVE4ZR7",
+      "jobId": "6a86a8ab0576d4fbdbec5a35",
+      "from": "TEMP",
+      "to": "TEMP-19"
+    },
+    {
+      "invoiceId": "6a9e8efb2eb40a38e05a2d12",
+      "invoiceNumber": "INV-4K7XE9ALEQ",
+      "jobId": "6a96770a2cb2778ebab8bd8c",
+      "from": "TEMP",
+      "to": "TEMP-20"
+    },
+    {
+      "invoiceId": "6a97c63a2cb2778ebabb8847",
+      "invoiceNumber": "INV-NYMXYAB7GP",
+      "jobId": "6a97bda92cb2778ebabb4e3b",
+      "from": "TEMP",
+      "to": "TEMP-21"
+    },
+    {
+      "invoiceId": "6a9e6d60e88eb56833cd46cf",
+      "invoiceNumber": "INV-PALN83TT7Z",
+      "jobId": "6a9808672a96f2d5ce32f479",
+      "from": "TEMP",
+      "to": "TEMP-22"
+    },
+    {
+      "invoiceId": "6a9ba6c0a4f48060c0a0244f",
+      "invoiceNumber": "INV-PT84ADGTQZ",
+      "jobId": "6a9ba372a4f48060c0a01a25",
+      "from": "TEMP",
+      "to": "TEMP-19"
+    },
+    {
+      "invoiceId": "6a9e3859a4f48060c0a4a2c6",
+      "invoiceNumber": "INV-XFBF935FQC",
+      "jobId": "6a9ba5b5a4f48060c0a0207e",
+      "from": "TEMP",
+      "to": "TEMP-8"
+    },
+    {
+      "invoiceId": "6a9e3875a4f48060c0a4a349",
+      "invoiceNumber": "INV-4BYN3EMPHY",
+      "jobId": "6a9ba69ba4f48060c0a023b8",
+      "from": "TEMP",
+      "to": "TEMP-8"
+    },
+    {
+      "invoiceId": "6a9e3885a4f48060c0a4a3c0",
+      "invoiceNumber": "INV-JR5PT6993J",
+      "jobId": "6a9ba6b3a4f48060c0a02411",
+      "from": "TEMP",
+      "to": "TEMP-8"
+    }
+  ],
+  "bookingUpdates": [
+    {
+      "bookingId": "6a7b04ed739b5a0ef4b9fa79",
+      "customerName": "Anandhu Hycross Mr Client",
+      "customerPhone": "+919207928514",
+      "from": "TEMP",
+      "to": "KL60X3331"
+    }
+  ],
+  "renames": [
+    {
+      "carId": "6a702b62112577918bd3db41",
+      "from": "TEMP",
+      "to": "TEMP",
+      "unchanged": true,
+      "customerId": "6a9eae892eb40a38e05aa55e"
+    },
+    {
+      "carId": "6a702fd4112577918bd3e486",
+      "from": "TEMP",
+      "to": "TEMP-1",
+      "customerId": "6a702fb9112577918bd3e458"
+    },
+    {
+      "carId": "6a704647112577918bd4147c",
+      "from": "TEMP",
+      "to": "TEMP-2",
+      "customerId": "6a704634112577918bd4142a"
+    },
+    {
+      "carId": "6a704d4b112577918bd42105",
+      "from": "TEMP",
+      "to": "TEMP-3",
+      "customerId": "6a704d18112577918bd420a6"
+    },
+    {
+      "carId": "6a704f85112577918bd425b1",
+      "from": "TEMP",
+      "to": "TEMP-4",
+      "customerId": "6a704f0a112577918bd42453"
+    },
+    {
+      "carId": "6a7065c6112577918bd46cd9",
+      "from": "TEMP",
+      "to": "TEMP-5",
+      "customerId": "6a70654e112577918bd46bf5"
+    },
+    {
+      "carId": "6a706828112577918bd47b84",
+      "from": "TEMP",
+      "to": "TEMP-6",
+      "customerId": "6a7067b7112577918bd479be"
+    },
+    {
+      "carId": "6a73203a89f8a750bd2d2d57",
+      "from": "TEMP",
+      "to": "TEMP-7",
+      "customerId": "6a73202389f8a750bd2d2c9c"
+    },
+    {
+      "carId": "6a741a1889f8a750bd2da2c9",
+      "from": "TEMP",
+      "to": "TEMP-8",
+      "customerId": "6a740c1189f8a750bd2d83c8"
+    },
+    {
+      "carId": "6a743bf189f8a750bd2de126",
+      "from": "TEMP",
+      "to": "TEMP-9",
+      "customerId": "6a743ba789f8a750bd2de07a"
+    },
+    {
+      "carId": "6a743d6789f8a750bd2de266",
+      "from": "TEMP",
+      "to": "TEMP-10",
+      "customerId": "6a743d3689f8a750bd2de246"
+    },
+    {
+      "carId": "6a7583ec89f8a750bd2ec15d",
+      "from": "TEMP",
+      "to": "TEMP-11",
+      "customerId": "6a7583aa89f8a750bd2ec11b"
+    },
+    {
+      "carId": "6a76df9089f8a750bd2fd276",
+      "from": "TEMP",
+      "to": "TEMP-12",
+      "customerId": "6a76df1f89f8a750bd2fd21e"
+    },
+    {
+      "carId": "6a79a2a4739b5a0ef4b7e862",
+      "from": "TEMP",
+      "to": "TEMP-13",
+      "customerId": "6a79a277739b5a0ef4b7e83b"
+    },
+    {
+      "carId": "6a7ada09739b5a0ef4b98d2e",
+      "from": "TEMP",
+      "to": "TEMP-14",
+      "customerId": "6a7ad9f3739b5a0ef4b98d20"
+    },
+    {
+      "carId": "6a7b16e5dde185468b3c9d77",
+      "from": "TEMP",
+      "to": "TEMP-15",
+      "customerId": "6a7b16cadde185468b3c9d51"
+    },
+    {
+      "carId": "6a7ed66d0576d4fbdbe196c1",
+      "from": "TEMP",
+      "to": "TEMP-16",
+      "customerId": "6a7ed6540576d4fbdbe196ab"
+    },
+    {
+      "carId": "6a8299490576d4fbdbe68185",
+      "from": "TEMP",
+      "to": "TEMP-17",
+      "customerId": "6a8299170576d4fbdbe68109"
+    },
+    {
+      "carId": "6a8695080576d4fbdbec37e0",
+      "from": "TEMP",
+      "to": "TEMP-18",
+      "customerId": "6a8694f10576d4fbdbec37bf"
+    },
+    {
+      "carId": "6a86a8a90576d4fbdbec5a27",
+      "from": "TEMP",
+      "to": "TEMP-19",
+      "customerId": "6a73202389f8a750bd2d2c9c"
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a800d",
+      "from": "TEMP",
+      "to": "TEMP-20",
+      "customerId": "6a9676eb2cb2778ebab8bd6d"
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a800e",
+      "from": "TEMP",
+      "to": "TEMP-21",
+      "customerId": "6a76ad2689f8a750bd2f96c5"
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a800f",
+      "from": "TEMP",
+      "to": "TEMP-22",
+      "customerId": "6a9808352a96f2d5ce32f42a"
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a8010",
+      "from": "TEMP",
+      "to": "TEMP-23",
+      "customerId": "6a9e94152eb40a38e05a3915"
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a8011",
+      "from": "TEMP",
+      "to": "TEMP-24",
+      "customerId": "6a9e946c2eb40a38e05a3a6c"
+    }
+  ],
+  "unresolved": [
+    {
+      "type": "invoice_temp_plate_job_car_missing_or_not_split",
+      "invoiceNumber": "INV-NHDLX2PZKU",
+      "invoiceId": "6a6c84bdd6861f0f2bce136f",
+      "jobId": "6a6c848ed6861f0f2bce12c3",
+      "tokenNumber": "20260731-H5VUPM",
+      "jobCarExists": false,
+      "jobCarNumber": null,
+      "customerExists": false,
+      "customerName": "Abhinav",
+      "customerPhone": "6235074245",
+      "note": "Left unchanged. Customer and/or car record is gone; needs a later prompt if you want this rebuilt."
+    }
+  ],
+  "summary": {
+    "sourceTempCars": 20,
+    "splits": 1,
+    "carsCreated": 5,
+    "jobsRepointed": 5,
+    "invoicesUpdated": 23,
+    "bookingsUpdated": 1,
+    "uniquePlatesAfter": 25,
+    "unresolved": 1,
+    "apply": false
+  },
+  "assignment": [
+    {
+      "carId": "6a702b62112577918bd3db41",
+      "plate": "TEMP",
+      "brand": "",
+      "model": "",
+      "color": "Black",
+      "customerId": "6a9eae892eb40a38e05aa55e",
+      "customerName": "Athul",
+      "customerPhone": "+918281205020",
+      "last10": "8281205020",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260907-837QY4"
+      ]
+    },
+    {
+      "carId": "6a702fd4112577918bd3e486",
+      "plate": "TEMP-1",
+      "brand": "",
+      "model": "Bmw",
+      "color": "Grey",
+      "customerId": "6a702fb9112577918bd3e458",
+      "customerName": null,
+      "customerPhone": null,
+      "last10": "",
+      "customerMissing": true,
+      "jobCount": 0,
+      "jobTokens": []
+    },
+    {
+      "carId": "6a704647112577918bd4147c",
+      "plate": "TEMP-2",
+      "brand": "Bmw",
+      "model": "X1",
+      "color": "Grey",
+      "customerId": "6a704634112577918bd4142a",
+      "customerName": null,
+      "customerPhone": null,
+      "last10": "",
+      "customerMissing": true,
+      "jobCount": 0,
+      "jobTokens": []
+    },
+    {
+      "carId": "6a704d4b112577918bd42105",
+      "plate": "TEMP-3",
+      "brand": "BMW",
+      "model": "X1g",
+      "color": "grey",
+      "customerId": "6a704d18112577918bd420a6",
+      "customerName": null,
+      "customerPhone": null,
+      "last10": "",
+      "customerMissing": true,
+      "jobCount": 0,
+      "jobTokens": []
+    },
+    {
+      "carId": "6a704f85112577918bd425b1",
+      "plate": "TEMP-4",
+      "brand": "bmw",
+      "model": "x1",
+      "color": "grey",
+      "customerId": "6a704f0a112577918bd42453",
+      "customerName": "Dr Gayathri Bkm X1 Mr Client",
+      "customerPhone": "8075669039",
+      "last10": "8075669039",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260803-4HY52E"
+      ]
+    },
+    {
+      "carId": "6a7065c6112577918bd46cd9",
+      "plate": "TEMP-5",
+      "brand": "",
+      "model": "punch ev",
+      "color": "white",
+      "customerId": "6a70654e112577918bd46bf5",
+      "customerName": null,
+      "customerPhone": null,
+      "last10": "",
+      "customerMissing": true,
+      "jobCount": 0,
+      "jobTokens": []
+    },
+    {
+      "carId": "6a706828112577918bd47b84",
+      "plate": "TEMP-6",
+      "brand": "",
+      "model": "punch ev",
+      "color": "white",
+      "customerId": "6a7067b7112577918bd479be",
+      "customerName": "kichu",
+      "customerPhone": "7012168887",
+      "last10": "7012168887",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260803-9TARL2"
+      ]
+    },
+    {
+      "carId": "6a73203a89f8a750bd2d2d57",
+      "plate": "TEMP-7",
+      "brand": "Kia",
+      "model": "Seltos",
+      "color": "White",
+      "customerId": "6a73202389f8a750bd2d2c9c",
+      "customerName": "Eram  showroom",
+      "customerPhone": "+918547014143",
+      "last10": "8547014143",
+      "customerMissing": false,
+      "jobCount": 2,
+      "jobTokens": [
+        "20260805-LT7Q6C",
+        "20260818-84S8AP"
+      ]
+    },
+    {
+      "carId": "6a741a1889f8a750bd2da2c9",
+      "plate": "TEMP-8",
+      "brand": "",
+      "model": "Auto",
+      "color": "",
+      "customerId": "6a740c1189f8a750bd2d83c8",
+      "customerName": "AMG",
+      "customerPhone": "+919072646517",
+      "last10": "9072646517",
+      "customerMissing": false,
+      "jobCount": 5,
+      "jobTokens": [
+        "20260806-Q6BB8H",
+        "20260818-ZP5YEE",
+        "20260905-CBTCXT",
+        "20260905-GG9KZ3",
+        "20260905-EVL2QM"
+      ]
+    },
+    {
+      "carId": "6a743bf189f8a750bd2de126",
+      "plate": "TEMP-9",
+      "brand": "",
+      "model": "Seltos",
+      "color": "Black",
+      "customerId": "6a743ba789f8a750bd2de07a",
+      "customerName": "Arman malik",
+      "customerPhone": "+919074353200",
+      "last10": "9074353200",
+      "customerMissing": false,
+      "jobCount": 2,
+      "jobTokens": [
+        "20260806-GUJSS3",
+        "20260908-Q6CP4G"
+      ]
+    },
+    {
+      "carId": "6a743d6789f8a750bd2de266",
+      "plate": "TEMP-10",
+      "brand": "",
+      "model": "Thar",
+      "color": "Black",
+      "customerId": "6a743d3689f8a750bd2de246",
+      "customerName": "Nitheesh",
+      "customerPhone": "+918891566853",
+      "last10": "8891566853",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260806-RD47CN"
+      ]
+    },
+    {
+      "carId": "6a7583ec89f8a750bd2ec15d",
+      "plate": "TEMP-11",
+      "brand": "",
+      "model": "Venue",
+      "color": "Black",
+      "customerId": "6a7583aa89f8a750bd2ec11b",
+      "customerName": "Ampika",
+      "customerPhone": "+918547302634",
+      "last10": "8547302634",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260807-TQ6L85"
+      ]
+    },
+    {
+      "carId": "6a76df9089f8a750bd2fd276",
+      "plate": "TEMP-12",
+      "brand": "Landrover",
+      "model": "Defender",
+      "color": "White",
+      "customerId": "6a76df1f89f8a750bd2fd21e",
+      "customerName": "Zayan",
+      "customerPhone": "+919995932607",
+      "last10": "9995932607",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260808-ETPXN5"
+      ]
+    },
+    {
+      "carId": "6a79a2a4739b5a0ef4b7e862",
+      "plate": "TEMP-13",
+      "brand": "",
+      "model": "Virtus",
+      "color": "",
+      "customerId": "6a79a277739b5a0ef4b7e83b",
+      "customerName": "Faizal",
+      "customerPhone": "+919746339330",
+      "last10": "9746339330",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260810-X82B94"
+      ]
+    },
+    {
+      "carId": "6a7ada09739b5a0ef4b98d2e",
+      "plate": "TEMP-14",
+      "brand": "",
+      "model": "venue",
+      "color": "black",
+      "customerId": "6a7ad9f3739b5a0ef4b98d20",
+      "customerName": "jagath",
+      "customerPhone": "+916238513363",
+      "last10": "6238513363",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260811-HV8DVM"
+      ]
+    },
+    {
+      "carId": "6a7b16e5dde185468b3c9d77",
+      "plate": "TEMP-15",
+      "brand": "",
+      "model": "Kylaq",
+      "color": "Blach",
+      "customerId": "6a7b16cadde185468b3c9d51",
+      "customerName": "Sahil",
+      "customerPhone": "+918606900914",
+      "last10": "8606900914",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260811-R996QG"
+      ]
+    },
+    {
+      "carId": "6a7ed66d0576d4fbdbe196c1",
+      "plate": "TEMP-16",
+      "brand": "",
+      "model": "Baleno",
+      "color": "Blue",
+      "customerId": "6a7ed6540576d4fbdbe196ab",
+      "customerName": "Arjun",
+      "customerPhone": "+919995368840",
+      "last10": "9995368840",
+      "customerMissing": false,
+      "jobCount": 0,
+      "jobTokens": []
+    },
+    {
+      "carId": "6a8299490576d4fbdbe68185",
+      "plate": "TEMP-17",
+      "brand": "",
+      "model": "Tharrox",
+      "color": "Green",
+      "customerId": "6a8299170576d4fbdbe68109",
+      "customerName": "Eram showroom",
+      "customerPhone": "+917025256045",
+      "last10": "7025256045",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260817-ERSXSR"
+      ]
+    },
+    {
+      "carId": "6a8695080576d4fbdbec37e0",
+      "plate": "TEMP-18",
+      "brand": "",
+      "model": "I 20",
+      "color": "Blue",
+      "customerId": "6a8694f10576d4fbdbec37bf",
+      "customerName": "Rameez 100 hp",
+      "customerPhone": "+918606419999",
+      "last10": "8606419999",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260820-JLJUQP"
+      ]
+    },
+    {
+      "carId": "6a86a8a90576d4fbdbec5a27",
+      "plate": "TEMP-19",
+      "brand": "",
+      "model": "Thar rox",
+      "color": "White",
+      "customerId": "6a73202389f8a750bd2d2c9c",
+      "customerName": "Eram  showroom",
+      "customerPhone": "+918547014143",
+      "last10": "8547014143",
+      "customerMissing": false,
+      "jobCount": 2,
+      "jobTokens": [
+        "20260820-S9TN7A",
+        "20260905-PXDVML"
+      ]
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a800d",
+      "plate": "TEMP-20",
+      "brand": "",
+      "model": "",
+      "color": "",
+      "customerId": "6a9676eb2cb2778ebab8bd6d",
+      "customerName": "Mansoor",
+      "customerPhone": "+919633344477",
+      "last10": "9633344477",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260901-GVU9QS"
+      ]
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a800e",
+      "plate": "TEMP-21",
+      "brand": "",
+      "model": "",
+      "color": "",
+      "customerId": "6a76ad2689f8a750bd2f96c5",
+      "customerName": "Kia showroom",
+      "customerPhone": "+918547014147",
+      "last10": "8547014147",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260902-QAUBDM"
+      ]
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a800f",
+      "plate": "TEMP-22",
+      "brand": "",
+      "model": "",
+      "color": "",
+      "customerId": "6a9808352a96f2d5ce32f42a",
+      "customerName": "Saabir",
+      "customerPhone": "+917907252266",
+      "last10": "7907252266",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260902-938XRM"
+      ]
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a8010",
+      "plate": "TEMP-23",
+      "brand": "",
+      "model": "",
+      "color": "",
+      "customerId": "6a9e94152eb40a38e05a3915",
+      "customerName": "Nasif",
+      "customerPhone": "+919400192671",
+      "last10": "9400192671",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260907-CR4YSP"
+      ]
+    },
+    {
+      "carId": "6aa24c2e5fc48ee1cf9a8011",
+      "plate": "TEMP-24",
+      "brand": "",
+      "model": "",
+      "color": "",
+      "customerId": "6a9e946c2eb40a38e05a3a6c",
+      "customerName": "Nijith",
+      "customerPhone": "+919567092309",
+      "last10": "9567092309",
+      "customerMissing": false,
+      "jobCount": 1,
+      "jobTokens": [
+        "20260907-KB677F"
+      ]
+    }
+  ]
+}

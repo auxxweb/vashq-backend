@@ -1,0 +1,332 @@
+{
+  "importRef": "MOJO-LEGACY-COATING-2026-09",
+  "ranAt": "2026-09-08T07:49:12.724Z",
+  "mode": "dry-run",
+  "businessId": "6a702dca112577918bd3de80",
+  "branchId": "6a702dcb112577918bd3de8a",
+  "skipped": [
+    {
+      "row": 1,
+      "reason": "already imported as package 6a9fbd31f7844a1445134e14"
+    },
+    {
+      "row": 2,
+      "reason": "already imported as package 6a9fbd32f7844a1445134e2e"
+    },
+    {
+      "row": 3,
+      "reason": "already imported as package 6a9fbd33f7844a1445134e42"
+    },
+    {
+      "row": 4,
+      "reason": "already imported as package 6a9fbd34f7844a1445134e5c"
+    },
+    {
+      "row": 5,
+      "reason": "already imported as package 6a9fbd35f7844a1445134e6f"
+    },
+    {
+      "row": 6,
+      "reason": "already imported as package 6a9fbd36f7844a1445134e86"
+    },
+    {
+      "row": 7,
+      "reason": "already imported as package 6a9fbd37f7844a1445134ea0"
+    },
+    {
+      "row": 8,
+      "reason": "already imported as package 6a9fbd37f7844a1445134eb0"
+    },
+    {
+      "row": 9,
+      "reason": "already imported as package 6a9fbd38f7844a1445134ec8"
+    },
+    {
+      "row": 10,
+      "reason": "already imported as package 6a9fbd39f7844a1445134edf"
+    },
+    {
+      "row": 11,
+      "reason": "already imported as package 6a9fbd3af7844a1445134eef"
+    },
+    {
+      "row": 12,
+      "reason": "already imported as package 6a9fbd3bf7844a1445134f03"
+    },
+    {
+      "row": 13,
+      "reason": "already imported as package 6a9fbd3cf7844a1445134f1a"
+    },
+    {
+      "row": 14,
+      "reason": "already imported as package 6a9fbd3df7844a1445134f2f"
+    },
+    {
+      "row": 15,
+      "reason": "already imported as package 6a9fbd3df7844a1445134f41"
+    },
+    {
+      "row": 16,
+      "reason": "already imported as package 6a9fbd3ef7844a1445134f55"
+    },
+    {
+      "row": 17,
+      "reason": "already imported as package 6a9fbd3ff7844a1445134f67"
+    },
+    {
+      "row": 18,
+      "reason": "already imported as package 6a9fbd40f7844a1445134f76"
+    },
+    {
+      "row": 19,
+      "reason": "already imported as package 6a9fbd40f7844a1445134f8a"
+    },
+    {
+      "row": 20,
+      "reason": "already imported as package 6a9fbd41f7844a1445134fa1"
+    },
+    {
+      "row": 21,
+      "reason": "already imported as package 6a9fbd42f7844a1445134fb9"
+    },
+    {
+      "row": 22,
+      "reason": "already imported as package 6a9fbd43f7844a1445134fce"
+    },
+    {
+      "row": 23,
+      "reason": "already imported as package 6a9fbd44f7844a1445134fe7"
+    },
+    {
+      "row": 24,
+      "reason": "already imported as package 6a9fbd45f7844a1445134ff8"
+    },
+    {
+      "row": 25,
+      "reason": "already imported as package 6a9fbd45f7844a1445135009"
+    },
+    {
+      "row": 26,
+      "reason": "already imported as package 6a9fbd46f7844a144513501b"
+    },
+    {
+      "row": 27,
+      "reason": "already imported as package 6a9fbd47f7844a144513502f"
+    },
+    {
+      "row": 28,
+      "reason": "already imported as package 6a9fbd48f7844a1445135044"
+    },
+    {
+      "row": 29,
+      "reason": "already imported as package 6a9fbd49f7844a1445135054"
+    },
+    {
+      "row": 30,
+      "reason": "already imported as package 6a9fbd53f7844a1445135068"
+    },
+    {
+      "row": 31,
+      "reason": "already imported as package 6a9fbd54f7844a144513507d"
+    },
+    {
+      "row": 32,
+      "reason": "already imported as package 6a9fbd55f7844a1445135092"
+    },
+    {
+      "row": 33,
+      "reason": "already imported as package 6a9fbd56f7844a14451350a6"
+    },
+    {
+      "row": 34,
+      "reason": "already imported as package 6a9fbd57f7844a14451350b8"
+    },
+    {
+      "row": 35,
+      "reason": "already imported as package 6a9fbd58f7844a14451350c8"
+    },
+    {
+      "row": 36,
+      "reason": "already imported as package 6a9fbd59f7844a14451350df"
+    },
+    {
+      "row": 37,
+      "reason": "already imported as package 6a9fbd5af7844a14451350eb"
+    },
+    {
+      "row": 38,
+      "reason": "already imported as package 6a9fbd5bf7844a14451350fd"
+    },
+    {
+      "row": 39,
+      "reason": "already imported as package 6a9fbd5cf7844a1445135112"
+    },
+    {
+      "row": 40,
+      "reason": "already imported as package 6a9fbd5df7844a1445135122"
+    },
+    {
+      "row": 41,
+      "reason": "already imported as package 6a9fbd5ef7844a1445135134"
+    },
+    {
+      "row": 42,
+      "reason": "already imported as package 6a9fbd5ff7844a144513514a"
+    },
+    {
+      "row": 43,
+      "reason": "duplicate of row 40 (RAYEES, KL18AE9425, same dates) — kept the ₹28,000 row"
+    },
+    {
+      "row": 44,
+      "reason": "already imported as package 6a9fbd60f7844a144513515e"
+    },
+    {
+      "row": 45,
+      "reason": "already imported as package 6a9fbd62f7844a1445135175"
+    },
+    {
+      "row": 46,
+      "reason": "already imported as package 6a9fbd62f7844a1445135184"
+    },
+    {
+      "row": 47,
+      "reason": "already imported as package 6a9fbd63f7844a1445135195"
+    },
+    {
+      "row": 48,
+      "reason": "already imported as package 6a9fbd64f7844a14451351a9"
+    },
+    {
+      "row": 49,
+      "reason": "already imported as package 6a9fbd66f7844a14451351bd"
+    },
+    {
+      "row": 50,
+      "reason": "already imported as package 6a9fbd67f7844a14451351d1"
+    },
+    {
+      "row": 51,
+      "reason": "already imported as package 6a9fbd68f7844a14451351e3"
+    },
+    {
+      "row": 52,
+      "reason": "already imported as package 6a9fbd6af7844a14451351f7"
+    },
+    {
+      "row": 53,
+      "reason": "already imported as package 6a9fbd6bf7844a1445135209"
+    },
+    {
+      "row": 54,
+      "reason": "already imported as package 6a9fbd6cf7844a1445135218"
+    },
+    {
+      "row": 55,
+      "reason": "duplicate of row 77 (JIJO, KL56W7425, one day apart) — kept the 3 YEAR row"
+    },
+    {
+      "row": 56,
+      "reason": "already imported as package 6a9fbd6df7844a144513522c"
+    },
+    {
+      "row": 57,
+      "reason": "already imported as package 6a9fbd6ef7844a1445135240"
+    },
+    {
+      "row": 58,
+      "reason": "already imported as package 6a9fbd70f7844a1445135253"
+    },
+    {
+      "row": 59,
+      "reason": "already imported as package 6a9fbd71f7844a1445135265"
+    },
+    {
+      "row": 60,
+      "reason": "already imported as package 6a9fbd72f7844a1445135275"
+    },
+    {
+      "row": 61,
+      "reason": "already imported as package 6a9fbd73f7844a1445135289"
+    },
+    {
+      "row": 62,
+      "reason": "already imported as package 6a9fbd74f7844a144513529e"
+    },
+    {
+      "row": 63,
+      "reason": "already imported as package 6a9fbd75f7844a14451352b6"
+    },
+    {
+      "row": 64,
+      "reason": "already imported as package 6a9fbd76f7844a14451352c7"
+    },
+    {
+      "row": 65,
+      "reason": "already imported as package 6a9fbd77f7844a14451352db"
+    },
+    {
+      "row": 66,
+      "reason": "already imported as package 6a9fbd79f7844a14451352ef"
+    },
+    {
+      "row": 67,
+      "reason": "already imported as package 6a9fbd7af7844a1445135304"
+    },
+    {
+      "row": 68,
+      "reason": "already imported as package 6a9fbd7bf7844a1445135316"
+    },
+    {
+      "row": 69,
+      "reason": "already imported as package 6a9fbd7cf7844a144513532a"
+    },
+    {
+      "row": 70,
+      "reason": "already imported as package 6a9fbd7df7844a144513533e"
+    },
+    {
+      "row": 71,
+      "reason": "already imported as package 6a9fbd7ef7844a1445135350"
+    },
+    {
+      "row": 72,
+      "reason": "already imported as package 6a9fbd7ff7844a1445135362"
+    },
+    {
+      "row": 73,
+      "reason": "already imported as package 6a9fbd80f7844a1445135373"
+    },
+    {
+      "row": 74,
+      "reason": "already imported as package 6a9fbd81f7844a1445135387"
+    },
+    {
+      "row": 75,
+      "reason": "already imported as package 6a9fbd83f7844a144513539b"
+    },
+    {
+      "row": 76,
+      "reason": "already imported as package 6a9fbd84f7844a14451353af"
+    },
+    {
+      "row": 77,
+      "reason": "already imported as package 6a9fbd85f7844a14451353c6"
+    },
+    {
+      "row": 78,
+      "reason": "already imported as package 6a9fbd86f7844a14451353dd"
+    }
+  ],
+  "rows": [],
+  "created": {
+    "customers": 0,
+    "cars": 0,
+    "services": 0,
+    "templates": 0,
+    "packages": 0,
+    "visits": 0,
+    "invoices": 0
+  },
+  "followUps": []
+}

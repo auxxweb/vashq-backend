@@ -4,7 +4,7 @@ import { invoiceStatusFilterClause } from './invoiceListFilter.js';
 
 /**
  * Unclosed invoices in dashboard period — same definition as Invoices list "Pending":
- * payment not received and not yet closed on credit (no amount-due / outstanding balance).
+ * paymentStatus PENDING and not yet closed on credit (saleConfirmedAt unset).
  */
 export async function getDashboardUnclosedInvoices(businessId, startUtc, endUtc, limit = 10, branchId = null) {
   const businessObjectId = new mongoose.Types.ObjectId(String(businessId));
