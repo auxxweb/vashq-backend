@@ -179,6 +179,20 @@ const jobSchema = new mongoose.Schema({
     default: null,
     index: true
   },
+  /**
+   * Extra answers from owner-configured custom job form fields (custom_* keys).
+   */
+  formAnswers: {
+    type: Map,
+    of: String,
+    default: undefined
+  },
+  /** Flattened custom form answers for job list search. */
+  formAnswersText: {
+    type: String,
+    default: '',
+    trim: true
+  },
   /** Counter / variable sale billed immediately without wash workflow. */
   directBill: {
     type: Boolean,
@@ -194,7 +208,9 @@ const jobSchema = new mongoose.Schema({
     default: null
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { flattenMaps: true },
+  toObject: { flattenMaps: true }
 });
 
 // Indexes

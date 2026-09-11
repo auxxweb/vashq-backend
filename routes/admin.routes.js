@@ -72,6 +72,8 @@ import { sendPushNotification } from '../services/notificationService.js';
 import { getZonedDayBoundsUtc } from '../utils/zonedDayBounds.js';
 import { parseBusinessDateRange, applyCreatedAtRange, applyDateFieldRange } from '../utils/businessDateRange.js';
 import { balanceDue, assertSettlementMatchesDue, normalizeInvoicePaymentFields, relabelLockedInvoicePaymentMethod, roundMoney } from '../utils/invoicePayment.js';
+import { assertUniqueJobFormAnswers, formAnswersObject, formAnswersSearchClause, formAnswersSearchText, normalizeJobFormFields, validateJobFormAnswers } from '../utils/jobForm.js';
+import { allocateUniqueVehicleId, isUniqueVehicleId } from '../utils/uniqueVehicleId.js';
 import { rejectLockedFinancialBodyFields, applyOpenInvoiceFinancialFields, applyOwnerLockedInvoiceFinancialFields } from '../utils/invoiceCheckout.js';
 import { reopenInvoiceAsUnpaid } from '../utils/invoiceReopen.js';
 import { resolveInvoiceDiscount } from '../utils/invoiceDiscount.js';
@@ -4490,7 +4492,8 @@ router.get('/cars', async (req, res) => {
 // @access  Private (Car Wash Admin)
 router.post('/cars', [
   body('customerId').notEmpty(),
-  body('carNumber').notEmpty().trim()
+  body('carNumber').optional({ values: 'falsy' }).trim(),
+  body('useUniqueVehicleId').optional().isBoolean()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -4507,7 +4510,22 @@ router.post('/cars', [
     }
     assertBranchAccess(req, customer);
 
-    const plate = String(req.body.carNumber || '').trim().toUpperCase();
+    const typedPlate = String(req.body.carNumber || '').trim().toUpperCase();
+    const useUniqueVehicleId = req.body.useUniqueVehicleId === true || req.body.useUniqueVehicleId === 'true';
+    let plate = typedPlate;
+    let placeholderPlate = isUniqueVehicleId(typedPlate);
+    if (useUniqueVehicleId && !typedPlate) {
+      plate = await allocateUniqueVehicleId({ businessId: req.businessId });
+      placeholderPlate = true;
+    } else if (useUniqueVehicleId && typedPlate) {
+      placeholderPlate = true;
+    }
+    if (!plate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vehicle number is required'
+      });
+    }
     const branchScope = applyBranchScope({ businessId: req.businessId }, req);
 
     // Business-unique plate: reuse existing vehicle and link this customer as owner
@@ -4547,8 +4565,13 @@ router.post('/cars', [
     }
 
     const car = await Car.create({
-      ...req.body,
-      carNumber: plate || req.body.carNumber,
+      brand: req.body.brand,
+      model: req.body.model,
+      color: req.body.color,
+      notes: req.body.notes,
+      vehicleType: req.body.vehicleType,
+      carNumber: plate,
+      placeholderPlate,
       customerId: customer._id,
       customerIds: [customer._id],
       businessId: req.businessId,
@@ -4687,8 +4710,9 @@ router.get('/cars/:id', async (req, res) => {
 // @desc    Update car
 // @access  Private (Car Wash Admin)
 router.put('/cars/:id', [
-  body('carNumber').optional().notEmpty().trim(),
-  body('customerId').optional().notEmpty()
+  body('carNumber').optional({ values: 'falsy' }).trim(),
+  body('customerId').optional().notEmpty(),
+  body('useUniqueVehicleId').optional().isBoolean()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -4714,8 +4738,17 @@ router.put('/cars/:id', [
     }
     assertBranchAccess(req, car);
     const update = { ...req.body };
-    if (update.carNumber) {
+    delete update.useUniqueVehicleId;
+    const useUniqueVehicleId = req.body.useUniqueVehicleId === true || req.body.useUniqueVehicleId === 'true';
+    if (useUniqueVehicleId) {
+      update.carNumber = await allocateUniqueVehicleId({
+        businessId: req.businessId,
+        excludeCarId: car._id
+      });
+      update.placeholderPlate = true;
+    } else if (update.carNumber) {
       update.carNumber = String(update.carNumber).trim().toUpperCase();
+      update.placeholderPlate = isUniqueVehicleId(update.carNumber);
     }
     if (update.customerId) {
       const owners = new Set(
@@ -5172,7 +5205,7 @@ router.get('/jobs/:id', async (req, res) => {
     const filter = await jobAccessFilter(req, { _id: req.params.id });
     const job = await Job.findOne(filter)
       .populate('customerId', 'name phone whatsappNumber')
-      .populate('carId', 'carNumber brand model color')
+      .populate('carId', 'carNumber brand model color placeholderPlate')
       .populate('services.serviceId', 'name')
       .populate('services.assignedToUsers', 'name employeeCode email')
       .populate('assignedTo', 'name employeeCode email')
@@ -5201,9 +5234,12 @@ router.get('/jobs/:id', async (req, res) => {
           .lean()
       : null;
 
+    const jobPayload = job.toObject({ flattenMaps: true, virtuals: true });
+    jobPayload.formAnswers = formAnswersObject(job.formAnswers);
+
     res.json({
       success: true,
-      job,
+      job: jobPayload,
       hasInvoice: !!invoiceForJob,
       invoice: invoiceForJob || null,
       pendingSettlementRequest: pendingSettlementRequest || null
@@ -5261,8 +5297,12 @@ router.get('/jobs', async (req, res) => {
         ])
       ]);
       const carIds = carIdRows.map((r) => r._id);
+      const formAnswersMatch = formAnswersSearchClause(term);
       query.$or = [
         { tokenNumber: { $regex: term, $options: 'i' } },
+        { notes: { $regex: term, $options: 'i' } },
+        { formAnswersText: { $regex: term, $options: 'i' } },
+        ...(formAnswersMatch ? [formAnswersMatch] : []),
         ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
         ...(carIds.length ? [{ carId: { $in: carIds } }] : [])
       ];
@@ -5391,7 +5431,8 @@ router.post('/jobs', [
   body('paymentMethod').optional().isIn(['CASH', 'ONLINE', 'SPLIT']),
   body('onlinePaymentMode').optional().isIn(['UPI', 'CARD']),
   body('paymentCashAmount').optional().isFloat({ min: 0 }),
-  body('paymentOnlineAmount').optional().isFloat({ min: 0 })
+  body('paymentOnlineAmount').optional().isFloat({ min: 0 }),
+  body('formAnswers').optional().isObject()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -5479,12 +5520,24 @@ router.post('/jobs', [
     if (!directBill) {
       const createWithoutImages = !!req.body.createWithoutImages;
       const settingsForImages = await BusinessSettings.findOne({ businessId: req.businessId })
-        .select('jobImagesMin jobImagesMax')
+        .select('jobImagesMin jobImagesMax jobFormEnabled jobFormFields')
         .lean();
       const imageLimits = resolveJobImageLimits(settingsForImages);
+      let allowEmpty = createWithoutImages;
+      if (
+        settingsForImages?.jobFormEnabled &&
+        Array.isArray(settingsForImages.jobFormFields) &&
+        settingsForImages.jobFormFields.length
+      ) {
+        const formFields = normalizeJobFormFields(settingsForImages.jobFormFields);
+        const photosField = formFields.find((f) => f.key === 'photos');
+        if (!photosField || photosField.hidden || !photosField.required) {
+          allowEmpty = true;
+        }
+      }
       try {
         assertJobImageCount(beforeImages, imageLimits, {
-          allowEmpty: createWithoutImages,
+          allowEmpty,
           label: 'before images'
         });
         if (createWithoutImages && normalizeJobImageUrls(beforeImages).length > 0) {
@@ -5573,7 +5626,7 @@ router.post('/jobs', [
         : calculateETA(workCatalogServices(catalogServices)));
 
     const settingsForAssign = await BusinessSettings.findOne({ businessId: req.businessId })
-      .select('multiEmployeeAssignEnabled perServiceEmployeeAssignEnabled')
+      .select('multiEmployeeAssignEnabled perServiceEmployeeAssignEnabled jobFormEnabled jobFormFields')
       .lean();
     let assignedTo;
     let assignedToUsers;
@@ -5590,6 +5643,28 @@ router.post('/jobs', [
         success: false,
         message: assignErr.message || 'Invalid employee assignment'
       });
+    }
+
+    let formAnswers = null;
+    if (
+      !directBill &&
+      settingsForAssign?.jobFormEnabled &&
+      Array.isArray(settingsForAssign.jobFormFields) &&
+      settingsForAssign.jobFormFields.length
+    ) {
+      try {
+        formAnswers = validateJobFormAnswers(settingsForAssign.jobFormFields, req.body.formAnswers);
+        await assertUniqueJobFormAnswers({
+          businessId: req.businessId,
+          fieldsInput: settingsForAssign.jobFormFields,
+          answers: formAnswers
+        });
+      } catch (formErr) {
+        return res.status(formErr.status || 400).json({
+          success: false,
+          message: formErr.message || 'Invalid form answers'
+        });
+      }
     }
 
     const serviceLinesWithAssignees = attachServiceLineAssignees(
@@ -5628,6 +5703,12 @@ router.post('/jobs', [
           createdBy: req.user?._id || null,
           customerPackageId: customerPackageId || null,
           services: serviceLinesWithAssignees,
+          ...(formAnswers && Object.keys(formAnswers).length
+            ? {
+                formAnswers: new Map(Object.entries(formAnswers)),
+                formAnswersText: formAnswersSearchText(formAnswers)
+              }
+            : {}),
           ...(directBill
             ? {
               status: 'DELIVERED',
@@ -6087,7 +6168,8 @@ router.put('/jobs/:id', [
   body('beforeImages').optional().isArray(),
   body('assignedTo').optional({ nullable: true, checkFalsy: true }).isMongoId(),
   body('assignedToUsers').optional().isArray(),
-  body('assignedToUsers.*').optional().isMongoId()
+  body('assignedToUsers.*').optional().isMongoId(),
+  body('formAnswers').optional().isObject()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -6120,6 +6202,40 @@ router.put('/jobs/:id', [
 
     if (typeof notes === 'string') {
       job.notes = notes.trim();
+    }
+
+    if (req.body.formAnswers !== undefined) {
+      const settingsForForm = await BusinessSettings.findOne({ businessId: req.businessId })
+        .select('jobFormEnabled jobFormFields')
+        .lean();
+      if (settingsForForm?.jobFormEnabled) {
+        try {
+          const next = validateJobFormAnswers(settingsForForm.jobFormFields, req.body.formAnswers);
+          await assertUniqueJobFormAnswers({
+            businessId: req.businessId,
+            fieldsInput: settingsForForm.jobFormFields,
+            answers: next,
+            excludeJobId: job._id
+          });
+          const visibleKeys = new Set(
+            normalizeJobFormFields(settingsForForm.jobFormFields)
+              .filter((f) => String(f.key || '').startsWith('custom_') && f.hidden !== true)
+              .map((f) => f.key)
+          );
+          const kept = Object.fromEntries(
+            Object.entries(formAnswersObject(job.formAnswers)).filter(([key]) => !visibleKeys.has(key))
+          );
+          const merged = { ...kept, ...next };
+          job.formAnswers = new Map(Object.entries(merged));
+          job.formAnswersText = formAnswersSearchText(merged);
+          job.markModified('formAnswers');
+        } catch (formErr) {
+          return res.status(formErr.status || 400).json({
+            success: false,
+            message: formErr.message || 'Invalid form answers'
+          });
+        }
+      }
     }
 
     const wantsAssignUpdate =
@@ -6741,6 +6857,9 @@ router.put('/settings', [
   body('invoiceOnCompletedEnabled').optional().isBoolean(),
   body('crmEnabled').optional().isBoolean(),
   body('vehicleScannerEnabled').optional().isBoolean(),
+  body('jobFormEnabled').optional().isBoolean(),
+  body('jobFormVehicleUniqueIdEnabled').optional().isBoolean(),
+  body('jobFormFields').optional().isArray(),
   body('attendanceEnabled').optional().isBoolean(),
   body('otherRevenueEnabled').optional({ values: 'null' }).isBoolean(),
   body('inventoryManagementEnabled').optional({ values: 'null' }).isBoolean(),
@@ -6839,6 +6958,20 @@ router.put('/settings', [
     }
     if (req.body.vehicleScannerEnabled !== undefined) {
       updateFields.vehicleScannerEnabled = !!req.body.vehicleScannerEnabled;
+    }
+    if (req.body.jobFormEnabled !== undefined) {
+      updateFields.jobFormEnabled = !!req.body.jobFormEnabled;
+    }
+    if (req.body.jobFormVehicleUniqueIdEnabled !== undefined) {
+      updateFields.jobFormVehicleUniqueIdEnabled = !!req.body.jobFormVehicleUniqueIdEnabled;
+    }
+    if (req.body.jobFormFields !== undefined) {
+      updateFields.jobFormFields = normalizeJobFormFields(req.body.jobFormFields);
+    } else if (updateFields.jobFormEnabled === true) {
+      const existingFields = settings?.jobFormFields;
+      if (!Array.isArray(existingFields) || existingFields.length === 0) {
+        updateFields.jobFormFields = normalizeJobFormFields([]);
+      }
     }
     if (req.body.attendanceEnabled !== undefined) {
       updateFields.attendanceEnabled = !!req.body.attendanceEnabled;

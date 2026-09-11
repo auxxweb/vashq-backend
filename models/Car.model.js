@@ -28,6 +28,11 @@ const carSchema = new mongoose.Schema({
     required: [true, 'Car number is required'],
     trim: true
   },
+  /** True when carNumber is a generated unique ID (UID-…) rather than a real plate. */
+  placeholderPlate: {
+    type: Boolean,
+    default: false
+  },
   brand: {
     type: String,
     trim: true

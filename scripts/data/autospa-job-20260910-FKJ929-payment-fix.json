@@ -1,0 +1,52 @@
+{
+  "ranAt": "2026-09-10T08:13:15.450Z",
+  "ownerEmail": "manzoorb4u@gmail.com",
+  "businessId": "6a6dd6c7112577918bd2d15f",
+  "tokenNumber": "20260910-FKJ929",
+  "reason": "Remove ₹100 advance; record invoice as ₹500 cash + ₹100 UPI",
+  "before": {
+    "job": {
+      "_id": "6aa22ee62eb40a38e061283d",
+      "tokenNumber": "20260910-FKJ929",
+      "totalPrice": 600,
+      "advancePayment": 0,
+      "advancePaymentMethod": "CASH",
+      "advanceCashAmount": 0,
+      "advanceOnlineAmount": 0
+    },
+    "invoice": {
+      "_id": "6aa22ef02eb40a38e06128c1",
+      "invoiceNumber": "INV-7DU52K25HL",
+      "finalAmount": 600,
+      "advancePayment": 0,
+      "paymentStatus": "RECEIVED",
+      "paymentMethod": "SPLIT",
+      "paymentCashAmount": 500,
+      "paymentOnlineAmount": 100,
+      "onlinePaymentMode": "UPI",
+      "outstandingAmount": 0,
+      "amountCollectedAtCheckout": 600
+    }
+  },
+  "after": {
+    "job": {
+      "totalPrice": 600,
+      "advancePayment": 0,
+      "advancePaymentMethod": "CASH",
+      "advanceCashAmount": 0,
+      "advanceOnlineAmount": 0
+    },
+    "invoice": {
+      "invoiceNumber": "INV-7DU52K25HL",
+      "finalAmount": 600,
+      "advancePayment": 0,
+      "paymentMethod": "SPLIT",
+      "paymentCashAmount": 500,
+      "paymentOnlineAmount": 100,
+      "onlinePaymentMode": "UPI",
+      "paymentStatus": "RECEIVED",
+      "outstandingAmount": 0,
+      "amountCollectedAtCheckout": 600
+    }
+  }
+}

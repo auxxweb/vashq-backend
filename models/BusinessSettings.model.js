@@ -135,6 +135,45 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   vehicleScannerEnabled: { type: Boolean, default: false },
   /**
+   * When true, Settings shows the Job Form editor and Create Job uses saved field order.
+   * Off by default — existing Create Job layout is unchanged.
+   */
+  jobFormEnabled: { type: Boolean, default: false },
+  /**
+   * When true (and job form is enabled), Create Job can assign a unique vehicle ID
+   * if the client does not provide a plate. The ID can be replaced on job edit.
+   */
+  jobFormVehicleUniqueIdEnabled: { type: Boolean, default: false },
+  /**
+   * Dynamic Create Job layout (system sections + custom questions).
+   * Defaults applied in jobForm utils when empty.
+   */
+  jobFormFields: [{
+    id: { type: String, trim: true },
+    key: { type: String, trim: true, required: true },
+    label: { type: String, trim: true, required: true },
+    type: {
+      type: String,
+      enum: ['text', 'textarea', 'number', 'date', 'select', 'datetime'],
+      default: 'text'
+    },
+    required: { type: Boolean, default: false },
+    unique: { type: Boolean, default: false },
+    placeholder: { type: String, trim: true, default: '' },
+    options: [{ type: String, trim: true }],
+    locked: { type: Boolean, default: false },
+    hidden: { type: Boolean, default: false },
+    subFields: [{
+      _id: false,
+      key: { type: String, trim: true },
+      label: { type: String, trim: true },
+      required: { type: Boolean, default: false },
+      locked: { type: Boolean, default: false },
+      hidden: { type: Boolean, default: false },
+      placeholder: { type: String, trim: true, default: '' }
+    }]
+  }],
+  /**
    * When true, Attendance (punch in/out, breaks, calendar, correction requests) is available.
    * Off by default — existing workflows unchanged.
    */
