@@ -125,6 +125,13 @@ const businessSettingsSchema = new mongoose.Schema({
    */
   invoiceOnCompletedEnabled: { type: Boolean, default: false },
   /**
+   * When true, a job invoice can add wash services, variable services, or products
+   * one line at a time. Quantity on wash/variable is times done (not stock).
+   * Added lines can be removed. Job + invoice details stay in sync.
+   * Off by default — Create Job, mixed cart, and checkout are unchanged.
+   */
+  invoiceAddLinesEnabled: { type: Boolean, default: false },
+  /**
    * When true, CRM / Leads menu and APIs are available for this business.
    * Off by default — existing workflows unchanged.
    */

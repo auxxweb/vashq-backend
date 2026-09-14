@@ -88,7 +88,7 @@ async function serviceNameMapForLines(businessId, jobServices = []) {
  * - serviceIds: [id, ...]                         (legacy fixed catalog prices)
  */
 export async function resolveJobServiceLines(businessId, input = {}) {
-  const { serviceIds, services: linesInput, checkStock = true } = input;
+  const { serviceIds, services: linesInput, checkStock = true, allowQuantityOnAllTypes = false } = input;
   const businessIdObj = typeof businessId === 'string'
     ? new mongoose.Types.ObjectId(businessId)
     : businessId;
@@ -176,6 +176,14 @@ export async function resolveJobServiceLines(businessId, input = {}) {
       } else {
         price = Math.round(Number(row.price) * 100) / 100;
       }
+    } else if (
+      allowQuantityOnAllTypes &&
+      row.price != null &&
+      row.price !== '' &&
+      Number.isFinite(row.price) &&
+      row.price >= 0
+    ) {
+      price = Math.round(Number(row.price) * 100) / 100;
     } else {
       price = Number(svc.price) || 0;
       if (price < 0) {
@@ -188,7 +196,7 @@ export async function resolveJobServiceLines(businessId, input = {}) {
     const customName = row.customName?.trim() || '';
     const quantity = lineQuantity(row.quantity);
     const isProduct = !!svc.isVariable && !!svc.skipWorkProcess;
-    if (!isProduct && quantity !== 1) {
+    if (!isProduct && quantity !== 1 && !allowQuantityOnAllTypes) {
       const err = new Error(`Quantity is only supported for product sales ("${svc.name}")`);
       err.status = 400;
       throw err;
@@ -478,6 +486,18 @@ export async function applyInvoiceItemPriceUpdates(invoice, itemsInput, business
  * @param {{ allowClosed?: boolean }} [opts] - business owner may edit closed invoices
  */
 export async function addProductLinesToOpenInvoice(invoice, businessId, productLinesInput = [], opts = {}) {
+  return addCatalogLinesToInvoice(invoice, businessId, productLinesInput, {
+    ...opts,
+    allowAllCatalogTypes: false
+  });
+}
+
+/**
+ * Append catalog lines (products by default; any service/variable/product when allowAllCatalogTypes).
+ * Syncs job.services + invoice.items so job and invoice details stay aligned.
+ */
+export async function addCatalogLinesToInvoice(invoice, businessId, linesInput = [], opts = {}) {
+  const allowAll = opts.allowAllCatalogTypes === true;
   if (!invoice?.jobId) {
     const err = new Error('Invoice is not linked to a job');
     err.status = 400;
@@ -487,14 +507,14 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
   if (closed && !opts.allowClosed) {
     const err = new Error(
       invoice.paymentStatus === 'RECEIVED'
-        ? 'Cannot add products to a paid invoice'
-        : 'Cannot add products to a closed credit invoice'
+        ? 'Cannot add items to a paid invoice'
+        : 'Cannot add items to a closed credit invoice'
     );
     err.status = 403;
     throw err;
   }
-  if (!Array.isArray(productLinesInput) || productLinesInput.length === 0) {
-    const err = new Error('Select at least one product');
+  if (!Array.isArray(linesInput) || linesInput.length === 0) {
+    const err = new Error(allowAll ? 'Select at least one item' : 'Select at least one product');
     err.status = 400;
     throw err;
   }
@@ -506,25 +526,28 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
     throw err;
   }
   if (job.status === 'CANCELLED') {
-    const err = new Error('Products cannot be added to a cancelled job');
+    const err = new Error('Items cannot be added to a cancelled job');
     err.status = 400;
     throw err;
   }
 
   const { lines: newLines, catalogServices } = await resolveJobServiceLines(businessId, {
-    services: productLinesInput,
-    checkStock: true
+    services: linesInput,
+    checkStock: true,
+    allowQuantityOnAllTypes: allowAll
   });
 
-  const nonProducts = catalogServices.filter((s) => !(s.isVariable && s.skipWorkProcess));
-  if (nonProducts.length) {
-    const err = new Error('Only product catalog items can be added here');
-    err.status = 400;
-    throw err;
+  if (!allowAll) {
+    const nonProducts = catalogServices.filter((s) => !(s.isVariable && s.skipWorkProcess));
+    if (nonProducts.length) {
+      const err = new Error('Only product catalog items can be added here');
+      err.status = 400;
+      throw err;
+    }
   }
 
   const existing = Array.isArray(job.services) ? [...job.services] : [];
-  // Merge quantity into an existing product line when same serviceId
+  // Merge quantity into an existing line when same serviceId
   for (const line of newLines) {
     const sid = String(line.serviceId);
     const idx = existing.findIndex((row) => String(row.serviceId?._id || row.serviceId) === sid);
@@ -535,6 +558,7 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
       existing[idx] = {
         ...prev,
         serviceId: line.serviceId,
+        customName: prev.customName || line.customName || '',
         // Keep the unit price already on the job; only increase quantity
         price: Number(prev.price) || line.price,
         quantity: prevQty + addQty
@@ -581,11 +605,19 @@ export async function addProductLinesToOpenInvoice(invoice, businessId, productL
   return { job, invoice };
 }
 
-/**
- * Remove a retail product line from a job/sale invoice.
- * @param {{ allowClosed?: boolean }} [opts] - business owner may edit closed invoices
- */
 export async function removeProductLineFromOpenInvoice(invoice, businessId, { serviceId } = {}, opts = {}) {
+  return removeCatalogLineFromInvoice(invoice, businessId, { serviceId }, {
+    ...opts,
+    allowAllCatalogTypes: false
+  });
+}
+
+/**
+ * Remove a job/sale invoice line. Products-only unless allowAllCatalogTypes.
+ * Stock is restored only for tracked products — wash/variable qty is times done.
+ */
+export async function removeCatalogLineFromInvoice(invoice, businessId, { serviceId } = {}, opts = {}) {
+  const allowAll = opts.allowAllCatalogTypes === true;
   if (!invoice?.jobId) {
     const err = new Error('Invoice is not linked to a job');
     err.status = 400;
@@ -595,14 +627,14 @@ export async function removeProductLineFromOpenInvoice(invoice, businessId, { se
   if (closed && !opts.allowClosed) {
     const err = new Error(
       invoice.paymentStatus === 'RECEIVED'
-        ? 'Cannot remove products from a paid invoice'
-        : 'Cannot remove products from a closed credit invoice'
+        ? 'Cannot remove items from a paid invoice'
+        : 'Cannot remove items from a closed credit invoice'
     );
     err.status = 403;
     throw err;
   }
   if (!serviceId) {
-    const err = new Error('Product is required');
+    const err = new Error(allowAll ? 'Item is required' : 'Product is required');
     err.status = 400;
     throw err;
   }
@@ -614,7 +646,7 @@ export async function removeProductLineFromOpenInvoice(invoice, businessId, { se
     throw err;
   }
   if (job.status === 'CANCELLED') {
-    const err = new Error('Products cannot be removed from a cancelled job');
+    const err = new Error('Items cannot be removed from a cancelled job');
     err.status = 400;
     throw err;
   }
@@ -623,7 +655,7 @@ export async function removeProductLineFromOpenInvoice(invoice, businessId, { se
   const existing = Array.isArray(job.services) ? [...job.services] : [];
   const idx = existing.findIndex((row) => String(row.serviceId?._id || row.serviceId) === targetId);
   if (idx < 0) {
-    const err = new Error('Product line not found on this invoice');
+    const err = new Error('Line not found on this invoice');
     err.status = 404;
     throw err;
   }
@@ -637,7 +669,8 @@ export async function removeProductLineFromOpenInvoice(invoice, businessId, { se
     ? existing[idx].toObject()
     : { ...existing[idx] };
   const removedSvc = catalogById.get(targetId);
-  if (!isProductCatalogService(removedSvc)) {
+  const removedIsProduct = isProductCatalogService(removedSvc);
+  if (!allowAll && !removedIsProduct) {
     const err = new Error('Only product lines can be removed here');
     err.status = 400;
     throw err;
@@ -667,7 +700,7 @@ export async function removeProductLineFromOpenInvoice(invoice, businessId, { se
   job.totalPrice = totalPrice;
   await job.save();
 
-  if (alreadyDeducted && removedQty > 0) {
+  if (alreadyDeducted && removedIsProduct && removedQty > 0) {
     await restoreServiceStock(businessId, [{ serviceId: removedSvc._id, quantity: removedQty }]);
   }
 

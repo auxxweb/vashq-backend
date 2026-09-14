@@ -1,0 +1,201 @@
+{
+  "importRef": "CP-HIST-2026H2",
+  "email": "carepointtkr@gmail.com",
+  "dryRun": false,
+  "rollback": false,
+  "sheetRows": 1050,
+  "skipped": [],
+  "followUps": [
+    "row 8: phone \"91699333371\" 11 digits — used first 10 → +919169933337",
+    "row 11: unusable phone \"988698998\" → placeholder +918800000110",
+    "row 35: unusable phone \"999805677\" → placeholder +918800000350",
+    "row 84: phone \"29946399096\" 11 digits — used last 10 → +919946399096",
+    "row 142: unusable phone \"828990116\" → placeholder +918800001420",
+    "row 153: unusable phone \"773646693\" → placeholder +918800001530",
+    "row 165: phone \"81294749920\" 11 digits — used first 10 → +918129474992",
+    "row 191: phone \"79207948646\" 11 digits — used last 10 → +919207948646",
+    "row 349: unusable phone \"735634228\" → placeholder +918800003490",
+    "row 402: unusable phone \"750920756\" → placeholder +918800004020",
+    "row 408: unusable phone \"984495644\" → placeholder +918800004080",
+    "row 452: unusable phone \"854735726\" → placeholder +918800004520",
+    "row 573: unusable phone \"808957600\" → placeholder +918800005730",
+    "row 574: phone \"75589390948\" 11 digits — used first 10 → +917558939094",
+    "row 614: phone \"96202563322\" 11 digits — used last 10 → +916202563322",
+    "row 622: unusable phone \"830404180\" → placeholder +918800006220",
+    "row 625: phone \"80886377156\" 11 digits — used first 10 → +918088637715",
+    "row 651: phone \"90371793234\" 11 digits — used first 10 → +919037179323",
+    "row 820: unusable phone \"903786956\" → placeholder +918800008200",
+    "row 865: unusable phone \"858933033\" → placeholder +918800008650",
+    "row 931: unusable phone \"628260469\" → placeholder +918800009310",
+    "row 964: unusable phone \"952660001\" → placeholder +918800009640",
+    "row 1026: phone \"96626589967\" 11 digits — used last 10 → +916626589967",
+    "row 1045: unusable phone \"954447576\" → placeholder +918800010450"
+  ],
+  "created": {
+    "customers": 642,
+    "cars": 637,
+    "jobs": 1050,
+    "invoices": 1050
+  },
+  "totals": {
+    "sheetAmount": 503430,
+    "cash": 269,
+    "online": 770,
+    "split": 11,
+    "extraService": 24
+  },
+  "byDay": {
+    "2026-07-30": {
+      "count": 19,
+      "amount": 8500
+    },
+    "2026-07-31": {
+      "count": 19,
+      "amount": 8600
+    },
+    "2026-08-01": {
+      "count": 13,
+      "amount": 5650
+    },
+    "2026-08-03": {
+      "count": 15,
+      "amount": 7900
+    },
+    "2026-08-04": {
+      "count": 23,
+      "amount": 9950
+    },
+    "2026-08-05": {
+      "count": 19,
+      "amount": 9000
+    },
+    "2026-08-06": {
+      "count": 20,
+      "amount": 13750
+    },
+    "2026-08-07": {
+      "count": 10,
+      "amount": 4550
+    },
+    "2026-08-08": {
+      "count": 31,
+      "amount": 14900
+    },
+    "2026-08-10": {
+      "count": 30,
+      "amount": 13400
+    },
+    "2026-08-11": {
+      "count": 17,
+      "amount": 8750
+    },
+    "2026-08-12": {
+      "count": 24,
+      "amount": 10700
+    },
+    "2026-08-13": {
+      "count": 27,
+      "amount": 12950
+    },
+    "2026-08-14": {
+      "count": 23,
+      "amount": 10700
+    },
+    "2026-08-15": {
+      "count": 35,
+      "amount": 14450
+    },
+    "2026-08-17": {
+      "count": 28,
+      "amount": 13050
+    },
+    "2026-08-18": {
+      "count": 28,
+      "amount": 10650
+    },
+    "2026-08-19": {
+      "count": 29,
+      "amount": 12700
+    },
+    "2026-08-20": {
+      "count": 29,
+      "amount": 17070
+    },
+    "2026-08-21": {
+      "count": 34,
+      "amount": 14400
+    },
+    "2026-08-22": {
+      "count": 38,
+      "amount": 17600
+    },
+    "2026-08-24": {
+      "count": 35,
+      "amount": 16800
+    },
+    "2026-08-25": {
+      "count": 40,
+      "amount": 17550
+    },
+    "2026-08-26": {
+      "count": 29,
+      "amount": 14450
+    },
+    "2026-08-27": {
+      "count": 30,
+      "amount": 16400
+    },
+    "2026-08-28": {
+      "count": 36,
+      "amount": 15210
+    },
+    "2026-08-29": {
+      "count": 38,
+      "amount": 21150
+    },
+    "2026-08-31": {
+      "count": 35,
+      "amount": 16500
+    },
+    "2026-09-01": {
+      "count": 35,
+      "amount": 19300
+    },
+    "2026-09-02": {
+      "count": 36,
+      "amount": 17000
+    },
+    "2026-09-03": {
+      "count": 39,
+      "amount": 20450
+    },
+    "2026-09-04": {
+      "count": 33,
+      "amount": 14350
+    },
+    "2026-09-05": {
+      "count": 35,
+      "amount": 18250
+    },
+    "2026-09-07": {
+      "count": 33,
+      "amount": 15350
+    },
+    "2026-09-08": {
+      "count": 32,
+      "amount": 16200
+    },
+    "2026-09-09": {
+      "count": 33,
+      "amount": 15600
+    },
+    "2026-09-10": {
+      "count": 20,
+      "amount": 9650
+    }
+  },
+  "errors": [],
+  "cashAndBankEnabled": false,
+  "businessId": "6a741d9d89f8a750bd2dadc6",
+  "branchId": "6a741d9d89f8a750bd2dadd0"
+}

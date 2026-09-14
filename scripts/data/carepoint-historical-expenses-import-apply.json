@@ -1,0 +1,63 @@
+{
+  "importRef": "CP-EXP-2026H2",
+  "email": "carepointtkr@gmail.com",
+  "dryRun": false,
+  "sheetRows": 187,
+  "skipped": [],
+  "created": {
+    "types": 7,
+    "expenses": 187
+  },
+  "reusedTypes": [
+    "Salary"
+  ],
+  "newTypes": [
+    "Diesel",
+    "Shop Expense",
+    "Salary+",
+    "Other",
+    "Maintenance",
+    "Chemicals",
+    "Shop Rent"
+  ],
+  "totals": {
+    "sheetAmount": 287630
+  },
+  "byType": {
+    "Diesel": {
+      "count": 21,
+      "amount": 4010
+    },
+    "Shop Expense": {
+      "count": 10,
+      "amount": 16465
+    },
+    "Salary+": {
+      "count": 56,
+      "amount": 9950
+    },
+    "Other": {
+      "count": 35,
+      "amount": 141072
+    },
+    "Salary": {
+      "count": 44,
+      "amount": 75476
+    },
+    "Maintenance": {
+      "count": 5,
+      "amount": 2760
+    },
+    "Chemicals": {
+      "count": 3,
+      "amount": 12397
+    },
+    "Shop Rent": {
+      "count": 13,
+      "amount": 25500
+    }
+  },
+  "errors": [],
+  "cashAndBankEnabled": false,
+  "businessId": "6a741d9d89f8a750bd2dadc6"
+}

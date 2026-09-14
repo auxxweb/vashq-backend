@@ -589,6 +589,74 @@ export async function getCustomerPackageDetail(req, res) {
   }
 }
 
+function parsePackageExpiryInput(raw) {
+  const s = String(raw || '').trim();
+  const day = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (day) {
+    const d = new Date(`${day[1]}-${day[2]}-${day[3]}T23:59:59.999+05:30`);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+export async function extendCustomerPackageValidity(req, res) {
+  try {
+    const pkg = await CustomerPackage.findOne(applyBranchScope({
+      _id: req.params.id,
+      businessId: req.businessId
+    }, req));
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Customer package not found' });
+    }
+
+    if (pkg.status === 'cancelled') {
+      return res.status(400).json({ success: false, message: 'Cancelled packages cannot be extended' });
+    }
+    if (pkg.status === 'completed' || Number(pkg.visitsRemaining || 0) <= 0) {
+      return res.status(400).json({ success: false, message: 'No visits remaining to extend' });
+    }
+
+    const now = new Date();
+    const currentExpiry = pkg.expiryDate ? new Date(pkg.expiryDate) : null;
+    const isExpired = pkg.status === 'expired' || (currentExpiry && currentExpiry < now);
+    if (!isExpired) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validity can be extended only when the package is expired and visits remain'
+      });
+    }
+
+    const nextExpiry = parsePackageExpiryInput(req.body?.expiryDate);
+    if (!nextExpiry) {
+      return res.status(400).json({ success: false, message: 'Select a valid expiry date' });
+    }
+    if (nextExpiry <= now) {
+      return res.status(400).json({ success: false, message: 'New expiry date must be in the future' });
+    }
+    if (currentExpiry && nextExpiry <= currentExpiry) {
+      return res.status(400).json({ success: false, message: 'New expiry date must be after the current expiry' });
+    }
+
+    const start = pkg.startDate ? new Date(pkg.startDate) : now;
+    const validityDays = Math.max(0.01, (nextExpiry.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+
+    pkg.expiryDate = nextExpiry;
+    pkg.validityDays = validityDays;
+    pkg.status = 'active';
+    await pkg.save();
+
+    res.json({
+      success: true,
+      data: pkg,
+      message: 'Package validity extended'
+    });
+  } catch (error) {
+    console.error('Extend customer package validity error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
 export async function closeCustomerPackage(req, res) {
   try {
     const pkg = await CustomerPackage.findOne({ _id: req.params.id, businessId: req.businessId });

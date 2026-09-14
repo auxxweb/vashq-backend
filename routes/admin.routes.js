@@ -14,7 +14,7 @@ import WhatsAppMessage from '../models/WhatsAppMessage.model.js';
 import BusinessSettings from '../models/BusinessSettings.model.js';
 import Notification from '../models/Notification.model.js';
 import { generateTokenNumber, calculateETA, canAcceptNewJob, isValidStatusTransition } from '../utils/job.utils.js';
-import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, removeProductLineFromOpenInvoice, assertVariableVisitAmountsRequired, reconcileClosedInvoiceAfterTotalChange } from '../utils/jobServiceLines.js';
+import { resolveJobServiceLines, jobLinesToInvoiceItems, syncDraftInvoiceFromJob, syncJobFromInvoiceItems, recalculateInvoiceFinalAmount, applyInvoiceItemPriceUpdates, addProductLinesToOpenInvoice, addCatalogLinesToInvoice, removeProductLineFromOpenInvoice, removeCatalogLineFromInvoice, assertVariableVisitAmountsRequired, reconcileClosedInvoiceAfterTotalChange } from '../utils/jobServiceLines.js';
 import {
   assertDirectBillEligible,
   createInvoiceForJobRecord,
@@ -1774,6 +1774,97 @@ router.post('/invoices/:id/add-products', [
   }
 });
 
+// POST /api/admin/invoices/:id/add-lines — append wash / variable / product lines (settings add-on)
+router.post('/invoices/:id/add-lines', [
+  body('services').isArray({ min: 1 }).withMessage('Select at least one item'),
+  body('services.*.serviceId').notEmpty().withMessage('Item is required'),
+  body('services.*.quantity').optional().isFloat({ min: 0.01 }),
+  body('services.*.price').optional().isFloat({ min: 0 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const featureSettings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('invoiceAddLinesEnabled')
+      .lean();
+    if (!featureSettings?.invoiceAddLinesEnabled) {
+      return res.status(403).json({
+        success: false,
+        message: 'Add line items on invoice is not enabled. Turn it on in Settings.'
+      });
+    }
+
+    const requestedIds = (req.body.services || []).map((row) => row?.serviceId).filter(Boolean);
+    const requestedCatalog = requestedIds.length
+      ? await Service.find({ _id: { $in: requestedIds }, businessId: req.businessId })
+        .select('isVariable skipWorkProcess')
+        .lean()
+      : [];
+    const needsVariableModule = requestedCatalog.some((svc) => !!svc.isVariable);
+    if (needsVariableModule && !isModuleEnabled(req.businessModules || await getBusinessModules(req.businessId), 'variableServices')) {
+      return moduleDisabledResponse(res, 'variableServices');
+    }
+
+    const invoiceDoc = await findScoped(Invoice, req, { _id: req.params.id });
+    if (!invoiceDoc) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    assertBranchAccess(req, invoiceDoc, { allowLegacyNull: true });
+    try {
+      await assertInvoiceCheckoutAccess(req, invoiceDoc);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ success: false, message: accessErr.message });
+    }
+
+    if (invoiceDoc.saleType === 'PACKAGE') {
+      return res.status(400).json({
+        success: false,
+        message: 'Items cannot be added to a package invoice'
+      });
+    }
+
+    try {
+      await addCatalogLinesToInvoice(invoiceDoc, req.businessId, req.body.services, {
+        allowClosed: isBusinessOwner(req.user.role),
+        allowAllCatalogTypes: true
+      });
+    } catch (addErr) {
+      return res.status(addErr.status || 400).json({
+        success: false,
+        message: addErr.message || 'Could not add line item'
+      });
+    }
+
+    if (invoiceDoc.paymentStatus === 'RECEIVED') {
+      try {
+        const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromInvoice(invoiceDoc, {
+          createdBy: req.user._id,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Add invoice lines Cash & Bank sync error:', syncErr?.message || syncErr);
+      }
+    }
+
+    const updated = await Invoice.findById(invoiceDoc._id)
+      .populate({
+        path: 'jobId',
+        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+      })
+      .lean();
+    res.json({ success: true, invoice: updated });
+  } catch (error) {
+    console.error('Add invoice lines error:', error);
+    const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
+    res.status(status).json({ success: false, message: error?.message || 'Server error' });
+  }
+});
+
 // POST /api/admin/invoices/:id/remove-product — remove a retail product line from an open job/sale invoice
 router.post('/invoices/:id/remove-product', [
   body('serviceId').notEmpty().withMessage('Product is required')
@@ -1841,6 +1932,85 @@ router.post('/invoices/:id/remove-product', [
     res.json({ success: true, invoice: updated });
   } catch (error) {
     console.error('Remove invoice product error:', error);
+    const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
+    res.status(status).json({ success: false, message: error?.message || 'Server error' });
+  }
+});
+
+// POST /api/admin/invoices/:id/remove-line — remove a wash / variable / product line (settings add-on)
+router.post('/invoices/:id/remove-line', [
+  body('serviceId').notEmpty().withMessage('Item is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const featureSettings = await BusinessSettings.findOne({ businessId: req.businessId })
+      .select('invoiceAddLinesEnabled')
+      .lean();
+    if (!featureSettings?.invoiceAddLinesEnabled) {
+      return res.status(403).json({
+        success: false,
+        message: 'Add line items on invoice is not enabled. Turn it on in Settings.'
+      });
+    }
+
+    const invoiceDoc = await findScoped(Invoice, req, { _id: req.params.id });
+    if (!invoiceDoc) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    assertBranchAccess(req, invoiceDoc, { allowLegacyNull: true });
+    try {
+      await assertInvoiceCheckoutAccess(req, invoiceDoc);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ success: false, message: accessErr.message });
+    }
+
+    if (invoiceDoc.saleType === 'PACKAGE') {
+      return res.status(400).json({
+        success: false,
+        message: 'Items cannot be removed from a package invoice'
+      });
+    }
+
+    try {
+      await removeCatalogLineFromInvoice(invoiceDoc, req.businessId, {
+        serviceId: req.body.serviceId
+      }, {
+        allowClosed: isBusinessOwner(req.user.role),
+        allowAllCatalogTypes: true
+      });
+    } catch (removeErr) {
+      return res.status(removeErr.status || 400).json({
+        success: false,
+        message: removeErr.message || 'Could not remove line item'
+      });
+    }
+
+    if (invoiceDoc.paymentStatus === 'RECEIVED') {
+      try {
+        const { syncMoneyBookFromInvoice } = await import('../utils/cashBankSync.js');
+        await syncMoneyBookFromInvoice(invoiceDoc, {
+          createdBy: req.user._id,
+          skipBalanceCheck: true,
+          rebuildBalances: true
+        });
+      } catch (syncErr) {
+        console.error('Remove invoice line Cash & Bank sync error:', syncErr?.message || syncErr);
+      }
+    }
+
+    const updated = await Invoice.findById(invoiceDoc._id)
+      .populate({
+        path: 'jobId',
+        populate: { path: 'services.serviceId', select: 'name isVariable skipWorkProcess' }
+      })
+      .lean();
+    res.json({ success: true, invoice: updated });
+  } catch (error) {
+    console.error('Remove invoice line error:', error);
     const status = error?.status && error.status >= 400 && error.status < 500 ? error.status : 500;
     res.status(status).json({ success: false, message: error?.message || 'Server error' });
   }
@@ -6855,6 +7025,7 @@ router.put('/settings', [
   body('mixedCartEnabled').optional().isBoolean(),
   body('invoiceDiscountAmountEnabled').optional().isBoolean(),
   body('invoiceOnCompletedEnabled').optional().isBoolean(),
+  body('invoiceAddLinesEnabled').optional().isBoolean(),
   body('crmEnabled').optional().isBoolean(),
   body('vehicleScannerEnabled').optional().isBoolean(),
   body('jobFormEnabled').optional().isBoolean(),
@@ -6952,6 +7123,9 @@ router.put('/settings', [
     }
     if (req.body.invoiceOnCompletedEnabled !== undefined) {
       updateFields.invoiceOnCompletedEnabled = !!req.body.invoiceOnCompletedEnabled;
+    }
+    if (req.body.invoiceAddLinesEnabled !== undefined) {
+      updateFields.invoiceAddLinesEnabled = !!req.body.invoiceAddLinesEnabled;
     }
     if (req.body.crmEnabled !== undefined) {
       updateFields.crmEnabled = !!req.body.crmEnabled;

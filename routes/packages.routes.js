@@ -17,6 +17,7 @@ import {
   scheduleVisit,
   closeCustomerPackage,
   closePackageSale,
+  extendCustomerPackageValidity,
   listVisits,
   listScheduledVisits,
   getCustomerPackageDetail,
@@ -91,6 +92,13 @@ router.get('/customer/:customerId', getCustomerPackages);
 router.get('/customer-packages', listCustomerPackages); // filters: status, remaining=true
 router.get('/customer-package/:id', getCustomerPackageDetail);
 router.put('/customer/:id/close', adminPanelOnly, closeCustomerPackage);
+router.put('/customer-package/:id/extend-validity', adminPanelOnly, [
+  body('expiryDate').notEmpty().withMessage('Expiry date is required')
+], (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  next();
+}, extendCustomerPackageValidity);
 router.patch('/customer-package/:id/close-sale', adminPanelOnly, closePackageSale);
 
 // Visits — employees may complete/schedule operational visits
