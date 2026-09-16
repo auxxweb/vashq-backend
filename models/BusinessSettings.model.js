@@ -229,7 +229,8 @@ const businessSettingsSchema = new mongoose.Schema({
   multiEmployeeAssignEnabled: { type: Boolean, default: false },
   /**
    * When true, employees can see and work on all jobs in their branch
-   * (or all shop jobs when multi-branch is off / single branch).
+   * (or all shop jobs when multi-branch is off / single branch), including
+   * marking full payment and collecting outstanding even if not assigned.
    * When false (default), employees only see jobs they created or are assigned to.
    */
   employeeFullJobAccess: { type: Boolean, default: false },

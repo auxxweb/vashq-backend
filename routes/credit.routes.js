@@ -7,6 +7,8 @@ import CreditLedgerEvent from '../models/CreditLedgerEvent.model.js';
 import Customer from '../models/Customer.model.js';
 import { requireBusinessModule } from '../middleware/businessModules.middleware.js';
 import { recordCollection, sumCustomerOutstanding } from '../services/credit/collectionService.js';
+import { assertInvoiceCheckoutAccess } from '../utils/branchAccess.js';
+import { employeeHasFullJobAccess } from '../utils/jobAssignment.js';
 import {
   computeOutstanding,
   deriveCollectionDisplayStatus,
@@ -38,6 +40,29 @@ router.post('/collections', [
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    if (req.user?.role === 'EMPLOYEE') {
+      const preferInvoiceId = req.body.preferInvoiceId;
+      if (preferInvoiceId && mongoose.isValidObjectId(preferInvoiceId)) {
+        const invoiceDoc = await Invoice.findOne({ _id: preferInvoiceId, businessId: req.businessId });
+        if (!invoiceDoc) {
+          return res.status(404).json({ success: false, message: 'Invoice not found' });
+        }
+        try {
+          await assertInvoiceCheckoutAccess(req, invoiceDoc);
+        } catch (accessErr) {
+          return res.status(accessErr.status || 403).json({
+            success: false,
+            message: accessErr.message || 'You can only collect payment on invoices you can check out'
+          });
+        }
+      } else if (!(await employeeHasFullJobAccess(req.businessId))) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only collect outstanding on jobs you created or are assigned to, unless Employee full access to jobs is enabled'
+        });
+      }
     }
 
     const { getCardPaymentEnabled } = await import('../utils/onlinePaymentMode.js');

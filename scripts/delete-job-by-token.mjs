@@ -118,14 +118,17 @@ async function main() {
     }).lean();
 
     const whatsapp = await WhatsAppMessage.countDocuments({ businessId, jobId });
+    const jobIdStr = String(jobId);
     const notifications = await Notification.find({
       businessId,
-      $or: [
-        { refKey: { $regex: String(jobId) } },
-        { message: { $regex: opts.token } },
-        { title: { $regex: opts.token } },
-        { link: { $regex: String(jobId) } }
-      ]
+      refKey: {
+        $in: [
+          `job_received:booking:${jobIdStr}`,
+          `job_closed:booking:${jobIdStr}`,
+          `job_received:${jobIdStr}`,
+          `job_closed:${jobIdStr}`
+        ]
+      }
     })
       .select('_id type title refKey')
       .lean();

@@ -224,6 +224,7 @@ const allowAdminOrEmployeeForJobs = (req, res, next) => {
       p.startsWith('/packages') ||
       p.startsWith('/notifications') ||
       p.startsWith('/invoices') ||
+      p.startsWith('/credit') ||
       p.startsWith('/cars') ||
       p.startsWith('/expenses') ||
       p === '/expense-types' ||
